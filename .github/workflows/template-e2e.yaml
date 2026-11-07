@@ -19,7 +19,7 @@ permissions: {}
 
 jobs:
   validate-invalid:
-    if: ${{ github.repository == 'ajaykumar4/cluster-template' }}
+    if: ${{ github.repository == 'PsiACE/anylings' }}
     name: reject-invalid (${{ matrix.fixture }})
     runs-on: ubuntu-latest
     permissions:
@@ -71,7 +71,7 @@ jobs:
           uv run --quiet --locked --no-dev ./template/scripts/validate.py "$fixture" || true
 
   validator-tests:
-    if: ${{ github.repository == 'ajaykumar4/cluster-template' }}
+    if: ${{ github.repository == 'PsiACE/anylings' }}
     name: validator-tests
     runs-on: ubuntu-latest
     permissions:
@@ -91,7 +91,7 @@ jobs:
         run: uv run --quiet --locked pytest ./template/scripts/test_validate.py
 
   validate-valid:
-    if: ${{ github.repository == 'ajaykumar4/cluster-template' }}
+    if: ${{ github.repository == 'PsiACE/anylings' }}
     name: accept-valid (${{ matrix.fixture }})
     runs-on: ubuntu-latest
     permissions:

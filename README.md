@@ -23,7 +23,7 @@ A Kubernetes cluster deployed with [Talos Linux](https://github.com/siderolabs/t
 
 - Dev env managed w/ [mise](https://mise.jdx.dev/)
 - Workflow automation w/ [GitHub Actions](https://github.com/features/actions)
-- Dependency automation w/ [Renovate](https://www.mend.io/renovate)
+- AI-assisted reviews and dependency maintenance w/ [Landing](https://github.com/bubbuild/landing)
 
 Does this sound cool to you? If so, continue to read on! 👇
 
@@ -329,13 +329,25 @@ You don't need to re-bootstrap the cluster to add new nodes. Follow these steps:
 
 The node should join the cluster automatically and workloads will be scheduled once they report as ready.
 
-## 🤖 Renovate
+## 🤖 Landing
 
-[Renovate](https://www.mend.io/renovate) is a tool that automates dependency management. It is designed to scan your repository around the clock and open PRs for out-of-date dependencies it finds. Common dependencies it can discover are Helm charts, container images, GitHub Actions and more! In most cases merging a PR will cause ArgoCD to apply the update to your cluster.
+[Landing](https://github.com/bubbuild/landing) provides advisory PR reviews after native E2E checks, handles `/landing` delegations from authorized repository users, and proposes dependency updates. The workflows are adapted from [bubbuild/republic](https://github.com/bubbuild/republic/tree/2fa76b5407ba1cf035293121bfab9e782ea199f3/.github/workflows).
 
-To enable Renovate on GitHub, click the 'Configure' button over at their [Github app page](https://github.com/apps/renovate) and select your repository. On other Git providers you can [self-host Renovate](https://docs.renovatebot.com/getting-started/running/#self-hosting-renovate); note that fetching the shared preset in `.renovaterc.json5` requires a `GITHUB_COM_TOKEN`. Renovate creates a "Dependency Dashboard" as an issue in your repository, giving an overview of the status of all updates. The dashboard has interactive checkboxes that let you do things like advance scheduling or reattempt update PRs you closed without merging.
+Dependency maintenance runs weekly or through the **Landing duty** manual workflow. It can also handle dependency alerts and failures from the native **E2E** workflow. Updates are proposed as draft PRs; maintainers decide what to merge. Native checks remain authoritative, and model feedback failures do not block them. Fork PRs run native checks without Landing credentials.
 
-The base Renovate configuration in your repository can be viewed at [.renovaterc.json5](.renovaterc.json5). By default it is scheduled to be active with PRs every weekend, but you can [change the schedule to anything you want](https://docs.renovatebot.com/presets-schedule), or remove it if you want Renovate to open PRs immediately.
+Configure the following GitHub Actions settings:
+
+| Setting                   | Type     | Value                         |
+| ------------------------- | -------- | ----------------------------- |
+| `LANDING_API_KEY`         | Secret   | DeepSeek official API key     |
+| `LANDING_MODEL`           | Variable | `openai:deepseek-flash`       |
+| `LANDING_API_BASE`        | Variable | `https://api.deepseek.com/v1` |
+| `LANDING_CLIENT_ARGS`     | Variable | `{"api_format":"chat"}`       |
+| `LANDING_COMPLETION_ARGS` | Variable | `{"reasoning_effort":"high"}` |
+
+The OpenAI-compatible provider connects directly to DeepSeek; CI does not depend on a local Magpie gateway. Keep the key in Actions secrets, never in Git. Leaving `LANDING_MODEL` unset disables Landing jobs.
+
+By default, Landing uses the job-scoped `GITHUB_TOKEN`. Enable **Allow GitHub Actions to create and approve pull requests** in the repository's Actions settings so it can publish review feedback and dependency PRs. Do not copy a personal GitHub token into the workflow. Token-created candidates explicitly dispatch native E2E as described in [AGENTS.md](AGENTS.md), because those pushes do not trigger normal PR workflows.
 
 ## 🐛 Debugging
 
@@ -376,23 +388,11 @@ Below is a general guide on trying to debug an issue with an resource or applica
 
 Resolving problems that you have could take some tweaking of your YAML manifests in order to get things working, other times it could be a external factor like permissions on a NFS server. If you are unable to figure out your problem see the support sections below.
 
-## 🧹 Tidy up
+## Repository lifecycle
 
-Once your cluster is fully configured and you no longer need to run `just configure`, it's a good idea to clean up the repository by removing the [template](./template) directory and any files related to the templating process. This will help eliminate unnecessary clutter from the upstream template repository and resolve any "duplicate registry" warnings from Renovate.
+Anylings is a continuously maintained infrastructure repository, not a one-time template export. Keep `template/`, `pyproject.toml`, `uv.lock`, and the native E2E workflow in the repository: Landing reviews and dependency maintenance rely on them.
 
-1. Tidy up your repository:
-
-    ```sh
-    just template tidy
-    ```
-
-2. Push your changes to git:
-
-    ```sh
-    git add -A
-    git commit -m "chore: tidy up :broom:"
-    git push
-    ```
+**Do not run `just template tidy` in Anylings.** That inherited upstream command archives the template tooling and deletes its CI workflow. Post-tidy exports are not a supported Anylings configuration; Landing is not expected to work after that conversion.
 
 ## ❔ What's next
 

@@ -1,0 +1,54 @@
+default_stages = ["pre-commit"]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "format-just"
+name = "Format justfiles"
+language = "system"
+entry = '''bash -euc 'for f in "$@"; do just --justfile "$f" --fmt; done' --'''
+files = '(^|/)(justfile|\.justfile|[^/]+\.just)$'
+require_serial = true
+
+# Keep formatting and locking sequential: locking during a config rewrite can
+# remove tools from the lockfile.
+[[repos.hooks]]
+id = "mise"
+name = "Format and lock mise configuration"
+language = "system"
+entry = 'bash -euc "mise fmt && mise lock"'
+files = '^\.mise/(config\.toml|conf\.d/[^/]+\.toml)$'
+pass_filenames = false
+require_serial = true
+
+[[repos.hooks]]
+id = "format-json"
+name = "Format JSON"
+language = "system"
+entry = "oxfmt"
+files = '\.(json|json5|jsonc)$'
+# Lock sidecars are digest-pinned; formatting them invalidates the lockfile.
+exclude = '^\.mise/locks/'
+
+[[repos.hooks]]
+id = "format-markdown"
+name = "Format Markdown"
+language = "system"
+entry = "oxfmt"
+files = '\.(md|markdown|mdx)$'
+
+[[repos.hooks]]
+id = "format-yaml"
+name = "Format YAML"
+language = "system"
+entry = "oxfmt"
+files = '\.(yaml|yml)$'
+exclude = '^\.mise/locks/'
+
+[[repos.hooks]]
+id = "zizmor"
+name = "Check GitHub Actions"
+language = "system"
+entry = "zizmor --offline"
+files = '^\.github/(workflows/[^/]+\.yaml|actions/(.*/)?action\.yaml)$'

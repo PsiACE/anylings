@@ -90,6 +90,8 @@ These guidelines provide a strong baseline, but there are always exceptions and 
     mise install
     ```
 
+    Git hooks are managed by [prek](https://prek.j178.dev/) and installed automatically. Run `mise exec -- prek run --all-files` to check the repository manually. Review and stage formatter changes before committing again.
+
     📍 _**Having trouble installing the tools?** Try unsetting the `GITHUB_TOKEN` env var and then run these commands again_
 
     📍 _**Platforms:** `.mise/mise.lock` pins tool downloads for the platforms listed under `lockfile_platforms` in `.mise/config.toml`: Linux and macOS on amd64 and arm64 (`linux-x64`, `linux-arm64`, `macos-x64`, `macos-arm64`). If you also need musl (e.g. Alpine) or Windows, add the platform to that list (`linux-x64-musl`, `linux-arm64-musl`, `windows-x64`), run `mise lock`, and commit both files. Your own platform is always locked, even when it is not in the list._

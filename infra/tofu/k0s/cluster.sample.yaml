@@ -1,0 +1,23 @@
+---
+# Explicit native-host profile. Run only on a dedicated, authorized Linux host.
+# For remote hosts, replace localhost with k0sctl ssh/openSSH connection settings.
+apiVersion: k0sctl.k0sproject.io/v1beta1
+kind: Cluster
+metadata:
+  name: anylings
+spec:
+  hosts:
+    - role: controller+worker
+      noTaints: true
+      localhost:
+        enabled: true
+  k0s:
+    version: v1.37.2+k0s.0
+    config:
+      apiVersion: k0s.k0sproject.io/v1beta1
+      kind: ClusterConfig
+      metadata:
+        name: anylings
+      spec:
+        telemetry:
+          enabled: false

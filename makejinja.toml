@@ -1,11 +1,14 @@
 [makejinja]
-inputs = ["./template/overrides","./template/config"]
-output = "./"
-exclude_patterns = ["*.partial.yaml.j2"]
+inputs = ["./template/config"]
+# Isolated by default; `just template render` passes ANYLINGS_OUTPUT_DIR
+# explicitly, and no generated file is written to the repository root.
+output = "./.local/rendered"
 import_paths = ["./template/scripts"]
 loaders = ["plugin:Plugin"]
 jinja_suffix = ".j2"
-copy_metadata = true
+# Copying metadata would impose the template's modes on rendered files and
+# undo the render recipe's umask; generated secrets must stay 0600/0700.
+copy_metadata = false
 force = true
 undefined = "strict"
 

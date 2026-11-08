@@ -1,0 +1,50 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+# No deletion finalizer on Argo itself, matching Autopilot. Normal sync prunes.
+metadata:
+  name: argo
+  namespace: #{ argocd.namespace }#
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    argocd.argoproj.io/instance: argo
+spec:
+  project: default
+  sources:
+    - repoURL: #{ repository.url }#
+      targetRevision: #{ repository.branch }#
+      ref: repo
+    - repoURL: ghcr.io/argoproj/argo-helm
+      chart: argo-cd
+      # Same value bootstrap.sh installs with.
+      targetRevision: #{ argocd.chart_version }#
+      helm:
+        releaseName: argo-cd
+        valueFiles:
+          - $repo/#{ repository_path('kubernetes/apps/argo-system/argo-cd/values.yaml') }#
+  destination:
+    name: in-cluster
+    namespace: #{ argocd.namespace }#
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: true
+    retry:
+      limit: 1
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      # Argo CRDs exceed the client-side last-applied annotation limit.
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      jsonPointers:
+        - /status

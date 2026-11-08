@@ -1,59 +1,41 @@
 fullnameOverride: "argocd"
 crds:
   install: true
-  # -- Keep CRDs on chart uninstall
-  keep: false
+  # Keep CRDs on chart uninstall; Argo is the platform's anchor and its CRDs
+  # outlive any release.
+  keep: true
 configs:
   params:
     server.insecure: true
     controller.diff.server.side: true
+  # Argo CD's SSH known-hosts ConfigMap. Without it a private ssh://
+  # repository fails host verification, even though the same keys are also
+  # pinned in the repository secret.
+  ssh:
+    knownHosts: |
+      #% filter indent(width=6, first=False) %#
+      #{ repository.known_hosts }#
+      #% endfilter %#
   cm:
-    statusbadge.enabled: true
     kustomize.buildOptions: "--enable-alpha-plugins --enable-exec"
     helm.valuesFileSchemes: >-
       secrets+gpg-import, secrets+gpg-import-kubernetes,
       secrets+age-import, secrets+age-import-kubernetes,
       secrets, secrets+literal,
       https
-    resource.exclusions: |
-      - apiGroups:
-          - cilium.io
-        kinds:
-          - CiliumIdentity
-        clusters:
-          - "*"
 controller:
-  replicas: 2
-  metrics:
-    enabled: true
-    applicationLabels:
-      enabled: true
-    serviceMonitor: &service-monitor
-      enabled: true
-      additionalLabels:
-        release: kube-prometheus-stack
+  replicas: 1
 dex:
-  replicas: 2
-  metrics:
-    enabled: true
-    serviceMonitor: *service-monitor
+  enabled: false
 redis:
-  metrics:
-    enabled: true
-    serviceMonitor: *service-monitor
+  enabled: true
 server:
-  replicas: 2
+  replicas: 1
   allowAnyNamespace: true
-  metrics:
-    enabled: true
-    serviceMonitor: *service-monitor
 notifications:
-  replicas: 2
-  metrics:
-    enabled: true
-    serviceMonitor: *service-monitor
+  enabled: false
 repoServer:
-  replicas: 2
+  replicas: 1
   serviceAccount:
     create: true
     name: argocd-repo-server
@@ -95,13 +77,14 @@ repoServer:
   volumes:
     - name: custom-tools
       emptyDir: {}
-    # kubectl create secret generic helm-secrets-private-keys --from-file=key.asc=assets/gpg/private2.gpg
     - name: helm-secrets-private-keys
       secret:
         secretName: helm-secrets-private-keys
   volumeMounts:
     - mountPath: /custom-tools
       name: custom-tools
+    # Keep the image's real /usr/local/bin/helm intact. The wrapper runs
+    # earlier on PATH and delegates to HELM_SECRETS_HELM_PATH above.
     - mountPath: /usr/local/sbin/helm
       subPath: helm
       name: custom-tools
@@ -113,10 +96,11 @@ repoServer:
       subPath: ksops
     - mountPath: /helm-secrets-private-keys/
       name: helm-secrets-private-keys
+      readOnly: true
   initContainers:
     - name: gitops-tools
       image: ghcr.io/ajaykumar4/gitops-tools:2026.10.0
-      imagePullPolicy: Always
+      imagePullPolicy: IfNotPresent
       command: [sh, -ec]
       args:
         - |

@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Bootstrap the shared platform into an existing cluster.
+#
+#   bootstrap.sh render    render the install manifests for inspection
+#   bootstrap.sh install   first install only: namespace, age key, Argo CD
+#   bootstrap.sh wait      wait for the first install to become ready
+#
+# install/wait require an explicit KUBECONFIG and ANYLINGS_CONTEXT; they never
+# fall back to the default kube context.
+#
+# Rendering and first install only. `install` renders with `helm template` and
+# applies the result, so no Helm release is persisted and no CRD is annotated
+# with meta.helm.sh/release-* ownership: Argo CD then owns the chart through
+# its self-managed Application. An existing Argo install, tracked or not, is
+# rejected instead of being overwritten.
+#
+# Nothing containing plaintext secrets is written next to the sources: the
+# render tree is created under a private temp dir and removed on exit.
+set -euo pipefail
+umask 077
+
+BOOTSTRAP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RENDERED_DIR="$(dirname "$BOOTSTRAP_DIR")"
+KUBERNETES_DIR="$RENDERED_DIR/kubernetes"
+
+ARGOCD_CHART="oci://ghcr.io/argoproj/argo-helm/argo-cd"
+# The same value the self-managed Application uses, so bootstrap and steady
+# state cannot drift.
+ARGOCD_VERSION="#{ argocd.chart_version }#"
+ARGOCD_NAMESPACE="#{ argocd.namespace }#"
+ARGOCD_RELEASE="argo-cd"
+SECRETS_KEY_MANIFEST="$BOOTSTRAP_DIR/helm-secrets-private-keys.sops.yaml"
+REPOSITORY_SECRET="$KUBERNETES_DIR/bootstrap/repositories/repository.sops.yaml"
+
+# The rendered creation rules live at the output root; never depend on the
+# caller's working directory or a repository-root .sops.yaml.
+SOPS_ARGS=()
+if [[ -f "$RENDERED_DIR/.sops.yaml" ]]; then
+  SOPS_ARGS=(--config "$RENDERED_DIR/.sops.yaml")
+fi
+
+log() { printf '[bootstrap] %s\n' "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+# Every temp path is absolute, 0700 (directory) / 0600 (files), and removed on
+# exit. Nothing is written next to the tracked sources.
+TMP_ROOT=""
+cleanup() {
+  if [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" ]]; then
+    chmod -R u+rwX "$TMP_ROOT" 2>/dev/null || true
+    rm -rf "$TMP_ROOT"
+  fi
+}
+trap cleanup EXIT
+
+# Create (and remember) the single private directory this invocation uses.
+new_private_dir() {
+  TMP_ROOT="$(mktemp -d)" || die "could not create a temp dir"
+  chmod 700 "$TMP_ROOT"
+}
+
+# Decrypt a SOPS file into the private temp dir. Failure is fatal: continuing
+# with a half-decrypted values file silently installs the wrong configuration.
+sops_decrypt_to() {
+  local src="$1" dest="$2"
+  if ! sops "${SOPS_ARGS[@]}" --decrypt --input-type yaml --output-type yaml \
+    "$src" > "$dest"; then
+    die "could not decrypt $src"
+  fi
+  if [[ ! -s "$dest" ]]; then
+    die "decrypting $src produced an empty file"
+  fi
+  chmod 600 "$dest"
+}
+
+require_context() {
+  [[ -n "${KUBECONFIG:-}" ]] || die "KUBECONFIG must be set explicitly"
+  [[ -n "${ANYLINGS_CONTEXT:-}" ]] || die "ANYLINGS_CONTEXT must be set explicitly"
+  [[ -f "$KUBECONFIG" ]] || die "KUBECONFIG must name one existing kubeconfig file"
+  require kubectl
+  kubectl --context "$ANYLINGS_CONTEXT" version >/dev/null 2>&1 ||
+    die "cannot reach context $ANYLINGS_CONTEXT"
+}
+
+# Render argocd.yaml, crds.yaml and namespace.yaml into dir. The chart values
+# carry no credentials, so this output is safe to inspect; every decrypted
+# secret lives in a separate private temp dir.
+render_manifests() {
+  local dir="$1"
+  require helm
+  require sops
+  require yq
+  local values_dir="$KUBERNETES_DIR/apps/argo-system/argo-cd"
+  [[ -f "$values_dir/values.yaml" ]] || die "missing rendered $values_dir/values.yaml"
+
+  # Values are rendered in the clear (no credentials live in them); any
+  # *.sops.yaml a user adds next to them is decrypted into the private dir.
+  local values=() f
+  for f in "$values_dir"/values*.yaml; do
+    case "$f" in
+      *.sops.yaml)
+        sops_decrypt_to "$f" "$dir/$(basename "${f%.yaml}").decrypted.yaml"
+        values+=(-f "$dir/$(basename "${f%.yaml}").decrypted.yaml")
+        ;;
+      *) values+=(-f "$f") ;;
+    esac
+  done
+
+  cat > "$dir/namespace.yaml" <<EOF
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $ARGOCD_NAMESPACE
+  labels:
+    app.kubernetes.io/part-of: argocd
+EOF
+
+  # CRDs are rendered separately so install can apply them first, and so a
+  # reviewer can see them without a cluster.
+  helm template "$ARGOCD_RELEASE" "$ARGOCD_CHART" \
+    --version "$ARGOCD_VERSION" \
+    --namespace "$ARGOCD_NAMESPACE" \
+    --include-crds \
+    "${values[@]}" |
+    yq eval-all 'select(.kind == "CustomResourceDefinition")' - \
+      > "$dir/crds.yaml" ||
+    die "could not render CRDs from $ARGOCD_CHART $ARGOCD_VERSION"
+
+  helm template "$ARGOCD_RELEASE" "$ARGOCD_CHART" \
+    --version "$ARGOCD_VERSION" \
+    --namespace "$ARGOCD_NAMESPACE" \
+    "${values[@]}" > "$dir/argocd.yaml" ||
+    die "could not render $ARGOCD_CHART $ARGOCD_VERSION"
+
+  grep -q '^kind: CustomResourceDefinition' "$dir/crds.yaml" ||
+    die "render produced no Argo CD CRDs"
+  chmod 600 "$dir"/*.yaml
+}
+
+# Manifests are rendered chart output, not template source: they are not
+# format-checked and must not be committed. Keep them outside rendered output.
+cmd_render() {
+  local dir="${ANYLINGS_BOOTSTRAP_MANIFESTS_DIR:-$(dirname "$RENDERED_DIR")/bootstrap-manifests}" protected
+  [[ "$(realpath -ms -- "$dir")" == "$(realpath -m -- "$dir")" ]] \
+    || die "refusing a symlinked manifests directory"
+  dir="$(realpath -m -- "$dir")"
+  case "$dir/" in "$RENDERED_DIR/"*) die "manifests must stay outside rendered output" ;; esac
+  for protected in "$HOME" "$RENDERED_DIR" "$PWD" /tmp /var /usr /etc; do
+    case "$protected/" in "$dir/"*) die "refusing unsafe manifests directory: $dir" ;; esac
+  done
+  if [[ -e "$dir" ]]; then
+    [[ -d "$dir" && "$(stat -c '%u' "$dir")" == "$(id -u)" ]] \
+      || die "manifests directory must belong to the invoking user"
+    [[ ! -L "$dir/.anylings-bootstrap-manifests" ]] || die "symlinked manifests marker"
+    if [[ ! -f "$dir/.anylings-bootstrap-manifests" && -n "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+      die "refusing nonempty unowned manifests directory: $dir"
+    fi
+    # Never write through a file symlink, even in a previously owned directory.
+    [[ -z "$(find "$dir" -maxdepth 1 -type l -print -quit)" ]] || die "symlink in manifests directory"
+  fi
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  touch "$dir/.anylings-bootstrap-manifests"
+  render_manifests "$dir"
+  log "rendered manifests into $dir (mode 0700)"
+  log "CRDs: $(grep -c '^kind: CustomResourceDefinition' "$dir/crds.yaml")"
+  log "treat rendered manifests as sensitive; never commit or upload them"
+}
+
+# An existing Argo CD is detected by workload and CRD, not only by a Helm
+# release: an install made by another tool must not be overwritten either.
+existing_argo_install() {
+  local reason=""
+  if helm --kube-context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    list --filter "^$ARGOCD_RELEASE\$" --short 2>/dev/null | grep -q .; then
+    reason="a Helm release named $ARGOCD_RELEASE exists"
+  elif kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    get deployment argocd-server >/dev/null 2>&1; then
+    reason="deployment/argocd-server exists in $ARGOCD_NAMESPACE"
+  elif kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    get statefulset argocd-application-controller >/dev/null 2>&1; then
+    reason="statefulset/argocd-application-controller exists in $ARGOCD_NAMESPACE"
+  fi
+  if [[ -z "$reason" ]] && kubectl --context "$ANYLINGS_CONTEXT"     get crd applications.argoproj.io >/dev/null 2>&1; then
+    reason="Argo CD CRDs already exist in this cluster"
+  fi
+  [[ -z "$reason" ]] || printf '%s\n' "$reason"
+}
+
+cmd_install() {
+  require sops
+  require_context
+  [[ -f "$SECRETS_KEY_MANIFEST" ]] || die "missing $SECRETS_KEY_MANIFEST"
+
+  local reason
+  reason="$(existing_argo_install)"
+  if [[ -n "$reason" ]]; then
+    die "Argo CD is already installed ($reason); let Argo CD reconcile the repository"
+  fi
+
+  # Install renders only into a private temp dir: the repository copy of
+  # bootstrap/ must never hold applied manifests.
+  new_private_dir
+  local dir="$TMP_ROOT"
+  render_manifests "$dir"
+
+  # The repo-server needs the age identity before its first Helm render. The
+  # plaintext exists only in the private temp dir.
+  sops_decrypt_to "$SECRETS_KEY_MANIFEST" "$dir/helm-secrets-private-keys.yaml"
+
+  kubectl --context "$ANYLINGS_CONTEXT" apply --server-side \
+    --filename "$dir/namespace.yaml"
+  kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    apply --server-side --filename "$dir/helm-secrets-private-keys.yaml"
+
+  # A private repository cannot be cloned to fetch its own deploy key: the
+  # rendered repository credential is installed here, before Argo CD tries to
+  # sync. Argo CD owns it from then on.
+  if [[ -f "$REPOSITORY_SECRET" ]]; then
+    sops_decrypt_to "$REPOSITORY_SECRET" "$dir/repository.yaml"
+    kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+      apply --server-side --filename "$dir/repository.yaml"
+  fi
+
+  kubectl --context "$ANYLINGS_CONTEXT" apply --server-side \
+    --filename "$dir/crds.yaml"
+
+  # Plain kubectl, no Helm release: the CRDs and workloads carry no
+  # meta.helm.sh ownership annotations, so Argo CD's self-managed Application
+  # can adopt them without a Helm ownership conflict.
+  kubectl --context "$ANYLINGS_CONTEXT" apply --server-side \
+    --filename "$dir/argocd.yaml"
+
+  log "first install applied; Argo CD now reconciles the Git repository"
+}
+
+cmd_wait() {
+  require_context
+  kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    rollout status deployment/argocd-server --timeout=10m >/dev/null
+  kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    rollout status deployment/argocd-repo-server --timeout=10m >/dev/null
+  kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    rollout status statefulset/argocd-application-controller --timeout=10m >/dev/null
+  kubectl --context "$ANYLINGS_CONTEXT" --namespace "$ARGOCD_NAMESPACE" \
+    rollout status deployment/argocd-applicationset-controller --timeout=10m >/dev/null
+  kubectl --context "$ANYLINGS_CONTEXT" wait \
+    --for=condition=Established --timeout=10m \
+    customresourcedefinition/applications.argoproj.io \
+    customresourcedefinition/appprojects.argoproj.io \
+    customresourcedefinition/applicationsets.argoproj.io >/dev/null
+  log "Argo CD is ready in $ARGOCD_NAMESPACE"
+}
+
+case "${1:-}" in
+  render) cmd_render ;;
+  install) cmd_install ;;
+  wait) cmd_wait ;;
+  *) die "usage: bootstrap.sh render|install|wait" ;;
+esac

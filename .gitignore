@@ -1,17 +1,19 @@
-# Secrets
+# Secrets and isolated state: never committed
 *.pub
 *.key
 *.decrypted~*.yaml
+/.local/
 /age.key
+/argo-webhook-token.txt
 /cloudflare-tunnel.json
 /deploy.key
 /deploy.key.pub
-/argo-webhook-token.txt
 # Template config files
 /cluster.toml
+# Bootstrap render artifacts may contain sensitive material; never committed
+/bootstrap/manifests/
 # Kubernetes
 kubeconfig
-talosconfig
 # Python
 __pycache__/
 *.py[cod]
@@ -20,6 +22,13 @@ __pycache__/
 .private/
 .venv/
 .DS_Store
-Thumbs.db
-/talos/output/
-/talos/rendered/
+# OpenTofu provider caches, local state and saved plans
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+
+# Rendered chart output produced by bootstrap.sh render; never committed
+/manifests/

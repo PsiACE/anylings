@@ -1,3 +1,8 @@
+# Encrypted Helm values for the echo workload. This file is the carrier for
+# any application secret; it is encrypted as a whole file (values, not keys)
+# and rendered through the helm-secrets wrapper in the Argo CD repo-server.
+# Keeping the file encrypted even while it holds no secret means the pipeline
+# that delivers real secrets is exercised on every run.
 controllers:
   echo:
     strategy: RollingUpdate
@@ -5,12 +10,11 @@ controllers:
       app:
         image:
           repository: ghcr.io/mendhak/http-https-echo
-          tag: 42
+          tag: "42"
         env:
-          HTTP_PORT: &port 80
+          HTTP_PORT: &port 8080
           LOG_WITHOUT_NEWLINE: true
           LOG_IGNORE_PATH: /healthz
-          PROMETHEUS_ENABLED: true
         probes:
           liveness: &probes
             enabled: true
@@ -43,18 +47,3 @@ service:
     ports:
       http:
         port: *port
-serviceMonitor:
-  app:
-    endpoints:
-      - port: http
-route:
-  app:
-    hostnames: ["echo.#{ domain.name }#"]
-    parentRefs:
-      - name: envoy-external
-        namespace: network
-        sectionName: https
-    rules:
-      - backendRefs:
-          - identifier: app
-            port: *port

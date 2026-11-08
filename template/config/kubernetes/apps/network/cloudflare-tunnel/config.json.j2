@@ -1,0 +1,11 @@
+#% if ingress.mode == 'cloudflare-tunnel' %#
+{
+  "appName": "cloudflare-tunnel",
+  "namespace": "network",
+  "chartRepo": "ghcr.io/bjw-s-labs/helm",
+  "chart": "app-template",
+  "chartVersion": "5.3.0",
+  "valuesFile": #{ repository_path('kubernetes/apps/network/cloudflare-tunnel/values.sops.yaml') | tojson }#,
+  "manifestPath": #{ repository_path('kubernetes/apps/network/cloudflare-tunnel') | tojson }#
+}
+#% endif %#

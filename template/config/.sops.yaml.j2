@@ -1,10 +1,10 @@
 ---
+# Every *.sops.* file under bootstrap/ and kubernetes/ is encrypted as a
+# whole file. Do NOT add an encrypted_regex here: scoping encryption to
+# data/stringData left Helm values keys (e.g. Argo CD's githubSecret) in
+# plaintext, because a Helm values file is not a Kubernetes Secret.
 creation_rules:
-  - path_regex: talos/.*\.sops\.ya?ml
-    mac_only_encrypted: true
-    age: "#{ age_key('public') }#"
   - path_regex: (bootstrap|kubernetes)/.*\.sops\.ya?ml
-    encrypted_regex: "^(data|stringData)$"
     mac_only_encrypted: true
     age: "#{ age_key('public') }#"
 stores:

@@ -1,0 +1,39 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: kubernetes
+  namespace: #{ argocd.namespace }#
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  # Only Applications created in the Argo namespace can use this project.
+  # This is a trusted platform repository, not a tenant security boundary.
+  sourceNamespaces:
+    - #{ argocd.namespace }#
+  # Only this repository and the pinned chart registries this template uses.
+  sourceRepos:
+    - #{ repository.url }#
+    - ghcr.io/argoproj/argo-helm
+    - ghcr.io/bjw-s-labs/helm
+    - ghcr.io/stakater/charts
+  destinations:
+    - name: in-cluster
+      namespace: "#{ argocd.namespace }#"
+    - name: in-cluster
+      namespace: default
+    - name: in-cluster
+      namespace: kube-system
+    - name: in-cluster
+      namespace: network
+  # Permit the cluster-scoped kinds used by Argo and reloader, not provider
+  # networking, Nodes or persistent storage resources.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding

@@ -1,4 +1,8 @@
+#% if ingress.mode == 'cloudflare-tunnel' %#
 ---
+# Optional egress-only ingress. Routes and DNS records are owned by the
+# OpenTofu cloudflare root, so this file only runs cloudflared with the tunnel
+# token read from the configured file; no ingress rules are rendered here.
 controllers:
   cloudflare-tunnel:
     strategy: RollingUpdate
@@ -8,16 +12,15 @@ controllers:
       app:
         image:
           repository: docker.io/cloudflare/cloudflared
-          tag: 2026.10.0
+          tag: "2026.10.0"
         env:
-          NO_AUTOUPDATE: true
+          NO_AUTOUPDATE: "true"
           TUNNEL_METRICS: 0.0.0.0:8080
-          TUNNEL_POST_QUANTUM: true # disable when using http2
-          TUNNEL_TRANSPORT_PROTOCOL: quic # or http2
+          TUNNEL_TRANSPORT_PROTOCOL: quic
         envFrom:
           - secretRef:
               name: cloudflare-tunnel-secret
-        args: ["tunnel", "run"]
+        args: ["tunnel", "--no-autoupdate", "run"]
         probes:
           liveness: &probes
             enabled: true
@@ -50,25 +53,4 @@ service:
     ports:
       http:
         port: *port
-serviceMonitor:
-  app:
-    endpoints:
-      - port: http
-configMaps:
-  config:
-    data:
-      config.yaml: |-
-        ingress:
-          - hostname: "*.#{ domain.name }#"
-            originRequest:
-              http2Origin: true
-              originServerName: "external.#{ domain.name }#"
-            service: https://envoy-external.{{ .Release.Namespace }}.svc.cluster.local:443
-          - service: http_status:404
-persistence:
-  config-file:
-    type: configMap
-    identifier: config
-    globalMounts:
-      - path: /etc/cloudflared/config.yaml
-        subPath: config.yaml
+#% endif %#

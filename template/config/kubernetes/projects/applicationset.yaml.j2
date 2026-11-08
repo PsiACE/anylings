@@ -1,0 +1,57 @@
+---
+# Adapted from Argo CD Autopilot's project + Git-file-generator pattern.
+# config.json is application metadata, not a Kubernetes manifest or a secret.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: kubernetes
+  namespace: #{ argocd.namespace }#
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: #{ repository.url }#
+        revision: #{ repository.branch }#
+        files:
+          - path: #{ repository_path('kubernetes/apps/*/*/config.json') }#
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+  template:
+    metadata:
+      name: "{{ .appName }}"
+      namespace: #{ argocd.namespace }#
+    spec:
+      project: kubernetes
+      sources:
+        - repoURL: #{ repository.url }#
+          targetRevision: #{ repository.branch }#
+          ref: repo
+          # Empty for values-only sources; tunnel also renders its KSOPS Secret.
+          path: "{{ .manifestPath }}"
+        - repoURL: "{{ .chartRepo }}"
+          chart: "{{ .chart }}"
+          targetRevision: "{{ .chartVersion }}"
+          helm:
+            releaseName: "{{ .appName }}"
+            valueFiles:
+              - "$repo/{{ .valuesFile }}"
+      destination:
+        name: in-cluster
+        namespace: "{{ .namespace }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: true
+        retry:
+          limit: 1
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 3m
+        syncOptions:
+          - CreateNamespace=true
+          - ApplyOutOfSyncOnly=true
+          - ServerSideApply=true
+          - PruneLast=true

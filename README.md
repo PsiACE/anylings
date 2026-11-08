@@ -1,468 +1,202 @@
-> **Anylings** was forked from [ajaykumar4/cluster-template](https://github.com/ajaykumar4/cluster-template) at commit [`83e79b8bee6280fe36c7fae38b0718722f46335f`](https://github.com/ajaykumar4/cluster-template/commit/83e79b8bee6280fe36c7fae38b0718722f46335f) as the starting point for refactoring and adaptation to Anylings’ infrastructure requirements. The complete upstream history is preserved.
-
-# ⛵ Cluster Template
-
-Welcome to my template designed for deploying a single Kubernetes cluster. Whether you're setting up a cluster at home on bare-metal or virtual machines (VMs), this project aims to simplify the process and make Kubernetes more accessible. This template is inspired by my personal [home-ops](https://github.com/onedr0p/home-ops) repository, providing a practical starting point for anyone interested in managing their own Kubernetes environment.
-
-At its core, this project leverages [makejinja](https://github.com/mirkolenz/makejinja), a powerful tool for rendering templates. By reading the [cluster.toml](./cluster.sample.toml) configuration file—validated and defaulted by [pydantic](https://docs.pydantic.dev/)—Makejinja generates the necessary configurations to deploy a Kubernetes cluster with the following features:
-
-- Easy configuration through a single TOML file.
-- Compatibility with home setups, whether on physical hardware or VMs.
-- A modular and extensible approach to cluster deployment and management.
-
-With this approach, you'll gain a solid foundation to build and manage your Kubernetes cluster efficiently.
-
-## ✨ Features
-
-A Kubernetes cluster deployed with [Talos Linux](https://github.com/siderolabs/talos) and an opinionated implementation of [ArgoCD](https://github.com/argoproj/argo-cd) syncing from the Git provider of your choice (GitHub, GitLab, Gitea, Forgejo, Codeberg or self-hosted), [SOPS](https://github.com/getsops/sops) with [ksops](https://github.com/viaduct-ai/kustomize-sops) and [helm-secrets](https://github.com/jkroepke/helm-secrets) to manage secrets, and [cloudflared](https://github.com/cloudflare/cloudflared) to access applications external to your local network.
-
-- **Required:** Some knowledge of [Containers](https://opencontainers.org/), [YAML](https://noyaml.com/), [Git](https://git-scm.com/), and a **domain**. Exposing apps to the public internet requires a **Cloudflare account**; internal-only clusters don't.
-- **Included components:** [argocd](https://github.com/argoproj/argo-cd), [cilium](https://github.com/cilium/cilium), [cert-manager](https://github.com/cert-manager/cert-manager), [spegel](https://github.com/spegel-org/spegel), [reloader](https://github.com/stakater/Reloader), [envoy-gateway](https://github.com/envoyproxy/gateway), [external-dns](https://github.com/kubernetes-sigs/external-dns) and [cloudflared](https://github.com/cloudflare/cloudflared).
-
-**Other features include:**
-
-- Dev env managed w/ [mise](https://mise.jdx.dev/)
-- Workflow automation w/ [GitHub Actions](https://github.com/features/actions)
-- AI-assisted reviews and dependency maintenance w/ [Landing](https://github.com/bubbuild/landing)
-
-Does this sound cool to you? If so, continue to read on! 👇
-
-## 🚀 Let's Go!
-
-There are **6 stages** outlined below for completing this project, make sure you follow the stages in order.
-
-### Stage 1: Hardware Configuration
-
-For a **stable** and **high-availability** production Kubernetes cluster, hardware selection is critical. NVMe/SSDs are strongly preferred over HDDs, and **Bare Metal is strongly recommended** over virtualized platforms like Proxmox.
-
-Using **enterprise NVMe or SATA SSDs on Bare Metal** (even used drives) provides the most reliable performance and rock-solid stability. Consumer **NVMe or SATA SSDs**, on the other hand, carry risks such as latency spikes, corruption, and fsync delays, particularly in multi-node setups.
-
-**Proxmox with enterprise drives can work** for testing or carefully tuned production clusters, but it introduces additional layers of potential I/O contention — especially if consumer drives are used. Any **replicated storage** (e.g., Rook-Ceph, Longhorn) should always use **dedicated disks separate from control plane and etcd nodes** to ensure reliability. Worker nodes are more flexible, but risky configurations should still be avoided for stateful workloads to maintain cluster stability.
-
-These guidelines provide a strong baseline, but there are always exceptions and nuances. The best way to ensure your hardware configuration works is to **test it thoroughly and benchmark performance** under realistic workloads.
-
-### Stage 2: Machine Preparation
-
-> [!IMPORTANT]
-> If you have **3 or more nodes** it is recommended to make 3 of them controller nodes for a highly available control plane. This project configures **all nodes** to be able to run workloads. **Worker nodes** are therefore **optional**.
->
-> **Minimum system requirements**
->
-> | Role           | Cores | Memory | System Disk    |
-> | -------------- | ----- | ------ | -------------- |
-> | Control/Worker | 4     | 16GB   | 256GB SSD/NVMe |
-
-1. Head over to the [Talos Linux Image Factory](https://factory.talos.dev) and follow the instructions. Be sure to only choose the **bare-minimum system extensions** as some might require additional configuration and prevent Talos from booting without it. Depending on your CPU start with the Intel/AMD system extensions (`i915`, `intel-ucode` & `mei` **or** `amdgpu` & `amd-ucode`), you can always add system extensions after Talos is installed and working.
-
-2. This will eventually lead you to download a Talos Linux ISO (or for SBCs a RAW) image. Make sure to note the **schematic ID** you will need this later on.
-
-3. Flash the Talos ISO or RAW image to a USB drive and boot from it on your nodes.
-
-4. Verify with `nmap` that your nodes are available on the network. (Replace `192.168.1.0/24` with the network your nodes are on.)
-
-    ```sh
-    nmap -Pn -n -p 50000 192.168.1.0/24 -vv | grep 'Discovered'
-    ```
-
-### Stage 3: Local Workstation
-
-> [!TIP]
-> It is recommended to set the visibility of your repository to `Public` so you can easily request help if you get stuck.
-
-1. Create a new repository by clicking the green `Use this template` button at the top of this page, then clone the new repo you just created and `cd` into it. Alternatively you can use the [GitHub CLI](https://cli.github.com/) ...
-
-    ```sh
-    export REPONAME="home-ops"
-    gh repo create $REPONAME --template ajaykumar4/cluster-template --public --clone
-    cd $REPONAME
-    ```
-
-    📍 _**Not using GitHub?** Any Git provider works (GitLab, Gitea, Forgejo, Codeberg or self-hosted). Create an empty repository on your provider, download this template with `git clone --depth 1 https://github.com/ajaykumar4/cluster-template`, re-initialize it with `git init` and push it to your repository._
-
-2. **Install** the [Mise CLI](https://mise.jdx.dev/getting-started.html#installing-mise-cli) on your local workstation.
-
-3. **Activate** Mise in your shell by following the [activation guide](https://mise.jdx.dev/getting-started.html#activate-mise).
-
-4. Use `mise` to install the **required** CLI tools:
-
-    ```sh
-    mise trust
-    mise install
-    ```
-
-    Git hooks are managed by [prek](https://prek.j178.dev/) and installed automatically. Run `mise exec -- prek run --all-files` to check the repository manually. Review and stage formatter changes before committing again.
-
-    📍 _**Having trouble installing the tools?** Try unsetting the `GITHUB_TOKEN` env var and then run these commands again_
-
-    📍 _**Platforms:** `.mise/mise.lock` pins tool downloads for the platforms listed under `lockfile_platforms` in `.mise/config.toml`: Linux and macOS on amd64 and arm64 (`linux-x64`, `linux-arm64`, `macos-x64`, `macos-arm64`). If you also need musl (e.g. Alpine) or Windows, add the platform to that list (`linux-x64-musl`, `linux-arm64-musl`, `windows-x64`), run `mise lock`, and commit both files. Your own platform is always locked, even when it is not in the list._
-
-5. Logout of the GitHub Container Registry as this may cause authorization problems in future steps when using the public registry:
-
-    ```sh
-    docker logout ghcr.io
-    helm registry logout ghcr.io
-    ```
-
-### Stage 4: Cloudflare configuration
-
-> [!TIP]
-> **Internal-only cluster?** Set `provider = "none"` under `[dns]` in `cluster.toml` and skip this stage entirely: no Cloudflare account, API token, or `cloudflare-tunnel.json` is needed. Nothing is exposed to the internet, apps are reachable on your LAN via the internal gateway, and the wildcard certificate is issued by an in-cluster self-signed CA instead of Let's Encrypt.
-
-> [!WARNING]
-> If any of the commands fail with `command not found` or `unknown command` it means `mise` is either not installed, activated or it could be configured incorrectly.
-
-1. Create a Cloudflare API token for use with cloudflared and external-dns by reviewing the official [documentation](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/) and following the instructions below.
-
-    - Click the blue `Use template` button for the `Edit zone DNS` template.
-    - Name your token `kubernetes`
-    - Under `Permissions`, click `+ Add More` and add permissions `Zone - DNS - Edit` and `Account - Cloudflare Tunnel - Read`
-    - Limit the permissions to a specific account and/or zone resources and then click `Continue to Summary` and then `Create Token`.
-    - **Save this token somewhere safe**, you will need it later on.
-
-2. Create the Cloudflare Tunnel:
-
-    ```sh
-    cloudflared tunnel login
-    cloudflared tunnel create --credentials-file cloudflare-tunnel.json kubernetes
-    ```
-
-    📍 _**Prefer port-forwarding over a tunnel?** Set `mode = "direct"` under `[ingress]` in `cluster.toml` and skip this step: no `cloudflare-tunnel.json` is needed. Instead, forward TCP 443 (and optionally 80) on your router to the `gateways.external` IP, and create an `external.<domain>` DNS record yourself pointing at your WAN address (an A record, or a CNAME to a DDNS hostname). Per-app records are still published automatically._
-
-### Stage 5: Cluster configuration
-
-1. Generate the config files from the sample files:
-
-    ```sh
-    just init
-    ```
-
-2. Fill out the `cluster.toml` configuration file using the comments in it as a guide. Editors with TOML schema support (VS Code's Even Better TOML, taplo in Neovim) pick up the `#:schema` directive at the top of the file and provide completion and inline validation.
-
-3. Template out the kubernetes and talos configuration files, if any issues come up be sure to read the error and adjust your config files accordingly.
-
-    ```sh
-    just configure
-    ```
-
-4. Push your changes to git:
-
-    📍 _**Verify** all the `./bootstrap/**/*.sops.*`, `./kubernetes/**/*.sops.*` and `./talos/secrets.sops.yaml` files are **encrypted** with SOPS_
-
-    ```sh
-    git add -A
-    git commit -m "chore: initial commit :rocket:"
-    git push
-    ```
-
-> [!TIP]
-> Using a **private repository** (an `ssh://` URL in `cluster.toml`)? Make sure to paste the public key from `deploy.key.pub` into the deploy keys section of your repository settings (GitHub: `Settings/Deploy keys`, GitLab: `Settings/Repository/Deploy keys`, Gitea/Forgejo: `Settings/Deploy keys`). This will make sure ArgoCD has read/write access to your repository.
-
-### Stage 6: Bootstrap Talos, Kubernetes, and ArgoCD
-
-> [!WARNING]
-> It might take a while for the cluster to be setup (10+ minutes is normal). During which time you will see a variety of error messages like: "couldn't get current server API group list," "error: no matching resources found", etc. 'Ready' will remain "False" as no CNI is deployed yet. **This is normal.** If this step gets interrupted, e.g. by pressing <kbd>Ctrl</kbd> + <kbd>C</kbd>, you likely will need to [reset the cluster](#-reset) before trying again
-
-1. Install Talos:
-
-    ```sh
-    just bootstrap talos
-    ```
-
-2. Install cilium, coredns, spegel, argocd and sync the cluster to the repository state:
-
-    ```sh
-    just bootstrap apps
-    ```
-
-3. Watch the rollout of your cluster happen:
-
-    ```sh
-    kubectl get pods --all-namespaces --watch
-    ```
-
-## 📣 Post installation
-
-### ✅ Verifications
-
-1. Check the status of Cilium:
-
-    ```sh
-    kubectl -n kube-system exec ds/cilium --container cilium-agent -- cilium status
-    ```
-
-2. Check the status of ArgoCD and if the ArgoCD resources are up-to-date and in a ready state:
-
-    📍 _Run `just kube reconcile` to force ArgoCD to sync your Git repository state_
-
-    ```sh
-    argocd login argo-system.${cloudflare_domain} --username admin --password ${argocd_password} --insecure
-    argocd cluster list
-    argocd repo list --output wide
-    argocd app list -A --output wide
-    ```
-
-3. Check TCP connectivity to both the internal and external gateways:
-
-    📍 _The variables are only placeholders, replace them with your actual values_
-
-    ```sh
-    nmap -Pn -n -p 443 ${gateways_internal} ${gateways_external} -vv
-    ```
-
-4. Check you can resolve DNS for `echo`, this should resolve to `${gateways_external}`:
-
-    📍 _The variables are only placeholders, replace them with your actual values_
-
-    ```sh
-    dig @${gateways_dns} echo.${cloudflare_domain}
-    ```
-
-5. Check the status of your wildcard `Certificate`:
-
-    ```sh
-    kubectl -n network describe certificates
-    ```
-
-### 🌐 Public DNS
-
-> [!TIP]
-> Use the `envoy-external` gateway on `HTTPRoutes` to make applications public to the internet. These are also accessible on your private network once you set up split DNS.
-
-The `external-dns` application created in the `network` namespace will handle creating public DNS records. By default, `echo` and the `argo` are the only subdomains reachable from the public internet. In order to make additional applications public you must **set the correct gateway** like in the HelmRelease for `echo`.
-
-### 🏠 Home DNS
-
-> [!TIP]
-> Use the `envoy-internal` gateway on `HTTPRoutes` to make applications private to your network. If you're having trouble with internal DNS resolution check out [this](https://github.com/onedr0p/cluster-template/discussions/719) GitHub discussion.
-
-`k8s_gateway` will provide DNS resolution to external Kubernetes resources (i.e. points of entry to the cluster) from any device that uses your home DNS server. For this to work, your home DNS server must be configured to forward DNS queries for `${cloudflare_domain}` to `${gateways_dns}` instead of the upstream DNS server(s) it normally uses. This is a form of **split DNS** (aka split-horizon DNS / conditional forwarding).
-
-_... Nothing working? That is expected, this is DNS after all!_
-
-### 🪝 Git Webhook
-
-By default ArgoCD will periodically check your git repository for changes. In-order to have ArgoCD reconcile on `git push` you must configure your Git provider to send `push` events to ArgoCD.
-
-📍 _Don't want a webhook, or your Git provider can't reach the cluster? ArgoCD will keep polling on an interval._
-
-1. The ArgoCD webhook URL is:
-
-    ```text
-    https://argo.${cloudflare_domain}/api/webhook
-    ```
-
-2. Navigate to your repository settings and add a webhook with that URL and the secret token from `argo-webhook-token.txt`:
-
-    - **GitHub**: under "Settings/Webhooks" press the "Add webhook" button. Fill in the webhook URL above, paste the token as the secret, Content type: `application/json`, Events: Choose Just the push event, and save.
-    - **GitLab**: under "Settings/Webhooks" fill in the webhook URL above, paste the token as the secret, check the push events trigger, and save.
-    - **Gitea/Forgejo**: under "Settings/Webhooks" add a webhook with the URL above, method `POST`, content type `application/json`, paste the token as the secret, trigger on push events, and save.
-
-## 💥 Reset
-
-> [!CAUTION]
-> **Resetting** the cluster **multiple times in a short period of time** could lead to being **rate limited by DockerHub or Let's Encrypt**.
-
-There might be a situation where you want to destroy your Kubernetes cluster. The following command will reset your nodes back to maintenance mode.
-
-```sh
-just talos reset
+> **Anylings** was forked from [ajaykumar4/cluster-template](https://github.com/ajaykumar4/cluster-template) at commit [`83e79b8bee6280fe36c7fae38b0718722f46335f`](https://github.com/ajaykumar4/cluster-template/commit/83e79b8bee6280fe36c7fae38b0718722f46335f) for refactoring and adaptation. The complete upstream history is preserved.
+
+# Anylings
+
+A maintained GitOps repository for native k0s and DigitalOcean Kubernetes. Both
+cluster backends use OpenTofu; they share the same configuration, bootstrap and
+Argo reconciliation path. CI exercises that path, not a separate platform mode.
+
+## Ownership and flow
+
+```text
+OpenTofu k0s root              OpenTofu DOKS root
+  internal k0sctl                official DigitalOcean provider
+        |                                |
+        +--- kubeconfig + context -------+
+                         |
+                  wait for cluster
+                         |
+              configure / encrypt / check
+                         |
+                  publish Kubernetes Git
+                         |
+                  first-install bootstrap
+                         |
+             OpenTofu bootstrap Application
+                         |
+          +--------------+----------------+
+          |              |                |
+     Git credentials   Argo itself   root -> projects/
+                                           |
+                               AppProject + ApplicationSet
+                                           |
+                                 apps/*/*/config.json
+                                           |
+                                 workload Applications
 ```
 
-## 🛠️ Talos and Kubernetes Maintenance
+- Kubernetes providers own networking, DNS and storage capabilities.
+- Bootstrap seeds age/Git access and installs Argo/CRDs once, using the same chart
+  settings as Argo self-management. No persistent Helm release competes with Argo.
+- Following [Argo CD Autopilot](https://github.com/argoproj-labs/argocd-autopilot),
+  OpenTofu seeds one bootstrap Application. It manages Argo itself, repository
+  credentials and a projects root. The project combines an AppProject with a
+  Git-file ApplicationSet; no external projects/repositories/apps orchestration.
+- Initial Git access and the age key are seeded before reconciliation. The
+  AppProject is applied before its ApplicationSet. Bootstrap health does not
+  imply generated workload health; those reconcile asynchronously.
+- The optional Cloudflare root uses its official provider for Access, Tunnel,
+  DNS and R2. Access precedes route activation and DNS; the cluster runs only
+  the connector. R2 retention/backups remain an explicit operational concern.
 
-### ⚙️ Updating Talos node configuration
+## Use
 
-> [!TIP]
-> Ensure you have updated `topf.yaml` and any patches with your updated configuration. In some cases you **not only need to apply the configuration but also upgrade talos** to apply new configuration.
-
-```sh
-# Preview the rendered machine configs (optional)
-just talos render
-# Apply the config to the node
-just talos apply-node <node>
-# e.g. just talos apply-node k8s-0
+```bash
+mise trust
+mise install --locked
+umask 077
+export ANYLINGS_CONFIG="$PWD/.local/instance/cluster.toml"
+export ANYLINGS_OUTPUT_DIR="$PWD/.local/instance/rendered"
+export SOPS_AGE_KEY_FILE="$PWD/.local/instance/age.key"
 ```
 
-### ⬆️ Updating Talos and Kubernetes versions
+Configuration migration: remove the unused `[cluster]` / `name` section from existing
+`cluster.toml` files. Cluster provisioning names remain backend inputs, not platform settings.
 
-> [!TIP]
-> Ensure the `talosVersion` and `kubernetesVersion` in `topf.yaml` are up-to-date with the version you wish to upgrade to.
+Prepare the selected infrastructure root's private backend and inputs as described
+in [infra/tofu](infra/tofu/README.md), then:
 
-```sh
-# Upgrade talos on a node
-just talos upgrade-node <node>
-# e.g. just talos upgrade-node k8s-0
+```bash
+just plan k0s                 # or doks
+just apply k0s                # or doks
+export KUBECONFIG=/secure/path/instance.kubeconfig
+just export k0s > "$KUBECONFIG"  # or doks
+export ANYLINGS_CONTEXT="$(kubectl --kubeconfig "$KUBECONFIG" config current-context)"
+just wait cluster
+
+just init platform
+# Edit cluster.toml: repository URL, branch/prefix, ingress and chart settings.
+just configure platform
+# Review and publish only rendered/kubernetes/ to the configured Git location.
+just bootstrap platform      # first install only; existing Argo is rejected
+just wait platform
+just plan platform
+just apply platform
 ```
 
-```sh
-# Upgrade cluster to a newer Kubernetes version
-just talos upgrade-k8s
-```
+Provide a StorageClass when applications need PVCs. DOKS supplies CSI; the native
+profile optionally uses `just apply k0s-storage` with `ANYLINGS_STORAGE_PATH` set
+to a dedicated node-local directory. Select storage classes in each application's
+values/PVC, not a global platform knob. Local-path storage is not HA.
 
-### ➕ Adding a node to your cluster
+Normal application changes are configure/review/publish followed by Argo
+reconciliation. Do not rerun bootstrap as an upgrade mechanism.
 
-At some point you might want to expand your cluster to run more workloads and/or improve the reliability of your cluster. Keep in mind it is recommended to have an **odd number** of control plane nodes for quorum reasons.
+ApplicationSet discovers `kubernetes/apps/*/*/config.json` in the published Git
+repository. Each config supplies the app name, namespace, chart coordinates,
+values path and optional manifest path; it contains no credentials. The Git
+source carries values only unless `manifestPath` is set (the tunnel's KSOPS
+Secret). Argo self-management stays outside this generated workload set.
 
-You don't need to re-bootstrap the cluster to add new nodes. Follow these steps:
+Deletion follows [Autopilot's application semantics](https://github.com/argoproj-labs/argocd-autopilot/blob/c102467016841f0532a6def064d618322156a7a7/cmd/commands/common.go):
+Git removal deletes the generated Application and its workloads. Automated sync
+uses prune, self-heal and allow-empty; ApplicationSet uses its default `sync`
+policy and `preserveResourcesOnDeletion: false`. Bootstrap/root carry deletion
+finalizers. Argo self-management alone has no deletion finalizer, as upstream
+specifies; its normal sync still prunes. There is no retention mode or toggle.
 
-1. **Prepare the new node**: Review the [Stage 2: Machine Preparation](#stage-2-machine-preparation) section and boot your new node into maintenance mode.
+**Deleting the bootstrap Application, including `just destroy platform`, is a
+cascading platform teardown, not merely detaching GitOps.** It can delete workload
+data according to resource/storage policies. Argo's installation is not cascaded
+through its self-management Application, but its Git credential may be removed.
+Keep recovery credentials and backups outside this tree. Only administrators may
+write bootstrap/projects/app configs, which control deployment and deletion.
 
-2. **Get the node information**: While the node is in maintenance mode, retrieve the disk and MAC address information needed for configuration:
+Other action-first commands:
 
-    ```sh
-    talosctl get disks -n <ip> --insecure
-    talosctl get links -n <ip> --insecure
-    ```
+| Command                     | Purpose                                                               |
+| --------------------------- | --------------------------------------------------------------------- |
+| `just check config`         | Validate input configuration                                          |
+| `just check platform`       | Validate existing output, including complete encryption; no rewriting |
+| `just render platform`      | Configure and render private first-install inspection manifests       |
+| `just schema config`        | Regenerate the editor schema                                          |
+| `just reset platform`       | Remove owned generated output, not cluster resources                  |
+| `just destroy k0s` / `doks` | Explicit infrastructure teardown, subject to lifecycle protection     |
 
-3. **Update the configuration**: Read the documentation for [topf](https://postfinance.github.io/topf/) and extend `topf.yaml` (and any `node/<hostname>/` patches) manually with the new node information (including the disk and MAC address from step 2).
+## Source and publication boundaries
 
-4. **Apply the configuration**:
+- `template/`: shared configuration sources, validation and rendering.
+- `infra/tofu/`: independent OpenTofu configurations for `k0s`, `doks`,
+  `cloudflare` and `platform`, each with separate state. These are not four Argo roots.
+- `infra/platform/`: shared readiness; `infra/k0s/`: optional native storage manifests.
+- `tests/config/`: supported configuration inputs; `tests/ci/`: integration and safety checks.
 
-    ```sh
-    # Preview the rendered machine configs (optional)
-    just talos render
+Publish **only `$ANYLINGS_OUTPUT_DIR/kubernetes/`**, retaining the `kubernetes/`
+directory beneath `repository.path`. Bootstrap inputs, age identities, kubeconfigs
+and state never belong in that Git publication. Inspection manifests live in a
+private sibling `bootstrap-manifests/` directory. Keep recovery keys outside Git
+and the cluster; encrypt whole sensitive files, not just Secret data fields.
 
-    # Apply the configuration to the node
-    just talos apply-node <node>
-    # e.g. just talos apply-node k8s-3
-    ```
+## CI
 
-The node should join the cluster automatically and workloads will be scheduled once they report as ready.
+One platform renderer is exercised with two inputs: `tests/config/base.toml`
+(defaults, no ingress) and `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
+credentials, a Git subdirectory and a custom Argo namespace). They are configuration
+cases, not k0s/DOKS implementations. Infrastructure validation checks the independent
+OpenTofu configurations; the native integration run uses the same base input.
 
-## 🤖 Landing
+The workflow runs `tests/ci/run.sh` only on an explicitly disposable GitHub runner.
+Each run creates a fresh private temporary directory; there is no resume/local
+rehearsal interface or public CI command.
 
-[Landing](https://github.com/bubbuild/landing) provides advisory PR reviews after native E2E checks, handles `/landing` delegations from authorized repository users, and proposes dependency updates. The workflows are adapted from [bubbuild/republic](https://github.com/bubbuild/republic/tree/2fa76b5407ba1cf035293121bfab9e782ea199f3/.github/workflows).
+Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
+configuration into a local bare repository; Argo reads that one repository through
+a read-only `git://` listener on the native node's internal address. Network pushes
+are disabled. There is no Soft Serve deployment, SSH administration, GitHub
+publication branch or repository-write token. Plaintext unauthenticated Git transport
+is restricted to this disposable network; deployments should use HTTPS or trusted SSH.
 
-Dependency maintenance runs weekly or through the **Landing duty** manual workflow. It can also handle dependency alerts and failures from the native **E2E** workflow. Updates are proposed as draft PRs; maintainers decide what to merge. Native checks remain authoritative, and model feedback failures do not block them. Fork PRs run native checks without Landing credentials.
+CI checks the pushed revision and application health, actual decryption and HTTP,
+PVC persistence/fresh-volume restore, Git-only Argo configuration change/restoration,
+Git removal/recreation of echo through ApplicationSet, and no-change OpenTofu
+repeats. Narrow safety checks cover confidentiality and failed reset/state retention. Cleanup resets the recorded cluster before deleting
+its disposable volume data; only sanitized diagnostics are uploaded.
 
-Configure the following GitHub Actions settings:
+Single-host CI does not prove multi-host upgrades, HA, database-consistent recovery,
+DOKS CSI recovery, Cloudflare Access propagation or R2 permissions. Those require
+separate authorization and environment-specific validation. No workstation cluster
+installation or cloud apply is implied by rendering/static checks.
 
-| Setting                   | Type     | Value                         |
-| ------------------------- | -------- | ----------------------------- |
-| `LANDING_API_KEY`         | Secret   | DeepSeek official API key     |
-| `LANDING_MODEL`           | Variable | `openai:deepseek-flash`       |
-| `LANDING_API_BASE`        | Variable | `https://api.deepseek.com/v1` |
-| `LANDING_CLIENT_ARGS`     | Variable | `{"api_format":"chat"}`       |
-| `LANDING_COMPLETION_ARGS` | Variable | `{"reasoning_effort":"high"}` |
+## Migration and review
 
-The OpenAI-compatible provider connects directly to DeepSeek; CI does not depend on a local Magpie gateway. Keep the key in Actions secrets, never in Git. Leaving `LANDING_MODEL` unset disables Landing jobs.
+Existing three-root installations require a reviewed ownership handoff, not a
+blind apply: see [platform migration](infra/tofu/README.md#platform-migration).
+The single entrypoint is `kubernetes/bootstrap.yaml`; its source is
+`kubernetes/bootstrap/`, and the project root reads `kubernetes/projects/`.
+The repository Secret remains `platform-repository`.
+Remove the unused `cluster.storage_class` input; it never affected generated PVCs.
+Retain backend/state when renaming the former `edge` root to `cloudflare`.
 
-By default, Landing uses the job-scoped `GITHUB_TOKEN`. Enable **Allow GitHub Actions to create and approve pull requests** in the repository's Actions settings so it can publish review feedback and dependency PRs. Do not copy a personal GitHub token into the workflow. Token-created candidates explicitly dispatch native E2E as described in [AGENTS.md](AGENTS.md), because those pushes do not trigger normal PR workflows.
+This is deliberately not a generic cloud module: DOKS has a fixed small pool;
+Cloudflare does not wrap WARP private routes or R2 retention rules. If older roots
+were already applied, retain or migrate their VPC/private-route/bucket-lock resources
+before applying the simplified configuration. Never discard state or accept unintended
+data/policy deletion merely to complete a refactor.
 
-## 🐛 Debugging
+[Landing](https://github.com/bubbuild/landing) provides advisory reviews and dependency
+maintenance; native CI determines acceptance. Workflows were adapted from
+[bubbuild/republic](https://github.com/bubbuild/republic/tree/2fa76b5407ba1cf035293121bfab9e782ea199f3/.github/workflows)
+and intentionally track `bubbuild/landing@main`.
 
-Below is a general guide on trying to debug an issue with an resource or application. For example, if a workload/resource is not showing up or a pod has started but in a `CrashLoopBackOff` or `Pending` state. These steps do not include a way to fix the problem as the problem could be one of many different things.
+| Actions setting                    | Value                         |
+| ---------------------------------- | ----------------------------- |
+| `LANDING_API_KEY` secret           | DeepSeek official API key     |
+| `LANDING_MODEL` variable           | `openai:deepseek-flash`       |
+| `LANDING_API_BASE` variable        | `https://api.deepseek.com/v1` |
+| `LANDING_CLIENT_ARGS` variable     | `{"api_format":"chat"}`       |
+| `LANDING_COMPLETION_ARGS` variable | `{"reasoning_effort":"high"}` |
 
-1. Check if the ArgoCD resources are up-to-date and in a ready state:
-
-    📍 _Run `just kube reconcile` to force ArgoCD to sync your Git repository state_
-
-    ```sh
-    argocd repo list --output wide
-    argocd app list -A --output wide
-    ```
-
-2. Do you see the pod of the workload you are debugging:
-
-    ```sh
-    kubectl -n <namespace> get pods -o wide
-    ```
-
-3. Check the logs of the pod if it's there:
-
-    ```sh
-    kubectl -n <namespace> logs <pod-name> -f
-    ```
-
-4. If a resource exists, try to describe it to see what problems it might have:
-
-    ```sh
-    kubectl -n <namespace> describe <resource> <name>
-    ```
-
-5. Check the namespace events:
-
-    ```sh
-    kubectl -n <namespace> get events --sort-by='.metadata.creationTimestamp'
-    ```
-
-Resolving problems that you have could take some tweaking of your YAML manifests in order to get things working, other times it could be a external factor like permissions on a NFS server. If you are unable to figure out your problem see the support sections below.
-
-## Repository lifecycle
-
-Anylings is a continuously maintained infrastructure repository, not a one-time template export. Keep `template/`, `pyproject.toml`, `uv.lock`, and the native E2E workflow in the repository: Landing reviews and dependency maintenance rely on them.
-
-**Do not run `just template tidy` in Anylings.** That inherited upstream command archives the template tooling and deletes its CI workflow. Post-tidy exports are not a supported Anylings configuration; Landing is not expected to work after that conversion.
-
-## ❔ What's next
-
-There's a lot to absorb here, especially if you're new to these tools. Take some time to familiarize yourself with the tooling and understand how all the components interconnect. Dive into the documentation of the various tools included — they are a valuable resource. This shouldn't be a production environment yet, so embrace the freedom to experiment. Move fast, break things intentionally, and challenge yourself to fix them.
-
-Below are some optional considerations you may want to explore.
-
-### DNS
-
-The template uses [k8s_gateway](https://github.com/k8s-gateway/k8s_gateway) to provide DNS for your applications, consider exploring [external-dns](https://github.com/kubernetes-sigs/external-dns) as an alternative.
-
-External-DNS offers broad support for various DNS providers, including but not limited to:
-
-- [Pi-hole](https://github.com/kubernetes-sigs/external-dns/blob/master/docs/tutorials/pihole.md)
-- [UniFi](https://github.com/kashalls/external-dns-unifi-webhook)
-- [Adguard Home](https://github.com/muhlba91/external-dns-provider-adguard)
-- [Bind](https://github.com/kubernetes-sigs/external-dns/blob/master/docs/tutorials/rfc2136.md)
-
-This flexibility allows you to integrate seamlessly with a range of DNS solutions to suit your environment and offload DNS from your cluster to your router, or external device.
-
-### Secrets
-
-SOPS is an excellent tool for managing secrets in a GitOps workflow. However, it can become cumbersome when rotating secrets or maintaining a single source of truth for secret items.
-
-For a more streamlined approach to those issues, consider [External Secrets](https://external-secrets.io/latest/). This tool allows you to move away from SOPs and leverage an external provider for managing your secrets. External Secrets supports a wide range of providers, from cloud-based solutions to self-hosted options.
-
-### Storage
-
-If your workloads require persistent storage with features like replication or connectivity to NFS, SMB, or iSCSI servers, there are several projects worth exploring:
-
-- [rook-ceph](https://github.com/rook/rook) / [longhorn](https://github.com/longhorn/longhorn) / [openebs](https://github.com/openebs/openebs)
-- [democratic-csi](https://github.com/democratic-csi/democratic-csi)
-- [csi-driver-nfs](https://github.com/kubernetes-csi/csi-driver-nfs) / [csi-driver-smb](https://github.com/kubernetes-csi/csi-driver-smb)
-- [synology-csi](https://github.com/SynologyOpenSource/synology-csi)
-- [truenas-csi](https://github.com/truenas/truenas-csi) / [tns-csi](https://github.com/fenio/tns-csi)
-
-These tools offer a variety of solutions to meet your persistent storage needs, whether you’re using cloud-native or self-hosted infrastructures.
-
-### Community Repositories
-
-Community member [@whazor](https://github.com/whazor) created [Kubesearch](https://kubesearch.dev) to allow searching ArgoCD Applications across Github and Gitlab repositories with the `kubesearch` topic.
-
-## 🙋 Support
-
-### Community
-
-- Make a post in this repository's GitHub [Discussions](https://github.com/ajaykumar4/cluster-template/discussions).
-- Start a thread in the `#support` or `#cluster-template` channels in the [Home Operations](https://discord.gg/home-operations) Discord server.
-
-## 📺 Media
-
-Check out these videos below. If you find them helpful, a like and subscribe goes a long way!
-
-<a href="https://youtube.com/watch?v=aeUKOpeoiUs">
-  <img src="https://github.com/user-attachments/assets/2dab1c6f-7b27-4b94-a7ad-a6d9c5b17c78" alt="Youtube Video" width="300">
-</a>
-&nbsp;&nbsp;
-<a href="https://youtube.com/watch?v=hoi2GzvJUXM">
-  <img src="https://github.com/user-attachments/assets/5b939b90-0019-4515-b90c-321ffe7448cf" alt="Youtube Video" width="300">
-</a>
-
-## 🙌 Related Projects
-
-If this repo is too hot to handle or too cold to hold check out these following projects.
-
-- [onedr0p/cluster-template](https://github.com/onedr0p/cluster-template) - A template for deploying a Talos Kubernetes cluster including ArgoCD for GitOps
-- [mitchross/k3s-argocd-starter](https://github.com/mitchross/k3s-argocd-starter) - starter kit for k3s, argocd
-- [ricsanfre/pi-cluster](https://github.com/ricsanfre/pi-cluster) - _Pi Kubernetes Cluster. Homelab kubernetes cluster automated with Ansible and FluxCD_
-- [techno-tim/k3s-ansible](https://github.com/techno-tim/k3s-ansible) - _The easiest way to bootstrap a self-hosted High Availability Kubernetes cluster. A fully automated HA k3s etcd install with kube-vip, MetalLB, and more. Build. Destroy. Repeat._
-
-## 🤝 Thanks
-
-Big shout out to all the contributors, sponsors and everyone else who has helped on this project.
+No local gateway is required. Fork PRs receive no Landing credentials. Leave
+`LANDING_MODEL` unset to disable reviews. See [AGENTS.md](AGENTS.md) for maintenance
+and automatic PR checks; agents must not manually dispatch or rerun CI.
+Maintainers decide merges.

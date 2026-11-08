@@ -1,0 +1,25 @@
+---
+# Argo CD repository credential. Encrypted as a whole file: encrypted_regex on
+# data/stringData would leave this Secret's contents in plaintext.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: platform-repository
+  namespace: #{ argocd.namespace }#
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: #{ repository.url }#
+  #% if repository.url.startswith('ssh://') %#
+  sshPrivateKey: |
+    #% filter indent(width=4, first=False) %#
+    #{ deploy_key() }#
+    #% endfilter %#
+  known_hosts: |
+    #% filter indent(width=4, first=False) %#
+    #{ repository.known_hosts }#
+    #% endfilter %#
+  #% endif %#

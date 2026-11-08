@@ -1,0 +1,134 @@
+# Adapted from bubbuild/republic at 2fa76b5407ba1cf035293121bfab9e782ea199f3.
+name: Landing duty
+
+# workflow_run is restricted to this repository; setup always uses the default branch.
+# Landing admits the upstream run/candidate before delegated work.
+on: # zizmor: ignore[dangerous-triggers]
+  schedule:
+    - cron: "23 2 * * 1"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [dependabot_alert]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  workflow_run:
+    workflows: [E2E]
+    types: [completed]
+
+jobs:
+  duty:
+    if: >-
+      vars.LANDING_MODEL != '' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'repository_dispatch' && github.event.action == 'dependabot_alert') ||
+       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' &&
+        (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+        github.event.workflow_run.head_branch == github.event.repository.default_branch) ||
+       (github.event_name == 'workflow_run' && github.event.workflow_run.name == 'E2E' &&
+        github.event.workflow_run.conclusion == 'failure' && vars.LANDING_BUMP_ON_FAILURE != 'false' &&
+        (github.event.workflow_run.event == 'pull_request' ||
+         (github.event.workflow_run.event == 'workflow_dispatch' &&
+          github.event.workflow_run.head_branch != github.event.repository.default_branch))) ||
+       contains(github.event.comment.body, '/landing'))
+    concurrency:
+      group: anylings-duty-${{ github.repository_id }}-${{ github.event.issue.number || github.event.pull_request.number || (github.event.client_payload.alert_number && format('alert-{0}', github.event.client_payload.alert_number)) || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch || 'dependencies' }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+      vulnerability-alerts: read
+    env:
+      GH_ADMISSION_TOKEN: ${{ secrets.LANDING_ADMISSION_TOKEN || github.token }}
+      GH_TOKEN: ${{ secrets.LANDING_GITHUB_TOKEN || github.token }}
+      GIT_AUTHOR_NAME: ${{ vars.LANDING_GIT_NAME || 'github-actions[bot]' }}
+      GIT_AUTHOR_EMAIL: ${{ vars.LANDING_GIT_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}
+      GIT_COMMITTER_NAME: ${{ vars.LANDING_GIT_NAME || 'github-actions[bot]' }}
+      GIT_COMMITTER_EMAIL: ${{ vars.LANDING_GIT_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          experimental: true
+          install_args: --locked
+      - name: Prepare Git authentication
+        run: gh auth setup-git
+      - name: Read dependency update publishing identity
+        id: publishing-identity
+        if: github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'deps/landing-')
+        run: |
+          actor=$(gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login)
+          [[ "$actor" =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$ ]]
+          echo "actor=$actor" >> "$GITHUB_OUTPUT"
+      - name: Handle the delegation or native failure
+        if: >-
+          github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' ||
+          (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+           (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
+        uses: bubbuild/landing@main # zizmor: ignore[unpinned-uses] -- intentionally track latest Landing
+        env:
+          LANDING_MODEL: ${{ vars.LANDING_MODEL }}
+          LANDING_API_KEY: ${{ secrets.LANDING_API_KEY }}
+          LANDING_API_BASE: ${{ vars.LANDING_API_BASE }}
+          LANDING_CLIENT_ARGS: ${{ vars.LANDING_CLIENT_ARGS || '{}' }}
+          LANDING_COMPLETION_ARGS: ${{ vars.LANDING_COMPLETION_ARGS || '{}' }}
+          LANDING_MODEL_TIMEOUT_SECONDS: "120"
+        with:
+          trust: ${{ vars.LANDING_TRUST || 'repository' }}
+          command: triage
+          upstream-workflow: E2E
+          checked-revision: ${{ github.event_name != 'workflow_run' && github.sha || '' }}
+          delivery-key: ${{ format('duty:{0}', github.event.comment.id || github.run_id) }}
+          instruction: >-
+            Triage only the triggering native failure. Read affected jobs through gh and reuse a matching issue; publish only useful new evidence, changed conditions or verified progress. Do not scan unrelated issues or resolved historical failures.
+      - name: Handle dependency updates
+        if: >-
+          github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+          github.event_name == 'repository_dispatch' ||
+          (github.event_name == 'workflow_run' &&
+           (github.event.workflow_run.event == 'pull_request' ||
+            (github.event.workflow_run.event == 'workflow_dispatch' &&
+             github.event.workflow_run.head_branch != github.event.repository.default_branch)))
+        uses: bubbuild/landing@main # zizmor: ignore[unpinned-uses] -- intentionally track latest Landing
+        env:
+          LANDING_MODEL: ${{ vars.LANDING_MODEL }}
+          LANDING_API_KEY: ${{ secrets.LANDING_API_KEY }}
+          LANDING_API_BASE: ${{ vars.LANDING_API_BASE }}
+          LANDING_CLIENT_ARGS: ${{ vars.LANDING_CLIENT_ARGS || '{}' }}
+          LANDING_COMPLETION_ARGS: ${{ vars.LANDING_COMPLETION_ARGS || '{}' }}
+          LANDING_MODEL_TIMEOUT_SECONDS: "120"
+        with:
+          trust: ${{ vars.LANDING_TRUST || 'repository' }}
+          command: bump
+          upstream-workflow: E2E
+          bump-on-failure: ${{ vars.LANDING_BUMP_ON_FAILURE || 'true' }}
+          dependency-update-actors: |
+            dependabot[bot]
+            ${{ steps.publishing-identity.outputs.actor }}
+            ${{ vars.LANDING_DEPENDENCY_UPDATE_ACTORS }}
+          checked-revision: ${{ github.event_name != 'workflow_run' && github.sha || '' }}
+          delivery-key: ${{ github.event_name != 'workflow_run' && format('duty:{0}', github.run_id) || '' }}
+          instruction: >-
+            Maintain mise tools, uv dependencies, Helm charts, container images and pinned GitHub Actions under the repository dependency policy, scoped to the supplied candidate or alert.
+            Reuse matching candidates; publish new draft PRs on deps/landing-* branches or repair the supplied PR's existing branch after current CI failure.
+            Follow AGENTS.md for validation and dispatch template-e2e.yaml with the PR number and full candidate head SHA; do not wait for Landing review.
+            You may maintain necessary tracking issues. Maintainers decide merge and alert dismissal.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: landing-duty-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/landing/
+          retention-days: 30
+          if-no-files-found: warn

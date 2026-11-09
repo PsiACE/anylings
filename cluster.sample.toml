@@ -39,8 +39,8 @@ known_hosts = ""
 # =============================================================================
 [argocd]
 
-# OPTIONAL. Default: "10.10.2"
-chart_version = "10.10.2"
+# OPTIONAL. Default: "10.14.0"
+chart_version = "10.14.0"
 
 # OPTIONAL. Default: "argo-system"
 namespace = "argo-system"

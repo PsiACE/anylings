@@ -7,6 +7,8 @@ on:
     branches:
       - main
   pull_request:
+    # Deliberately no `labeled`/`unlabeled`: this workflow owns the code gate,
+    # and a skipped job still reports success under the gate's own check name.
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
@@ -44,6 +46,12 @@ jobs:
 
       - name: Check k0s recovery without live kubeconfig
         run: bash tests/ci/check-k0s-reset.sh
+
+      # The workflows themselves are a checked artifact: this asserts that the
+      # gate stays offline and that the heavy rehearsal cannot report success by
+      # being skipped. Offline, no runner and no GitHub API.
+      - name: Check workflow gate wiring
+        run: bash tests/ci/check-workflow-gate.sh
 
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.
@@ -95,50 +103,13 @@ jobs:
       - name: Run configure recipe
         run: just configure platform
 
-      - name: Check tunnel credential delivery from the published Git source
-        if: matrix.config == 'cloudflare-tunnel'
-        run: |
-          # The Git-file generator passes manifestPath to the Application's
-          # Git source; exercise that published KSOPS path without exposing it.
-          source=$(jq -r '.manifestPath' .local/rendered/kubernetes/apps/network/cloudflare-tunnel/config.json)
-          case "$source" in
-            clusters/tunnel/*) source="${source#clusters/tunnel/}" ;;
-            *) echo "::error::tunnel Secret source is outside the configured Git prefix" >&2; exit 1 ;;
-          esac
-          kustomize build --enable-alpha-plugins --enable-exec ".local/rendered/$source" \
-            | yq -e 'select(.kind == "Secret" and .stringData.TUNNEL_TOKEN != null) | .stringData.TUNNEL_TOKEN == "synthetic-ci-tunnel-token"' >/dev/null
-          if grep -rqF 'synthetic-ci-tunnel-token' .local/rendered/kubernetes; then
-            echo "::error::synthetic tunnel token remains in plaintext"
-            exit 1
-          fi
-
-      # Rendered output must already match the format-yaml pre-commit hook,
-      # otherwise every `just configure platform` shows up as formatting churn. Only
-      # tracked-file types are checked: rendered plaintext is never inspected.
-      - name: Assert rendered output is formatted
-        run: oxfmt --check ./.local/rendered/.sops.yaml ./.local/rendered/kubernetes
+      # The confidentiality, formatting and partial-encryption assertions live
+      # in one script so tests/ci/local-gate.sh cannot drift from this job.
+      - name: Run render assertions
+        run: bash tests/ci/check-render.sh "${{ matrix.config }}"
 
       - name: Render the bootstrap manifests
         run: bash ./.local/rendered/bootstrap/bootstrap.sh render
-
-      # A single confidentiality contract, through the public output check.
-      # filestatus still says encrypted after a plaintext Helm value is added.
-      - name: Reject partially encrypted publication output
-        if: matrix.config == 'base'
-        run: |
-          values="$(find .local/rendered/kubernetes/apps -name 'values.sops.yaml' -print -quit)"
-          test -n "$values"
-          cp "$values" "$RUNNER_TEMP/encrypted-values.yaml"
-          trap 'mv "$RUNNER_TEMP/encrypted-values.yaml" "$values"' EXIT
-          yq -i '.publicationCheck = "synthetic-unencrypted"' "$values"
-          sops filestatus "$values" | jq -e '.encrypted == true' >/dev/null
-          if just check platform; then
-            echo "::error::accepted partially encrypted publication output"
-            exit 1
-          fi
-          mv "$RUNNER_TEMP/encrypted-values.yaml" "$values"
-          trap - EXIT
-          just check platform
 
       - name: Run reset recipe
         run: just --yes reset platform
@@ -197,64 +168,10 @@ jobs:
           export TF_DATA_DIR="$RUNNER_TEMP/tofu-${ROOT}"
           tofu -chdir="infra/tofu/${ROOT}" test -no-color
 
-  # The native integration suite runs only on a disposable CI runner.
-  # Fixtures require explicit CI authorization. No cloud credentials and no
-  # pre-existing Kubernetes Secret is required.
-  native-e2e:
-    if: ${{ github.repository == 'PsiACE/anylings' }}
-    name: native-rehearsal
-    needs: [contracts]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Setup mise
-        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
-        with:
-          version: 2026.11.2
-          experimental: true
-          install_args: --locked
-        env:
-          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-
-      # k0s needs root for containerd, kubelet and CNI. The runner is
-      # disposable, and the rehearsal only ever owns the resources it creates.
-      - name: Prepare native prerequisites
-        run: |
-          # Only host tools the rehearsal shells out to that mise does not
-          # provide. jq, kubectl, helm, sops, yq, tofu and k0sctl come from the
-          # locked tool set; the OpenTofu k0s root invokes k0sctl internally.
-          need="curl git python3 sha256sum systemctl"
-          for tool in $need; do
-            command -v "$tool" >/dev/null || { echo "::error::missing $tool"; exit 1; }
-          done
-          test -x "$(git --exec-path)/git-daemon" || { echo "::error::Git daemon is required"; exit 1; }
-          sudo -n true || { echo "::error::native rehearsal needs passwordless sudo for k0s"; exit 1; }
-
-      - name: Run native rehearsal
-        env:
-          ANYLINGS_CI_DISPOSABLE: "1"
-        run: bash tests/ci/run.sh
-
-      - name: Upload sanitized diagnostics
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: native-e2e-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/anylings-ci.*/diag/
-          retention-days: 30
-          if-no-files-found: ignore
-
   # Landing review adapted from bubbuild/republic at 2fa76b5407ba1cf035293121bfab9e782ea199f3.
   landing-feedback:
     name: Landing review
-    needs: [contracts, render-platform, tofu-static, native-e2e]
+    needs: [contracts, render-platform, tofu-static]
     if: >-
       always() && !cancelled() && vars.LANDING_MODEL != '' &&
       github.event_name == 'pull_request' && !github.event.pull_request.draft &&
@@ -298,24 +215,27 @@ jobs:
           checked-revision: ${{ github.sha }}
           instruction: >-
             Native checks: contracts=${{ needs.contracts.result }}, platform-render=${{ needs.render-platform.result }},
-            tofu-static=${{ needs.tofu-static.result }}, native-rehearsal=${{ needs.native-e2e.result }}.
-            The native-rehearsal job uses disposable fixtures around the shared platform implementation: an owned k0s
-            cluster, local-path storage, an upstream read-only Git daemon, the rendered bootstrap, and the OpenTofu
-            bootstrap Application and ApplicationSet-generated children, then asserts Synced+Healthy at the pushed revision, a KSOPS-decrypted Secret, the
-            magpie gateway answering and refusing unkeyed remote callers, Git-driven ApplicationSet deletion/recreation,
-            PVC data restore and a repeat no-op. Treat its result as advisory evidence of
-            runtime behavior, not as proof of cloud, CSI or ingress behavior.
+            tofu-static=${{ needs.tofu-static.result }}.
+            The native rehearsal is a separate workflow, started only when a maintainer adds the ci/native-rehearsal
+            label, so do not ask for it or treat its absence as a missing check. When it was requested it uses
+            disposable fixtures around
+            the shared platform implementation: an owned k0s cluster, local-path storage, an upstream read-only Git
+            daemon, the rendered bootstrap, and the OpenTofu bootstrap Application and ApplicationSet-generated
+            children, then asserts Synced+Healthy at the pushed revision, a KSOPS-decrypted Secret, the magpie gateway
+            answering and refusing unkeyed remote callers, Git-driven ApplicationSet deletion/recreation, PVC data
+            restore and a repeat no-op. Its result, when present, is advisory evidence of runtime behavior, not proof of
+            cloud, CSI or ingress behavior.
             Ignore the Landing review job when assessing native check completion.
             Review affected user-visible behavior against repository guidance. Reuse these check results and
             relevant review history; investigate unresolved questions and publish useful findings or a brief
             clean verdict.
       - name: Report unsuccessful feedback
         if: ${{ !cancelled() && steps.landing.outcome == 'failure' }}
-        run: echo "::warning::Landing feedback failed. Inspect the task artifact; native checks determine acceptance."
+        run: echo "::warning::Landing feedback failed. Inspect the task artifact; this review is advisory."
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: landing-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/landing/
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn

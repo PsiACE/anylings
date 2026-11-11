@@ -31,7 +31,8 @@ STORAGE_PATH="$STATE/storage"
 E2E_ARGOCD_NS="argo-system"
 E2E_REVISION=""
 SOPS_VALUE="anylings-ci-decrypted"
-ECHO_PORT=18080
+# Synthetic gateway key for the cross-pod auth assertion; never a real one.
+E2E_GATEWAY_KEY="synthetic-ci-gateway-key"
 PIDS=()
 mkdir "$DIAG"
 
@@ -87,14 +88,6 @@ teardown() {
 }
 
 # ------------------------------------------------------------------ cluster --
-
-wait_http() {
-  local url="$1" deadline=$((SECONDS + ${2:-180}))
-  until curl --silent --fail --max-time 3 --output /dev/null "$url" 2>/dev/null; do
-    (( SECONDS < deadline )) || die "timed out waiting for $url"
-    sleep 2
-  done
-}
 
 phase_cluster() {
   # Only the disposable environment and input profile differ. The same public
@@ -211,18 +204,33 @@ EOF
 
 # -------------------------------------------------------------- assertions --
 
+# The expected workload set is the one published, not a hardcoded list: adding
+# or replacing an application must not require editing this assertion. The
+# connectors that cannot be Healthy without a real provider credential are
+# named here, and only they are excused from the health check; they must still
+# be Synced at the pushed revision.
+CREDENTIAL_FREE_EXCEPTIONS="cloudflare-tunnel"
+
 assert_apps() {
-  log "wait for Applications to be Synced+Healthy at the pushed revision"
+  log "wait for Applications to be Synced, and Healthy when credential-free"
   [ -n "$E2E_REVISION" ] || die "no pushed revision recorded"
-  local deadline=$((SECONDS + 900))
+  local expected deadline=$((SECONDS + 900))
+  expected="$(jq -r '.appName' "$GITWORK"/kubernetes/apps/*/*/config.json | sort -u | jq -R . | jq -sc .)"
+  [ "$(jq 'length' <<<"$expected")" -gt 0 ] || die "no workload config.json was published"
   # One API snapshot: no per-object requests or duplicate existence passes.
   # Include the expected apps so an empty or partially created list cannot pass.
-  until kc --namespace "$E2E_ARGOCD_NS" get applications -o json | jq -e --arg rev "$E2E_REVISION" '
-    (["bootstrap", "root", "argo", "echo", "reloader"]
+  until kc --namespace "$E2E_ARGOCD_NS" get applications -o json | jq -e \
+    --arg rev "$E2E_REVISION" --argjson expected "$expected" \
+    --arg excused "$CREDENTIAL_FREE_EXCEPTIONS" '
+    ((["bootstrap", "root", "argo"] + $expected)
       - [.items[].metadata.name] | length == 0) and
     all(.items[];
-      .status.sync.status == "Synced" and .status.health.status == "Healthy" and
-      ([.status.sync.revision, .status.sync.revisions[]?] | index($rev) != null))
+      .status.sync.status == "Synced" and
+      ([.status.sync.revision, .status.sync.revisions[]?] | index($rev) != null)) and
+    all(.items[];
+      .metadata.name as $name
+      | if ($excused | split(" ") | index($name)) != null then true
+        else .status.health.status == "Healthy" end)
   ' >/dev/null; do
     (( SECONDS < deadline )) || die "Applications did not converge on $E2E_REVISION"
     sleep 10
@@ -247,40 +255,127 @@ assert_sops_secret() {
 # Exercise ApplicationSet's default sync/deletion policy through Git, not an
 # imperative kubectl delete or a private-controller-state assertion.
 assert_gitops_removal() {
-  log "remove and restore echo through its Git application config"
-  local relative="kubernetes/apps/default/echo/config.json"
-  local saved="$STATE/echo-config.json" resources=()
+  log "remove and restore magpie through its Git application config"
+  local relative="kubernetes/apps/default/magpie/config.json"
+  local saved="$STATE/magpie-config.json" resources=()
   mapfile -t resources < <(kc --namespace default get deployments,services \
-    -l app.kubernetes.io/name=echo -o name)
-  [ "${#resources[@]}" -gt 0 ] || die "echo has no deployed resources"
+    -l app.kubernetes.io/name=magpie -o name)
+  [ "${#resources[@]}" -gt 0 ] || die "magpie has no deployed resources"
   cp "$GITWORK/$relative" "$saved"
   git -C "$GITWORK" rm --quiet "$relative"
   git -C "$GITWORK" -c user.name=e2e -c user.email=e2e@cluster.local \
-    commit --quiet --message "remove echo application config"
+    commit --quiet --message "remove magpie application config"
   git -C "$GITWORK" push --quiet "$GIT_PUSH_URL" main
-  kc --namespace "$E2E_ARGOCD_NS" wait --for=delete application/echo --timeout=900s
+  kc --namespace "$E2E_ARGOCD_NS" wait --for=delete application/magpie --timeout=900s
   kc --namespace default wait --for=delete "${resources[@]}" --timeout=300s
 
   mv "$saved" "$GITWORK/$relative"
   git -C "$GITWORK" add "$relative"
   git -C "$GITWORK" -c user.name=e2e -c user.email=e2e@cluster.local \
-    commit --quiet --message "restore echo application config"
+    commit --quiet --message "restore magpie application config"
   git -C "$GITWORK" push --quiet "$GIT_PUSH_URL" main
   E2E_REVISION="$(git -C "$GITWORK" rev-parse HEAD)"
   assert_apps
 }
 
-assert_echo_http() {
-  log "assert the echo application answers over HTTP"
-  local svc
+# A genuine cross-pod request: kubectl port-forward is not used, because it
+# forwards through the kubelet to the pod's own loopback, which magpie treats as
+# this computer and never asks for a key. A client pod in the same cluster
+# reaches the Service from another network namespace, so magpie sees a peer that
+# is not loopback and applies its documented remote rule.
+#
+# Both directions are asserted, so the test cannot pass by refusing everything:
+# without a key the gateway answers 401 and names the missing gateway key, and
+# with a synthetic key minted inside the pod it answers 200. No provider, model
+# or upstream API is involved; /v1/models is served from magpie itself.
+assert_magpie_gateway_auth() {
+  log "assert the magpie gateway refuses unkeyed and serves keyed cross-pod callers"
+  local svc unkeyed keyed
   svc="$(kc --namespace default get service \
-    -l app.kubernetes.io/name=echo -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  [ -n "$svc" ] || die "expected echo Service is missing"
-  kc --namespace default port-forward --address=127.0.0.1 "service/$svc" "$ECHO_PORT:8080" \
-    >"$DIAG/echo-port-forward.log" 2>&1 &
-  PIDS+=("$!")
-  wait_http "http://127.0.0.1:$ECHO_PORT/healthz" 180
-  log "echo responded on http://127.0.0.1:$ECHO_PORT"
+    -l app.kubernetes.io/name=magpie -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$svc" ] || die "expected magpie Service is missing"
+  clean_client() {
+    kc --namespace default delete pod e2e-gateway-client \
+      --ignore-not-found --wait=true --timeout=120s >/dev/null
+  }
+  # Same pinned image the rehearsal already uses for its storage probe.
+  clean_client
+  kc apply --namespace default --filename - >/dev/null <<EOF
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-gateway-client
+  namespace: default
+  labels:
+    anylings.dev/owner: e2e
+spec:
+  restartPolicy: Never
+  containers:
+    - name: client
+      image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      command: ["sleep", "3600"]
+EOF
+  kc --namespace default wait pod/e2e-gateway-client --for=condition=Ready --timeout=180s >/dev/null
+
+  # Raw HTTP through nc, not wget: busybox wget discards a 4xx body, and the
+  # body is where the refusal is stated.
+  #
+  # Every header line is terminated by CRLF and the header block by one
+  # further empty line, in both the keyed and the unkeyed case. Interpolating
+  # an optional header into a single printf cannot express that: an empty one
+  # happens to yield the blank line, a present one does not, and the request
+  # then has no end-of-headers marker.
+  request_bytes() {
+    local auth_header="${1-}"
+    printf 'GET /v1/models HTTP/1.0\r\n'
+    printf 'Host: %s\r\n' "$svc"
+    if [ -n "$auth_header" ]; then
+      printf '%s\r\n' "$auth_header"
+    fi
+    printf '\r\n'
+  }
+  request() {
+    request_bytes "${1-}" \
+      | kc --namespace default exec -i e2e-gateway-client -- nc -w 10 "$svc" 3425
+  }
+
+  # Byte-level guard, so a malformed request cannot silently turn this into an
+  # assertion about a connection that never delivered a request. The wire form
+  # must end with exactly one blank line and contain no other.
+  local wire
+  wire="$(request_bytes "Authorization: Bearer $E2E_GATEWAY_KEY" | od -An -tx1 | tr -d ' \n')"
+  case "$wire" in
+    *0d0a0d0a) ;;
+    *) die "keyed request is not terminated by CRLFCRLF: $wire" ;;
+  esac
+  [ "$(printf '%s' "$wire" | grep -o '0d0a0d0a' | wc -l || true)" = 1 ] \
+    || die "keyed request carries more than one blank line: $wire"
+  wire="$(request_bytes '' | od -An -tx1 | tr -d ' \n')"
+  case "$wire" in
+    *0d0a0d0a) ;;
+    *) die "unkeyed request is not terminated by CRLFCRLF: $wire" ;;
+  esac
+
+  # Unkeyed: an authentication refusal that names the gateway key, not a
+  # connection failure or an anonymous success.
+  unkeyed="$(request '')" || true
+  grep -q '^HTTP/1\.[01] 401' <<<"$unkeyed" \
+    || die "magpie did not answer an unkeyed cross-pod request with 401: ${unkeyed:0:120}"
+  grep -q 'gateway key' <<<"$unkeyed" \
+    || die "the cross-pod refusal did not identify the missing gateway key"
+
+  # Keyed: mint an ephemeral key inside the pod. The value is synthetic and is
+  # never printed, so no credential reaches the log.
+  kc --namespace default exec "$(kc --namespace default get pod \
+    -l app.kubernetes.io/name=magpie -o jsonpath='{.items[0].metadata.name}')" -- \
+    /magpie gateway-key add e2e-cross-pod --key "$E2E_GATEWAY_KEY" >/dev/null \
+    || die "could not mint the ephemeral gateway key inside the magpie pod"
+  keyed="$(request "Authorization: Bearer $E2E_GATEWAY_KEY")" || true
+  clean_client
+  grep -q '^HTTP/1\.[01] 200' <<<"$keyed" \
+    || die "magpie did not answer a keyed cross-pod request with 200: ${keyed:0:120}"
+  log "magpie refused the unkeyed and served the keyed cross-pod request"
 }
 
 # Everything below lives in the rehearsal's own labeled objects in its own
@@ -449,7 +544,7 @@ verify() {
   assert_apps
   assert_sops_secret
   assert_gitops_removal
-  assert_echo_http
+  assert_magpie_gateway_auth
   assert_storage_restore
   assert_gitops_handoff
   assert_repeatable

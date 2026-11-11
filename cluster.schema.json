@@ -50,6 +50,18 @@
       "title": "Magpie",
       "type": "object"
     },
+    "Observability": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "Observability",
+      "type": "object"
+    },
     "Repository": {
       "additionalProperties": false,
       "properties": {
@@ -103,6 +115,12 @@
       "$ref": "#/$defs/Magpie",
       "default": {
         "config_claim": ""
+      }
+    },
+    "observability": {
+      "$ref": "#/$defs/Observability",
+      "default": {
+        "enabled": false
       }
     }
   },

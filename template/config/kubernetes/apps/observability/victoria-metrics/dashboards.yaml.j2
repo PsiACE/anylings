@@ -1,0 +1,143 @@
+#% if observability.enabled %#
+---
+# Dashboards served by vmui's "Dashboards" tab. The ApplicationSet installs
+# this ConfigMap with the VictoriaMetrics application, and
+# -vmui.customDashboardsPath=/dashboards reads it at page load.
+#
+# Every panel queries a metric this deployment actually ingests: VictoriaMetrics
+# self-scrapes itself, and the same instance scrapes Gatus. None of these are
+# placeholders, and none depend on a sample that only appears under load
+# (error counters are read as rates, which return 0 rather than nothing).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: victoria-metrics-dashboards
+  namespace: observability
+  annotations:
+    # This ConfigMap comes from the same Application's Git source while the
+    # Deployment comes from its chart source. A negative wave applies it first,
+    # so the pod never starts against a missing dashboard volume.
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  platform-overview.json: |
+    {
+      "title": "Platform overview",
+      "rows": [
+        {
+          "title": "Scrape health",
+          "panels": [
+            {
+              "title": "Targets up",
+              "width": 6,
+              "unit": "short",
+              "expr": ["sum(up)", "count(up)"],
+              "alias": ["up", "configured"]
+            },
+            {
+              "title": "Scrapes failing",
+              "width": 6,
+              "unit": "short",
+              "expr": ["sum(rate(vm_promscrape_scrapes_failed_total[5m]))"]
+            }
+          ]
+        },
+        {
+          "title": "Ingestion",
+          "panels": [
+            {
+              "title": "Rows inserted per second",
+              "width": 6,
+              "expr": ["sum(rate(vm_rows_inserted_total[5m]))"]
+            },
+            {
+              "title": "Rows rejected by cardinality limits",
+              "width": 6,
+              "expr": ["sum(rate(vm_rows_ignored_total[5m])) by (reason)"],
+              "alias": ["{{reason}}"]
+            }
+          ]
+        }
+      ]
+    }
+  storage-budget.json: |
+    {
+      "title": "Storage budget",
+      "rows": [
+        {
+          "title": "Active series and disk",
+          "panels": [
+            {
+              "title": "Active series",
+              "width": 6,
+              "unit": "short",
+              "expr": ["sum(vm_cache_entries{type=\"storage/hour_metric_ids\"})"]
+            },
+            {
+              "title": "Stored data",
+              "width": 6,
+              "unit": "MB",
+              "expr": ["sum(vm_data_size_bytes) / 1024 / 1024"]
+            }
+          ]
+        },
+        {
+          "title": "Headroom",
+          "panels": [
+            {
+              "title": "Free disk in the data volume",
+              "width": 6,
+              "unit": "MB",
+              "expr": ["vm_free_disk_space_bytes / 1024 / 1024"]
+            },
+            {
+              "title": "Process memory",
+              "width": 6,
+              "unit": "MB",
+              "expr": ["process_resident_memory_bytes{job=\"victoria-metrics\"} / 1024 / 1024"]
+            }
+          ]
+        }
+      ]
+    }
+  probe-status.json: |
+    {
+      "title": "Probe status",
+      "rows": [
+        {
+          "title": "Gatus probe results",
+          "panels": [
+            {
+              "title": "Probe success (1 = passing)",
+              "width": 6,
+              "unit": "short",
+              "expr": ["gatus_results_endpoint_success"],
+              "alias": ["{{name}}"]
+            },
+            {
+              "title": "Probe duration",
+              "width": 6,
+              "unit": "s",
+              "expr": ["gatus_results_duration_seconds"],
+              "alias": ["{{name}}"]
+            }
+          ]
+        },
+        {
+          "title": "Probe failures",
+          "panels": [
+            {
+              "title": "Failed checks per second",
+              "width": 6,
+              "expr": ["sum(rate(gatus_results_total{success=\"false\"}[10m])) by (name)"],
+              "alias": ["{{name}}"]
+            },
+            {
+              "title": "Slow queries rejected",
+              "width": 6,
+              "expr": ["sum(rate(vm_slow_queries_total[5m]))"]
+            }
+          ]
+        }
+      ]
+    }
+#% endif %#

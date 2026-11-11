@@ -124,6 +124,13 @@ class Magpie(Model):
         return value
 
 
+class Observability(Model):
+    # Off by default: the slice needs ClusterIP-only access and its own
+    # monitoring decision, so it never appears in a cluster that did not ask
+    # for it. Enabling it deploys VictoriaMetrics single-node and Gatus.
+    enabled: bool = False
+
+
 class Config(Model):
     model_config = ConfigDict(extra="forbid", title="cluster.toml")
 
@@ -131,6 +138,7 @@ class Config(Model):
     argocd: Argocd = Argocd()
     ingress: Ingress = Ingress()
     magpie: Magpie = Magpie()
+    observability: Observability = Observability()
 
 
 def format_errors(error: ValidationError) -> str:

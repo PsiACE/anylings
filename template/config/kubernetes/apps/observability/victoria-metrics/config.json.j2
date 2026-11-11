@@ -1,0 +1,11 @@
+#% if observability.enabled %#
+{
+  "appName": "victoria-metrics",
+  "namespace": "observability",
+  "chartRepo": "ghcr.io/victoriametrics/helm-charts",
+  "chart": "victoria-metrics-single",
+  "chartVersion": "0.50.0",
+  "valuesFile": #{ repository_path('kubernetes/apps/observability/victoria-metrics/values.yaml') | tojson }#,
+  "manifestPath": #{ repository_path('kubernetes/apps/observability/victoria-metrics') | tojson }#
+}
+#% endif %#

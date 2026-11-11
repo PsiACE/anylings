@@ -79,3 +79,17 @@ tunnel_token_file = ""
 # sign-ins are lost when the pod is replaced)
 # Example: "magpie-config"
 config_claim = ""
+
+
+# =============================================================================
+#    Optional self-hosted observability. Disabled by default; enabling it
+#    publishes two ClusterIP-only applications into the `observability`
+#    namespace: single-node VictoriaMetrics (7d retention target) and Gatus
+#    (probe status and alerting). No Grafana, Loki, operator or database is
+#    deployed, and no PersistentVolumeClaim is provisioned automatically.
+# =============================================================================
+[observability]
+
+# OPTIONAL. Default: false
+# enabled = true
+enabled = false

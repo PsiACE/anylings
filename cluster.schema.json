@@ -17,7 +17,7 @@
         },
         "storage_existing_claim": {
           "default": "",
-          "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "title": "Storage Existing Claim",
           "type": "string"
         }
@@ -61,6 +61,30 @@
         }
       },
       "title": "Ingress",
+      "type": "object"
+    },
+    "Magpie": {
+      "additionalProperties": false,
+      "properties": {
+        "config_claim": {
+          "default": "",
+          "title": "Config Claim",
+          "type": "string"
+        }
+      },
+      "title": "Magpie",
+      "type": "object"
+    },
+    "Observability": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "Observability",
       "type": "object"
     },
     "Repository": {
@@ -110,6 +134,18 @@
       "default": {
         "mode": "none",
         "tunnel_token_file": ""
+      }
+    },
+    "magpie": {
+      "$ref": "#/$defs/Magpie",
+      "default": {
+        "config_claim": ""
+      }
+    },
+    "observability": {
+      "$ref": "#/$defs/Observability",
+      "default": {
+        "enabled": false
       }
     },
     "agents": {

@@ -34,11 +34,17 @@ REPO_URL_PATTERN = r"^(https?://|git://|ssh://git@)[^/]+/.+$"
 CHART_VERSION_PATTERN = r"^v?[0-9]+\.[0-9]+\.[0-9]+$"
 # A namespace is a DNS label: dots are not allowed.
 NAMESPACE_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+# A PersistentVolumeClaim name is a DNS subdomain (RFC 1123), like a Service.
+# Magpie and the agent runtime both reference an existing claim, so both use
+# this one rule rather than a second approximation of it.
+PVC_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
 # A container image repository without a tag or digest: the tag is separate so
 # the rendered values never carry two sources for the same version.
 IMAGE_REPOSITORY_PATTERN = r"^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$"
 IMAGE_TAG_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"
-CLAIM_NAME_PATTERN = r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+# Editor hint only: the empty string means "use an emptyDir". Runtime
+# validation stays in the validators, where empty is allowed.
+EMPTY_OR_PVC_NAME_PATTERN = r"^$|" + PVC_NAME_RE.pattern
 
 
 class Model(BaseModel):
@@ -114,21 +120,64 @@ class Agents(Model):
     # private registry or vendor path is baked into the rendered tree.
     image_repository: str = Field(pattern=IMAGE_REPOSITORY_PATTERN)
     image_tag: str = Field(default="0.1.8", pattern=IMAGE_TAG_PATTERN)
-    # An existing claim to mount at /home/t3 instead of an emptyDir. Empty means
-    # the pod gets ephemeral state and the operator is told so; this template
-    # never creates a claim or picks a StorageClass on its own.
-    storage_existing_claim: str = Field(default="", pattern=CLAIM_NAME_PATTERN)
+    # Empty keeps the default ephemeral emptyDir /home/t3; a name opts into an
+    # existing claim the operator created. The platform never creates a claim
+    # or picks a StorageClass.
+    #
+    # No Field `pattern` here: it runs before field validators and would reject
+    # the documented empty value, while an omitted key defaulted to the same ""
+    # and passed. The validator below owns both cases.
+    storage_existing_claim: str = Field(
+        default="",
+        json_schema_extra={"pattern": EMPTY_OR_PVC_NAME_PATTERN},
+    )
 
     @field_validator("storage_existing_claim")
     @classmethod
-    def check_claim(cls, value: str) -> str:
-        if value == "":
+    def check_storage_claim(cls, value: str) -> str:
+        if not value:
             return value
-        # A claim name is a DNS subdomain; keep it to the conservative subset so
-        # an accidental path or Secret reference cannot be expressed here.
-        if not re.fullmatch(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?", value):
-            raise ValueError(f"{value!r} is not a valid PersistentVolumeClaim name")
+        # A claim name is a DNS subdomain: 253 characters overall and at most
+        # 63 per dot-separated label. A bare regex match would accept a single
+        # over-long label, which the API server then rejects at sync time.
+        if (
+            len(value) > 253
+            or not PVC_NAME_RE.fullmatch(value)
+            or any(len(label) > 63 for label in value.split("."))
+        ):
+            raise ValueError(
+                f"{value!r} is not a valid PersistentVolumeClaim name "
+                "(lowercase DNS subdomain, at most 253 characters, "
+                "each label at most 63)"
+            )
         return value
+
+
+class Magpie(Model):
+    # Empty keeps the default ephemeral emptyDir /config volume. A name opts
+    # into an existing claim in the application's own namespace; the platform
+    # never creates that claim, so removing the app cannot delete its data.
+    config_claim: str = ""
+
+    @field_validator("config_claim")
+    @classmethod
+    def check_config_claim(cls, value: str) -> str:
+        if not value:
+            return value
+        if len(value) > 253 or not PVC_NAME_RE.fullmatch(value):
+            raise ValueError(
+                f"{value!r} is not a valid PersistentVolumeClaim name "
+                "(lowercase DNS subdomain, at most 253 characters)"
+            )
+        return value
+        return value
+
+
+class Observability(Model):
+    # Off by default: the slice needs ClusterIP-only access and its own
+    # monitoring decision, so it never appears in a cluster that did not ask
+    # for it. Enabling it deploys VictoriaMetrics single-node and Gatus.
+    enabled: bool = False
 
 
 class Config(Model):
@@ -137,6 +186,8 @@ class Config(Model):
     repository: Repository
     argocd: Argocd = Argocd()
     ingress: Ingress = Ingress()
+    magpie: Magpie = Magpie()
+    observability: Observability = Observability()
     # Optional: a cluster without an operator-supplied registry simply has no
     # agent runtime. Making it required would block every existing deployment
     # and the native rehearsal on a registry that does not exist there.

@@ -1,0 +1,6 @@
+[repository]
+url = "git://git.example.test/platform.git"
+
+# Self-hosted observability slice: VictoriaMetrics single-node plus Gatus.
+[observability]
+enabled = true

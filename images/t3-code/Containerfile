@@ -55,7 +55,10 @@ RUN set -eux; \
         --require-hashes \
         --requirements /tmp/requirements.txt; \
     rm /tmp/requirements.txt; \
-    /opt/bub/bin/bub --version
+    /opt/bub/bin/bub --version; \
+    # `bub acp` is the interface T3 launches, so a build that lacks it is not
+    # this image even though the version above printed fine.
+    /opt/bub/bin/bub acp --help > /dev/null
 
 # Verified download: the archive is checked against the release's published
 # digest before extraction, and the extracted binary runs once so a platform

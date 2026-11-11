@@ -1,0 +1,113 @@
+#% if observability.enabled %#
+---
+# Single-node VictoriaMetrics: the platform's metric store. It scrapes the
+# targets below itself, so no vmagent, Prometheus operator or extra store is
+# deployed alongside it.
+#
+# Retention is an explicit 7d, but that is not physical erasure after seven
+# days. VictoriaMetrics prunes whole per-month partitions, and its own docs say
+# background merges may never run for a month that stopped receiving data, so
+# old bytes can outlive the window. The 7d value is a query/storage target.
+# Audit records need a separate store with its own <=30d policy; they do not
+# belong here.
+# Operator-style naming gives the chart a real Service named `victoria-metrics`
+# instead of the legacy `-server` suffix, and it is the only naming mode this
+# chart version supports for a Deployment.
+useLegacyNaming: false
+rbac:
+  # The chart would otherwise create a cluster-scoped ClusterRole that may read
+  # Nodes, Services, Endpoints, Pods and Ingresses. This deployment only scrapes
+  # statically configured in-cluster targets, so it needs no Kubernetes API
+  # access and creates no cluster RBAC.
+  create: false
+serviceAccount:
+  automountToken: false
+server:
+  # A Deployment, not the chart's default StatefulSet: this instance keeps no
+  # claim, and a Deployment expresses "one replaceable pod" without a
+  # volumeClaimTemplate.
+  mode: deployment
+  fullnameOverride: victoria-metrics
+  retentionPeriod: "7d"
+  # Never provision a claim automatically. The chart's default is a 16Gi PVC,
+  # which on a cloud backend would silently bill a volume nothing here owns.
+  # An emptyDir keeps the pod writable where no storage class was chosen, and
+  # its sizeLimit bounds the disk the container can consume.
+  #
+  # To keep metrics across a reschedule, point this at a claim the operator
+  # created deliberately (`existingClaim`) instead of enabling provisioning.
+  persistentVolume:
+    enabled: false
+  emptyDir:
+    sizeLimit: 2Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      # Caps the whole container. The flags below bound internal caches and
+      # ingestion cardinality only, so they cannot replace a memory limit.
+      memory: 768Mi
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  podSecurityContext:
+    runAsNonRoot: true
+    # The image ships its own nonroot account, and fsGroup keeps a kubelet-made
+    # storage volume writable by that account.
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  extraArgs:
+    # Disable the chart's env-flag mapping so an accidental VM_* environment
+    # variable cannot override the limits set here.
+    envflag.enable: false
+    loggerFormat: json
+    # Lets vmui and /metrics show this instance's own health.
+    selfScrapeInterval: 30s
+    memory.allowedBytes: 256Mi
+    # Bounded label and churn budgets: over-budget series are counted in
+    # vm_rows_ignored_total instead of growing the store without limit.
+    maxLabelsPerTimeseries: 30
+    storage.maxHourlySeries: 2000
+    storage.maxDailySeries: 5000
+    storage.minFreeDiskSpaceBytes: 256MiB
+    search.maxQueryDuration: 30s
+    # Serve the platform dashboards from the ConfigMap mounted below. Without
+    # this flag vmui shows only its query tab.
+    vmui.customDashboardsPath: /dashboards
+  extraVolumes:
+    - name: dashboards
+      configMap:
+        name: victoria-metrics-dashboards
+  extraVolumeMounts:
+    - name: dashboards
+      mountPath: /dashboards
+      readOnly: true
+  scrape:
+    enabled: true
+    config:
+      global:
+        # One modest interval. This slice monitors the platform; sub-minute
+        # resolution would only multiply stored samples.
+        scrape_interval: 30s
+        scrape_timeout: 10s
+      scrape_configs:
+        - job_name: victoria-metrics
+          static_configs:
+            - targets:
+                - 127.0.0.1:8428
+        - job_name: gatus
+          static_configs:
+            - targets:
+                - gatus.observability.svc.cluster.local:8080
+service:
+  # ClusterIP only. The chart makes a StatefulSet service headless; this is a
+  # Deployment and an ordinary Service, and nothing here creates an Ingress or
+  # a LoadBalancer.
+  type: ClusterIP
+#% endif %#

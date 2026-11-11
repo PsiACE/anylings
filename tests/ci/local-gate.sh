@@ -64,6 +64,19 @@ log "workflow and safety contracts"
 bash tests/ci/check-workflow-gate.sh
 bash tests/ci/check-safety.sh
 bash tests/ci/check-k0s-reset.sh
+# Renders the pinned observability charts from an enabled input; offline.
+bash tests/ci/check-observability.sh
+# Renders the Magpie /config claim contract: emptyDir by default, a referenced
+# claim when configured, and no app-owned PersistentVolumeClaim either way.
+bash tests/ci/check-magpie-config-claim.sh
+# The agent runtime template and entrypoint, rendered through the pinned chart.
+# The image itself is exercised only when one is available (--image), so this
+# stays a static check and never builds an image behind the caller's back.
+if [ -n "${ANYLINGS_RUNTIME_IMAGE:-}" ]; then
+  bash tests/runtime/check-t3-code.sh --image "$ANYLINGS_RUNTIME_IMAGE"
+else
+  bash tests/runtime/check-t3-code.sh
+fi
 
 log "workflow lint"
 zizmor --offline .github/workflows

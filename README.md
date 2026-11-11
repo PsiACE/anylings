@@ -100,7 +100,7 @@ Secret). Argo self-management stays outside this generated workload set.
 
 The applications in that set are the platform's real workloads. `magpie` is the
 shared model gateway and the first of them; `reloader` and, where the configured
-inputs enable it, `cloudflare-tunnel` accompany it.
+inputs enable it, `cloudflare-tunnel` and `observability` accompany it.
 
 Deletion follows [Autopilot's application semantics](https://github.com/argoproj-labs/argocd-autopilot/blob/c102467016841f0532a6def064d618322156a7a7/cmd/commands/common.go):
 Git removal deletes the generated Application and its workloads. Automated sync
@@ -130,7 +130,8 @@ container image rather than a local rebuild.
 - Probes use the image's own `magpie healthcheck`, which succeeds only while the
   gateway answers.
 - Runs as uid/gid `65532` with a read-only root filesystem; `/config` holds all
-  state and `/tmp` is scratch, both provided as `emptyDir` volumes.
+  state and `/tmp` is scratch. `/tmp` is always an `emptyDir`; `/config` is an
+  `emptyDir` by default (see below).
 
 Because the gateway binds `0.0.0.0`, any caller outside the pod is remote, and
 upstream answers a remote caller without an enabled gateway key with HTTP 401.
@@ -139,10 +140,34 @@ before publishing it.
 
 ### Operator inputs and prerequisites
 
-1. **Persistent storage for `/config`.** With `emptyDir`, providers, gateway
-   keys and sign-ins are lost when the pod is replaced, so this instance is not
-   a durable gateway yet. Choose a StorageClass for the cluster (see above) and
-   switch the `config` entry to a `persistentVolumeClaim` sized for it.
+1. **Persistent storage for `/config`.** By default `/config` is an `emptyDir`,
+   so providers, gateway keys and sign-ins are lost when the pod is replaced.
+   This is unchanged for anyone who has not chosen durable storage. To keep them
+   across pod replacement, set one input:
+
+    ```toml
+    [magpie]
+    config_claim = "magpie-config"
+    ```
+
+    That names an **existing** `PersistentVolumeClaim` in the application's own
+    namespace (`default`). Prerequisites, all outside this repository:
+
+    - Create the claim before syncing the Application, with the StorageClass and
+      size you want. The platform mounts it and never creates it.
+    - You own the claim and its data: this tree renders no
+      `PersistentVolumeClaim` for it, so removing Magpie from Git removes the
+      workload but leaves the claim. The claim and its volume still follow the
+      cluster's own storage and reclaim policy, so back up what you need as you
+      would any application data.
+    - The pod runs as uid/gid `65532` and sets `fsGroup: 65532`, so `/config`
+      must be writable by gid `65532`. Whether the driver enforces that group on
+      mount is driver- and volume-dependent: check the CSI driver or volume
+      configuration in use rather than assuming all of them do, and set matching
+      ownership on a volume type that does not.
+
+    Leaving `config_claim` empty keeps the ephemeral default.
+
 2. **Provider credentials.** Add vendor credentials to the running instance's
    `/config`; they are not part of this repository. Do not put vendor API keys in
    `values.sops.yaml` or add a second secret-delivery path for them.
@@ -154,7 +179,10 @@ before publishing it.
    must keep gateway-key authentication on.
 
 The rehearsal covers rendering, reconciliation and gateway-key enforcement. It
-does not cover vendor access, durable storage or public exposure.
+does not cover vendor access, durable storage or public exposure. The
+existing-claim rendering is covered; a pod replacement or re-mount on real CSI
+storage is not tested, and moving data onto a claim does not by itself show that
+a replaced volume keeps it.
 
 ## Agent runtime
 
@@ -199,11 +227,80 @@ environment or DOKS-based runner for agent work. That path currently has no
 supported interface in this repository, so it stays an explicit pending
 integration rather than a fake adapter.
 
+- Bub's ACP subcommand is a separate plugin, not part of the `app` extra:
+  `bub-acp-server` provides `bub acp`. It is installed and asserted in the
+  image, because a Bub that only prints a version cannot serve as the provider
+  T3 launches.
+
+### Checking the runtime
+
 `bash tests/runtime/check-t3-code.sh` checks the image definition and the
-entrypoint against a synthetic `HOME`, renders the template, and validates the
-values through the pinned `app-template` chart; `--image <ref>` also checks a
-built image's toolchain versions and startup. The check makes no registry push
-and no cluster or cloud call.
+entrypoint against a synthetic `HOME`, renders both volume branches from
+`tests/config/agents.toml` and an explicit-empty variant, and validates each
+through the pinned `app-template` chart. It fails if that chart cannot be
+pulled, rather than reporting a chart check it did not perform.
+
+With `--image <ref>` it also runs a built image: both executables must report
+their pinned versions, `bub acp --help` must work, and the server must answer
+`/api/auth/session` with a 200 under the deployment's shape (nonroot,
+read-only root filesystem, no-network, only `/home/t3` and `/tmp` writable).
+The check makes no registry push and no cluster or cloud call.
+
+## Observability
+
+Opt in with `[observability] enabled = true`. That publishes two applications
+into the `observability` namespace; leaving it disabled publishes nothing, adds
+no namespace and allows no extra chart registry.
+
+- **victoria-metrics** — single-node VictoriaMetrics (`victoria-metrics-single`
+  chart), the only metric store. It scrapes its own `/metrics` and Gatus, and
+  serves queries and dashboards through vmui on `/vmui/`. No Prometheus operator,
+  vmagent, Loki or database is deployed with it.
+- **gatus** — probe-based status and alerting. Its dashboard is a status page;
+  it also exports `gatus_results_*` metrics that VictoriaMetrics scrapes, so
+  probe history that outlives the status page is read from metrics.
+
+Read these as operational facts, not guarantees:
+
+- **Retention is a target, not erasure.** `-retentionPeriod=7d` bounds what you
+  can query. VictoriaMetrics prunes whole per-month partitions, and its docs
+  state that background merges may never run for a month that stopped receiving
+  data, so old bytes can outlive seven days on disk. Do not treat the store as a
+  hard seven-day audit boundary. Audit retention belongs in a separate store with
+  its own policy.
+- **Gatus history is bounded memory, not a seven-day archive.** It runs with
+  `storage.type: memory`, so its own results and events are capped by count and
+  lost on restart. Longer probe history means querying the scraped metrics.
+- **Nothing survives a reschedule by default.** VictoriaMetrics uses a bounded
+  `emptyDir`, and no `PersistentVolumeClaim` is provisioned for either
+  application, so no cloud volume is created or billed implicitly. To keep
+  metrics across a pod replacement, create a claim yourself and point
+  `server.persistentVolume.existingClaim` at it.
+- **Access is in-cluster.** Both Services are `ClusterIP`; no Ingress, route,
+  LoadBalancer or NodePort is rendered. Reaching vmui or Gatus from outside is a
+  separate ingress decision, and it must keep authentication in front of them.
+
+Alerting is off unless you provide credentials. Gatus reads
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from an optional Secret reference
+named `gatus-telegram` in the `observability` namespace. Without that Secret the
+pod still starts, and Gatus ignores the declared Telegram alerts because the
+provider does not validate. Create the Secret with your normal secret-delivery
+mechanism; no token is stored in this repository:
+
+```bash
+kubectl --namespace observability create secret generic gatus-telegram \
+  --from-literal=TELEGRAM_BOT_TOKEN=... --from-literal=TELEGRAM_CHAT_ID=...
+```
+
+The rendered values do not carry resource sizing for your environment: the
+committed limits (`768Mi` for the metric store, `128Mi` for Gatus) are a small
+default, and ingestion is additionally capped by series and label budgets.
+Dashboards live in the published `victoria-metrics-dashboards` ConfigMap and are
+loaded by vmui, not by a separate dashboard server.
+
+Web analytics and access-log analysis are not part of this slice. Aggregate
+usage reporting would need its own store; until then, treat web analytics as
+pending rather than inferring it from these metrics.
 
 Other action-first commands:
 
@@ -232,17 +329,30 @@ and the cluster; encrypt whole sensitive files, not just Secret data fields.
 
 ## CI
 
-One platform renderer is exercised with three inputs: `tests/config/base.toml`
-(defaults, no ingress), `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
-credentials, a Git subdirectory and a custom Argo namespace) and
-`tests/config/agents.toml` (the optional agent runtime with a synthetic registry
-and claim). They are configuration cases, not k0s/DOKS implementations.
-Infrastructure validation checks the independent OpenTofu configurations; the
-native integration run uses the same base input.
+The shared platform renderer is exercised with two inputs: `tests/config/base.toml`
+(defaults, no ingress) and `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
+credentials, a Git subdirectory and a custom Argo namespace). They are
+configuration cases, not k0s/DOKS implementations. Infrastructure validation
+checks the independent OpenTofu configurations; the native integration run uses
+the same base input.
 
-The agent runtime is checked by `tests/runtime/check-t3-code.sh`, which also
-builds and exercises the image in CI. It pushes nothing, runs no cluster and
-makes no cloud call, so an image that cannot start still fails the build.
+The optional application slices add focused checks rather than more shared
+render cases, because each needs its own pinned chart:
+`tests/ci/check-magpie-config-claim.sh` (the Magpie `/config` claim),
+`tests/ci/check-observability.sh` (the disabled-by-default slice) and
+`tests/runtime/check-t3-code.sh` (the agent runtime). Each renders its own
+`tests/config/` fixture through `just configure platform`, so `base` still
+covers a cluster with every optional slice omitted.
+
+`tests/runtime/check-t3-code.sh` covers both agent-runtime volume branches
+(`emptyDir` and an existing claim) and fails when the pinned chart cannot be
+pulled; it never reports a chart check it did not run. With `--image <ref>` it
+also checks a built image, and that is what the CI `agent runtime` job does
+after building it. It pushes nothing, runs no cluster and makes no cloud call,
+so an image that cannot start still fails the build. `just`-level callers get
+the static check through `tests/ci/local-gate.sh`; pass
+`ANYLINGS_RUNTIME_IMAGE=<ref>` there to include an already-built image instead
+of building a second one.
 
 Every pull request runs the offline gate: safety contracts, both platform render
 inputs, and OpenTofu format/validate/test. Those checks take minutes, need no
@@ -271,6 +381,19 @@ partially-encrypted negative test cannot exist in one and be missing from the
 other. It is still offline only: it renders and validates, but proves no runtime
 behavior, so it does not stand in for a native run, DOKS CSI, Cloudflare or
 multi-host checks.
+
+`tests/ci/check-observability.sh` renders `tests/config/observability.toml` and
+then renders the actually pinned charts from its output, so the optional slice is
+checked against real artifacts rather than against the values file's intent. It
+asserts that the default input publishes nothing, then on the enabled render:
+explicit 7d retention, resource limits, non-root and read-only root filesystems,
+ClusterIP-only Services with no route or LoadBalancer, no automatically
+provisioned claim, no cluster-scoped metrics RBAC, an optional notification
+Secret reference rather than embedded credentials, and that the vmui dashboard
+flag, its mount, the ConfigMap, the scrape target and the probe Services all name
+things that render actually creates, with no empty dashboard panel. The
+contracts job and `tests/ci/local-gate.sh` both call it, before any native run
+exists.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through

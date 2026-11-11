@@ -44,6 +44,11 @@ jobs:
       - name: Check CI authorization and failure-safe cleanup
         run: bash tests/ci/check-safety.sh
 
+      # The default stays ephemeral; a named claim is mounted by reference and
+      # never rendered as an app-owned PVC. Uses the pinned chart, no cluster.
+      - name: Check the magpie config-claim persistence contract
+        run: bash tests/ci/check-magpie-config-claim.sh
+
       - name: Check k0s recovery without live kubeconfig
         run: bash tests/ci/check-k0s-reset.sh
 
@@ -52,6 +57,12 @@ jobs:
       # being skipped. Offline, no runner and no GitHub API.
       - name: Check workflow gate wiring
         run: bash tests/ci/check-workflow-gate.sh
+
+      # Renders the real pinned charts from an enabled configuration input, so
+      # the optional slice is checked against artifacts rather than values-file
+      # intent. Offline: no cluster, no credential, synthetic Secret name only.
+      - name: Check the optional observability slice
+        run: bash tests/ci/check-observability.sh
 
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.

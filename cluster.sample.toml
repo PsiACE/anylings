@@ -64,6 +64,35 @@ mode = "none"
 tunnel_token_file = ""
 
 
+# =============================================================================
+#    The shared Magpie model gateway. Nothing here is a credential: the image
+#    and runtime settings are fixed by the rendered values, and provider keys
+#    live only in the running instance's /config.
+# =============================================================================
+[magpie]
+
+# Existing PersistentVolumeClaim to mount at /config, in the application's own
+# namespace ("default"). The platform mounts it and never creates it, so
+# removing the app from Git cannot delete its data; you own the claim, its
+# StorageClass and its backups. The claim must be writable by gid 65532.
+# OPTIONAL. Default: "" (an ephemeral emptyDir; providers, gateway keys and
+# sign-ins are lost when the pod is replaced)
+# Example: "magpie-config"
+config_claim = ""
+
+
+# =============================================================================
+#    Optional self-hosted observability. Disabled by default; enabling it
+#    publishes two ClusterIP-only applications into the `observability`
+#    namespace: single-node VictoriaMetrics (7d retention target) and Gatus
+#    (probe status and alerting). No Grafana, Loki, operator or database is
+#    deployed, and no PersistentVolumeClaim is provisioned automatically.
+# =============================================================================
+[observability]
+
+# OPTIONAL. Default: false
+# enabled = true
+enabled = false
 
 # =============================================================================
 #    The T3 Code agent runtime. Optional: without this section no agent runtime

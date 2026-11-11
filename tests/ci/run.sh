@@ -31,7 +31,7 @@ STORAGE_PATH="$STATE/storage"
 E2E_ARGOCD_NS="argo-system"
 E2E_REVISION=""
 SOPS_VALUE="anylings-ci-decrypted"
-ECHO_PORT=18080
+MAGPIE_PORT=18080
 PIDS=()
 mkdir "$DIAG"
 
@@ -87,14 +87,6 @@ teardown() {
 }
 
 # ------------------------------------------------------------------ cluster --
-
-wait_http() {
-  local url="$1" deadline=$((SECONDS + ${2:-180}))
-  until curl --silent --fail --max-time 3 --output /dev/null "$url" 2>/dev/null; do
-    (( SECONDS < deadline )) || die "timed out waiting for $url"
-    sleep 2
-  done
-}
 
 phase_cluster() {
   # Only the disposable environment and input profile differ. The same public
@@ -218,7 +210,7 @@ assert_apps() {
   # One API snapshot: no per-object requests or duplicate existence passes.
   # Include the expected apps so an empty or partially created list cannot pass.
   until kc --namespace "$E2E_ARGOCD_NS" get applications -o json | jq -e --arg rev "$E2E_REVISION" '
-    (["bootstrap", "root", "argo", "echo", "reloader"]
+    (["bootstrap", "root", "argo", "magpie", "reloader"]
       - [.items[].metadata.name] | length == 0) and
     all(.items[];
       .status.sync.status == "Synced" and .status.health.status == "Healthy" and
@@ -247,40 +239,51 @@ assert_sops_secret() {
 # Exercise ApplicationSet's default sync/deletion policy through Git, not an
 # imperative kubectl delete or a private-controller-state assertion.
 assert_gitops_removal() {
-  log "remove and restore echo through its Git application config"
-  local relative="kubernetes/apps/default/echo/config.json"
-  local saved="$STATE/echo-config.json" resources=()
+  log "remove and restore magpie through its Git application config"
+  local relative="kubernetes/apps/default/magpie/config.json"
+  local saved="$STATE/magpie-config.json" resources=()
   mapfile -t resources < <(kc --namespace default get deployments,services \
-    -l app.kubernetes.io/name=echo -o name)
-  [ "${#resources[@]}" -gt 0 ] || die "echo has no deployed resources"
+    -l app.kubernetes.io/name=magpie -o name)
+  [ "${#resources[@]}" -gt 0 ] || die "magpie has no deployed resources"
   cp "$GITWORK/$relative" "$saved"
   git -C "$GITWORK" rm --quiet "$relative"
   git -C "$GITWORK" -c user.name=e2e -c user.email=e2e@cluster.local \
-    commit --quiet --message "remove echo application config"
+    commit --quiet --message "remove magpie application config"
   git -C "$GITWORK" push --quiet "$GIT_PUSH_URL" main
-  kc --namespace "$E2E_ARGOCD_NS" wait --for=delete application/echo --timeout=900s
+  kc --namespace "$E2E_ARGOCD_NS" wait --for=delete application/magpie --timeout=900s
   kc --namespace default wait --for=delete "${resources[@]}" --timeout=300s
 
   mv "$saved" "$GITWORK/$relative"
   git -C "$GITWORK" add "$relative"
   git -C "$GITWORK" -c user.name=e2e -c user.email=e2e@cluster.local \
-    commit --quiet --message "restore echo application config"
+    commit --quiet --message "restore magpie application config"
   git -C "$GITWORK" push --quiet "$GIT_PUSH_URL" main
   E2E_REVISION="$(git -C "$GITWORK" rev-parse HEAD)"
   assert_apps
 }
 
-assert_echo_http() {
-  log "assert the echo application answers over HTTP"
-  local svc
+# Port-forwarding makes the caller remote, so the gateway must refuse an
+# unkeyed request. That refusal is the security contract this asserts, not a
+# model call: no provider, key or upstream API is involved.
+assert_magpie_http() {
+  log "assert the magpie gateway answers and refuses unkeyed remote callers"
+  local svc code
   svc="$(kc --namespace default get service \
-    -l app.kubernetes.io/name=echo -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  [ -n "$svc" ] || die "expected echo Service is missing"
-  kc --namespace default port-forward --address=127.0.0.1 "service/$svc" "$ECHO_PORT:8080" \
-    >"$DIAG/echo-port-forward.log" 2>&1 &
+    -l app.kubernetes.io/name=magpie -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$svc" ] || die "expected magpie Service is missing"
+  kc --namespace default port-forward --address=127.0.0.1 "service/$svc" "$MAGPIE_PORT:3425" \
+    >"$DIAG/magpie-port-forward.log" 2>&1 &
   PIDS+=("$!")
-  wait_http "http://127.0.0.1:$ECHO_PORT/healthz" 180
-  log "echo responded on http://127.0.0.1:$ECHO_PORT"
+  local deadline=$((SECONDS + 180))
+  while :; do
+    code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 \
+      "http://127.0.0.1:$MAGPIE_PORT/v1/models" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != 000 ] && break
+    (( SECONDS < deadline )) || die "magpie gateway did not answer on $MAGPIE_PORT"
+    sleep 2
+  done
+  [ "$code" = 401 ] || die "magpie answered an unkeyed remote request with HTTP $code, not 401"
+  log "magpie gateway answered on $MAGPIE_PORT and refused the unkeyed remote request with 401"
 }
 
 # Everything below lives in the rehearsal's own labeled objects in its own
@@ -449,7 +452,7 @@ verify() {
   assert_apps
   assert_sops_secret
   assert_gitops_removal
-  assert_echo_http
+  assert_magpie_http
   assert_storage_restore
   assert_gitops_handoff
   assert_repeatable

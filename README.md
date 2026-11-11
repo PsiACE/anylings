@@ -98,6 +98,57 @@ values path and optional manifest path; it contains no credentials. The Git
 source carries values only unless `manifestPath` is set (the tunnel's KSOPS
 Secret). Argo self-management stays outside this generated workload set.
 
+The applications in that set are the platform's real workloads, not samples:
+`magpie` (first, the shared model gateway) and `reloader`, plus
+`cloudflare-tunnel` when ingress is enabled.
+
+## Magpie
+
+[Magpie](https://github.com/yetone/magpie) is the first real workload:
+`kubernetes/apps/default/magpie/` in the rendered tree. It is deployed as the
+upstream container image, not rebuilt here.
+
+- Image: `ghcr.io/yetone/magpie:0.1.3078`, pinned to its multi-arch index digest.
+  The release satisfies the repository's three-day preference, and upstream
+  publishes several releases a day, so tag and digest move together through
+  dependency maintenance instead of tracking `latest`.
+- Gateway port `3425` (upstream default, `MAGPIE_ADDR=0.0.0.0:3425`). Port
+  `3430` is upstream's separate browser page and is not exposed here.
+- Probes run the image's own `magpie healthcheck`, which exits 0 only while the
+  gateway answers; no health endpoint was invented.
+- The upstream image runs as uid/gid `65532`, keeps all state under `/config`,
+  and works with a read-only root filesystem when `/config` and `/tmp` are
+  writable, which the values provide as `emptyDir` volumes.
+
+Binding the gateway to `0.0.0.0` makes every caller that is not the pod itself a
+remote caller, and upstream refuses remote callers that do not present an enabled
+gateway key with HTTP 401. That is why this workload must not be published
+without a gateway key: provisioning one is an operator step below, so the
+deployed gateway is closed to unauthenticated clients by default rather than open.
+
+### Operator inputs and prerequisites
+
+1. **Storage for `/config`.** The values use `emptyDir`, so providers, gateway
+   keys and sign-ins do not survive pod replacement. Before treating this
+   instance as the durable gateway, choose a StorageClass for the cluster (see
+   above) and switch the `config` persistence entry to a `persistentVolumeClaim`
+   sized for it. This is a deliberate, explicit decision; no class is guessed.
+2. **Provider credentials.** Magpie reaches model vendors with credentials an
+   administrator adds to its own `/config` volume. They are **not** part of this
+   repository: do not put vendor API keys in `values.sops.yaml`, and do not add a
+   second secret-delivery path for them. Add them to the running instance.
+3. **Gateway keys.** Create one per client with
+   `magpie gateway-key add <name>` inside the pod. Upstream mints the value; it
+   must not be committed. Callers then send it as `Authorization: Bearer <key>`.
+4. **Reaching the gateway.** The Service is cluster-internal. Exposing it beyond
+   the cluster is an ingress decision owned by the ingress configuration and the
+   Cloudflare root, and any public route must keep gateway-key authentication on.
+   Ingress changes are not made by this workload definition.
+
+These prerequisites are unexercised by CI: the rehearsal proves the rendered
+Application reconciles and that the gateway answers and refuses unkeyed remote
+callers. It does not prove vendor access, durable storage, or public exposure.
+
 Deletion follows [Autopilot's application semantics](https://github.com/argoproj-labs/argocd-autopilot/blob/c102467016841f0532a6def064d618322156a7a7/cmd/commands/common.go):
 Git removal deletes the generated Application and its workloads. Automated sync
 uses prune, self-heal and allow-empty; ApplicationSet uses its default `sync`
@@ -156,11 +207,13 @@ are disabled. There is no Soft Serve deployment, SSH administration, GitHub
 publication branch or repository-write token. Plaintext unauthenticated Git transport
 is restricted to this disposable network; deployments should use HTTPS or trusted SSH.
 
-CI checks the pushed revision and application health, actual decryption and HTTP,
-PVC persistence/fresh-volume restore, Git-only Argo configuration change/restoration,
-Git removal/recreation of echo through ApplicationSet, and no-change OpenTofu
-repeats. Narrow safety checks cover confidentiality and failed reset/state retention. Cleanup resets the recorded cluster before deleting
-its disposable volume data; only sanitized diagnostics are uploaded.
+CI checks the pushed revision and application health, actual decryption, the
+magpie gateway answering while refusing unkeyed remote callers, PVC persistence
+and fresh-volume restore, Git-only Argo configuration change and restoration,
+Git removal/recreation of magpie through ApplicationSet, and no-change OpenTofu
+repeats. Narrow safety checks cover confidentiality and failed reset/state
+retention. Cleanup resets the recorded cluster before deleting its disposable
+volume data; only sanitized diagnostics are uploaded.
 
 Single-host CI does not prove multi-host upgrades, HA, database-consistent recovery,
 DOKS CSI recovery, Cloudflare Access propagation or R2 permissions. Those require

@@ -100,9 +100,12 @@ this root directly: deleting its old HCL resources otherwise schedules deletion.
 4. Review the platform plan: only the new bootstrap Application should be added.
    Existing Argo must not be reinstalled. Apply and check `bootstrap`, `root`,
    `argo`, the `kubernetes` ApplicationSet and all generated workload Applications.
-   Existing workload names (`echo`, `reloader`, optional `cloudflare-tunnel`) are
-   retained to avoid rename-driven replacement. Resolve ownership conflicts
-   explicitly; do not force over another controller's resources.
+   Existing workload names (`reloader`, optional `cloudflare-tunnel`) are
+   retained to avoid rename-driven replacement. The retired `echo` sample has no
+   replacement by that name: it is removed by Git deletion like any other
+   application, and the real `magpie` workload is added separately. Resolve
+   ownership conflicts explicitly; do not force over another controller's
+   resources.
 5. Remove obsolete Git paths only after the new owners reconcile successfully.
 
 This migration has not been exercised against a live existing installation.

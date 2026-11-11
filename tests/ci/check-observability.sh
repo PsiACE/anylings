@@ -296,6 +296,17 @@ check_wiring() {
     if grep -qE '^\s*$|TODO|TBD|PLACEHOLDER|example_metric' <<<"$queries"; then
       die "$key contains a placeholder query"
     fi
+
+    # Every `job="..."` matcher must name a scrape job this render actually
+    # declares, or the panel is permanently empty while still looking valid.
+    local names matcher
+    names="$(yq -r 'select(.kind == "ConfigMap") | .data["scrape.yml"] // ""' "$vm" \
+      | sed -n 's/^ *- *job_name: *\(.*\)$/\1/p')"
+    [ -n "$names" ] || die "the metric store renders no scrape job_name, so panels cannot select one"
+    for matcher in $(grep -oE 'job="[^"]+"' <<<"$queries" | sed 's/^job="//;s/"$//' | sort -u); do
+      grep -qx -- "$matcher" <<<"$names" \
+        || die "$key queries job=\"$matcher\", which no rendered scrape job declares ($(tr '\n' ' ' <<<"$names"))"
+    done
   done
 
   # Cross-application wiring: the scrape target and the probes must name

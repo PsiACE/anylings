@@ -184,6 +184,68 @@ existing-claim rendering is covered; a pod replacement or re-mount on real CSI
 storage is not tested, and moving data onto a claim does not by itself show that
 a replaced volume keeps it.
 
+## Agent runtime
+
+`kubernetes/apps/agents/t3-code/` in the rendered tree runs the [T3 Code](https://github.com/pingdotgg/t3code)
+web server, with the [Bub](https://github.com/bubbuild/bub) ACP executable on its
+`PATH` as the provider T3 can launch. It is **opt-in**: without an `[agents]`
+section in `cluster.toml` nothing is rendered, so a cluster with no published
+runtime image stays deployable.
+
+The image is built here from `images/t3-code/Containerfile` rather than pulled:
+
+- T3 Code `0.1.8`, the upstream self-contained release binary, verified against
+  that release's published `SHA256SUMS` during the build and pinned for both
+  `linux/amd64` and `linux/arm64`.
+- Bub `0.6.1` from PyPI, installed with its `app` extra and hash-verified from
+  `images/t3-code/requirements.txt`.
+- Runs as uid/gid `65532` with a read-only root filesystem; T3's database and
+  project checkouts live under the writable `/home/t3`, and `/tmp` is scratch.
+
+The server is reachable only through a cluster-internal `ClusterIP` Service on
+port `3773`. Its own authentication is never disabled: a caller that is not the
+pod's own loopback needs a pairing token or a bearer token, minted with
+`t3 auth pairing create` / `t3 auth session issue` inside the pod.
+
+### Operator inputs and prerequisites
+
+1. **Publish the image.** Build and push `images/t3-code/` to a registry of your
+   choice and set `agents.image_repository`. The template never guesses a
+   registry, and no image is committed or published by CI.
+2. **Persistent state.** `agents.storage_existing_claim` names a claim you
+   created, mounted at `/home/t3`. Empty means `emptyDir`, which loses the
+   database and every checkout when the pod is replaced. This template creates
+   no claim and selects no StorageClass.
+3. **Provider registration.** Sign in to a provider and choose models inside the
+   running instance. T3 writes that state under `/home/t3/.t3`; it is never in
+   `values.yaml`, and no vendor key or model is preselected here.
+4. **Remote reachability.** Exposing the server beyond the cluster is an ingress
+   decision made elsewhere, and any route must keep T3's authentication on.
+
+Not yet part of this slice, and not simulated by it: registering a remote
+environment or DOKS-based runner for agent work. That path currently has no
+supported interface in this repository, so it stays an explicit pending
+integration rather than a fake adapter.
+
+- Bub's ACP subcommand is a separate plugin, not part of the `app` extra:
+  `bub-acp-server` provides `bub acp`. It is installed and asserted in the
+  image, because a Bub that only prints a version cannot serve as the provider
+  T3 launches.
+
+### Checking the runtime
+
+`bash tests/runtime/check-t3-code.sh` checks the image definition and the
+entrypoint against a synthetic `HOME`, renders both volume branches from
+`tests/config/agents.toml` and an explicit-empty variant, and validates each
+through the pinned `app-template` chart. It fails if that chart cannot be
+pulled, rather than reporting a chart check it did not perform.
+
+With `--image <ref>` it also runs a built image: both executables must report
+their pinned versions, `bub acp --help` must work, and the server must answer
+`/api/auth/session` with a 200 under the deployment's shape (nonroot,
+read-only root filesystem, no-network, only `/home/t3` and `/tmp` writable).
+The check makes no registry push and no cluster or cloud call.
+
 ## Observability
 
 Opt in with `[observability] enabled = true`. That publishes two applications
@@ -267,11 +329,30 @@ and the cluster; encrypt whole sensitive files, not just Secret data fields.
 
 ## CI
 
-One platform renderer is exercised with two inputs: `tests/config/base.toml`
+The shared platform renderer is exercised with two inputs: `tests/config/base.toml`
 (defaults, no ingress) and `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
-credentials, a Git subdirectory and a custom Argo namespace). They are configuration
-cases, not k0s/DOKS implementations. Infrastructure validation checks the independent
-OpenTofu configurations; the native integration run uses the same base input.
+credentials, a Git subdirectory and a custom Argo namespace). They are
+configuration cases, not k0s/DOKS implementations. Infrastructure validation
+checks the independent OpenTofu configurations; the native integration run uses
+the same base input.
+
+The optional application slices add focused checks rather than more shared
+render cases, because each needs its own pinned chart:
+`tests/ci/check-magpie-config-claim.sh` (the Magpie `/config` claim),
+`tests/ci/check-observability.sh` (the disabled-by-default slice) and
+`tests/runtime/check-t3-code.sh` (the agent runtime). Each renders its own
+`tests/config/` fixture through `just configure platform`, so `base` still
+covers a cluster with every optional slice omitted.
+
+`tests/runtime/check-t3-code.sh` covers both agent-runtime volume branches
+(`emptyDir` and an existing claim) and fails when the pinned chart cannot be
+pulled; it never reports a chart check it did not run. With `--image <ref>` it
+also checks a built image, and that is what the CI `agent runtime` job does
+after building it. It pushes nothing, runs no cluster and makes no cloud call,
+so an image that cannot start still fails the build. `just`-level callers get
+the static check through `tests/ci/local-gate.sh`; pass
+`ANYLINGS_RUNTIME_IMAGE=<ref>` there to include an already-built image instead
+of building a second one.
 
 Every pull request runs the offline gate: safety contracts, both platform render
 inputs, and OpenTofu format/validate/test. Those checks take minutes, need no

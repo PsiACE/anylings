@@ -125,6 +125,48 @@ jobs:
       - name: Run reset recipe
         run: just --yes reset platform
 
+  # The runtime image and its GitOps template are checked without a registry
+  # push, cluster or cloud credential. The image itself is built and exercised
+  # here, so the packaged toolchain is verified rather than assumed.
+  agent-runtime:
+    if: ${{ github.repository == 'PsiACE/anylings' }}
+    name: agent runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.2
+          experimental: true
+          install_args: --locked
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      # The release archive is fetched from the upstream GitHub release and
+      # verified against its published digest inside the build. No credential
+      # is involved: the T3 Code release and the PyPI project are public.
+      - name: Build the runtime image
+        run: |
+          podman build \
+            --platform linux/amd64 \
+            --tag localhost/anylings/t3-code:ci \
+            --file images/t3-code/Containerfile \
+            images/t3-code
+
+      # Static template checks plus the built image: both executables report
+      # their pinned versions, the process is nonroot, and a fresh state root
+      # is created and served. Nothing is pushed or deployed.
+      - name: Check the runtime image and template
+        run: bash tests/runtime/check-t3-code.sh --image localhost/anylings/t3-code:ci
+
   # Static checks for every OpenTofu root. No cloud credentials are involved:
   # init runs without a backend and validate only inspects the configuration.
   tofu-static:
@@ -182,7 +224,7 @@ jobs:
   # Landing review adapted from bubbuild/republic at 2fa76b5407ba1cf035293121bfab9e782ea199f3.
   landing-feedback:
     name: Landing review
-    needs: [contracts, render-platform, tofu-static]
+    needs: [contracts, render-platform, tofu-static, agent-runtime]
     if: >-
       always() && !cancelled() && vars.LANDING_MODEL != '' &&
       github.event_name == 'pull_request' && !github.event.pull_request.draft &&
@@ -226,7 +268,7 @@ jobs:
           checked-revision: ${{ github.sha }}
           instruction: >-
             Native checks: contracts=${{ needs.contracts.result }}, platform-render=${{ needs.render-platform.result }},
-            tofu-static=${{ needs.tofu-static.result }}.
+            tofu-static=${{ needs.tofu-static.result }}, agent-runtime=${{ needs.agent-runtime.result }}.
             The native rehearsal is a separate workflow, started only when a maintainer adds the ci/native-rehearsal
             label, so do not ask for it or treat its absence as a missing check. When it was requested it uses
             disposable fixtures around

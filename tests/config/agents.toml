@@ -1,0 +1,9 @@
+# Synthetic inputs for the agent runtime: a registry and claim name that exist
+# only in this fixture. The values are public identifiers, never credentials.
+[repository]
+url = "git://git.example.test/platform.git"
+
+[agents]
+image_repository = "registry.example.test/anylings/t3-code"
+image_tag = "0.1.8"
+storage_existing_claim = "t3-code-state"

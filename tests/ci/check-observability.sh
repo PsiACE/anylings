@@ -186,7 +186,7 @@ check_metric_store() {
   grep -qx 'ALL' <<<"$drops" \
     || die "the metric store container does not drop all capabilities"
   # Storage ownership: no claim is invented, and the scratch space is bounded.
-  if yq -e 'select(.kind == "PersistentVolumeClaim")' "$out" >/dev/null; then
+  if yq -e 'select(.kind == "PersistentVolumeClaim")' "$out" >/dev/null 2>&1; then
     die "the metric store provisions a PersistentVolumeClaim on its own"
   fi
   yq -e 'select(.kind == "Deployment" or .kind == "StatefulSet")
@@ -196,7 +196,7 @@ check_metric_store() {
   # cluster-wide read access to Nodes, Pods or Ingresses.
   local kind
   for kind in ClusterRole ClusterRoleBinding; do
-    if yq -e "select(.kind == \"$kind\")" "$out" >/dev/null; then
+    if yq -e "select(.kind == \"$kind\")" "$out" >/dev/null 2>&1; then
       die "the metric store renders a $kind, which its static targets do not need"
     fi
   done
@@ -239,7 +239,7 @@ check_status_dashboards() {
   yq -e 'select(.kind == "Deployment")
     | .spec.template.spec.containers[].securityContext.readOnlyRootFilesystem == true' "$out" >/dev/null \
     || die "gatus has a writable root filesystem"
-  if yq -e 'select(.kind == "PersistentVolumeClaim")' "$out" >/dev/null; then
+  if yq -e 'select(.kind == "PersistentVolumeClaim")' "$out" >/dev/null 2>&1; then
     die "gatus provisions a PersistentVolumeClaim on its own"
   fi
   assert_no_public_exposure "$out" "gatus"

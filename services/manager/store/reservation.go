@@ -103,7 +103,7 @@ func (s *Store) Reserve(ctx context.Context, runID domain.TaskRunID, amount doma
 // countLiveRuns counts runs that still hold a concurrency slot. An empty
 // workspace counts every workspace.
 func countLiveRuns(ctx context.Context, tx *sql.Tx, ws string) (int, error) {
-	const live = `state NOT IN ('Succeeded', 'Failed', 'Interrupted')`
+	const live = `state NOT IN ('Reclaimed', 'Failed', 'Interrupted')`
 	var (
 		n   int
 		err error

@@ -19,21 +19,23 @@ const (
 )
 
 // TaskState describes one task run:
-// Requested -> Provisioning -> Running -> Collecting -> Terminating ->
-// Succeeded|Failed|Interrupted.
+// Requested -> Provisioning -> Ready -> Running -> Collecting -> Terminating
+// -> Reclaimed, with Failed and Interrupted as distinct outcomes.
 //
-// Failed and Interrupted are task outcomes. Reclaiming the underlying box is a
-// separate ResourceLifecycle transition, so "task interrupted" never implies
-// "box deleted".
+// Reclaimed is the successful terminal state: the run finished and its
+// ephemeral lease was released. Failed and Interrupted say why a run did not
+// reach it. None of these imply the persistent workspace box was deleted; that
+// is a separate ResourceLifecycle transition.
 type TaskState string
 
 const (
 	TaskRequested    TaskState = "Requested"
 	TaskProvisioning TaskState = "Provisioning"
+	TaskReady        TaskState = "Ready"
 	TaskRunning      TaskState = "Running"
 	TaskCollecting   TaskState = "Collecting"
 	TaskTerminating  TaskState = "Terminating"
-	TaskSucceeded    TaskState = "Succeeded"
+	TaskReclaimed    TaskState = "Reclaimed"
 	TaskFailed       TaskState = "Failed"
 	TaskInterrupted  TaskState = "Interrupted"
 )
@@ -78,11 +80,12 @@ var resourceTransitions = map[ResourceLifecycle][]ResourceLifecycle{
 
 var taskTransitions = map[TaskState][]TaskState{
 	TaskRequested:    {TaskProvisioning, TaskTerminating, TaskFailed, TaskInterrupted},
-	TaskProvisioning: {TaskRunning, TaskTerminating, TaskFailed, TaskInterrupted},
+	TaskProvisioning: {TaskReady, TaskTerminating, TaskFailed, TaskInterrupted},
+	TaskReady:        {TaskRunning, TaskTerminating, TaskFailed, TaskInterrupted},
 	TaskRunning:      {TaskCollecting, TaskTerminating, TaskFailed, TaskInterrupted},
-	TaskCollecting:   {TaskTerminating, TaskSucceeded, TaskFailed, TaskInterrupted},
-	TaskTerminating:  {TaskSucceeded, TaskFailed, TaskInterrupted},
-	TaskSucceeded:    nil,
+	TaskCollecting:   {TaskTerminating, TaskFailed, TaskInterrupted},
+	TaskTerminating:  {TaskReclaimed, TaskFailed, TaskInterrupted},
+	TaskReclaimed:    nil,
 	TaskFailed:       nil,
 	TaskInterrupted:  nil,
 }
@@ -131,7 +134,7 @@ func (s ResourceLifecycle) Terminal() bool { return s == ResourceReclaimed }
 
 func (s TaskState) Terminal() bool {
 	switch s {
-	case TaskSucceeded, TaskFailed, TaskInterrupted:
+	case TaskReclaimed, TaskFailed, TaskInterrupted:
 		return true
 	}
 	return false

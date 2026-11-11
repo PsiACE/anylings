@@ -26,9 +26,10 @@ q() { yq -r "$1" "$2"; }
 # No label trigger: a label event must not create a gate run whose jobs would
 # report success for work they never did.
 types="$(q '.on.pull_request.types | join(" ")' "$ci")"
+[ -n "$types" ] || fail "the gate workflow declares no pull_request types"
+# `labeled` and `unlabeled` both contain "label", so one pattern covers both.
 case " $types " in
-  *labeled*|*unlabeled*) fail "the gate workflow still subscribes to label events: $types" ;;
-  ' ') fail "the gate workflow declares no pull_request types" ;;
+  *label*) fail "the gate workflow still subscribes to label events: $types" ;;
 esac
 
 if [ "$(q '.on | has("workflow_dispatch")' "$ci")" = true ]; then
@@ -81,6 +82,16 @@ while read -r job; do
   timeout="$(q ".jobs.\"$job\".timeout-minutes // 45" "$ci")"
   [ "$timeout" -le 45 ] || fail "the gate workflow holds a long job: $job ($timeout minutes)"
 done < <(q '.jobs | keys | .[]' "$ci")
+
+# The render assertions exist once. Both entry points must call the same script,
+# or a confidentiality check can be present in the workflow and missing locally.
+yq '.jobs."render-platform".steps[] | .run // ""' "$ci" | grep -q 'tests/ci/check-render.sh' \
+  || fail "the render job does not call tests/ci/check-render.sh"
+grep -q 'tests/ci/check-render.sh' tests/ci/local-gate.sh \
+  || fail "the local gate does not call tests/ci/check-render.sh"
+if [ "$(grep -c 'synthetic-ci-tunnel-token' .github/workflows/ci.yaml)" -gt 1 ]; then
+  fail "the render job keeps its own copy of the tunnel token assertion"
+fi
 
 # The advisory review waits on the gate, plus any other offline check that
 # exists in the workflow. It must not wait on the rehearsal, which is what made
@@ -151,7 +162,7 @@ grep -q 'ANYLINGS_CI_DISPOSABLE:-' tests/ci/run.sh \
   || fail "diagnostics upload can still fail the rehearsal"
 [ "$(q '.jobs."native-e2e".steps[] | select(.name == "Upload sanitized diagnostics") | .with."retention-days"' "$native")" = 7 ] \
   || fail "native diagnostics are no longer retained for 7 days"
-[ "$(q '.jobs."native-e2e".steps[] | select(.name == "Upload sanitized diagnostics") | .if' "$native")" = always\(\) ] \
+[ "$(q '.jobs."native-e2e".steps[] | select(.name == "Upload sanitized diagnostics") | .if' "$native")" = 'always()' ] \
   || fail "diagnostics upload runs only on success, so failures lose their evidence"
 grep -q 'steps.diagnostics.outcome' "$native" \
   || fail "an unavailable diagnostics upload is not reported"

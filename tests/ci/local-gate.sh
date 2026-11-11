@@ -49,13 +49,13 @@ for config in base cloudflare-tunnel; do
   export ANYLINGS_BOOTSTRAP_MANIFESTS_DIR="$work/bootstrap-manifests-$config"
   cp "tests/config/$config.toml" "$ANYLINGS_CONFIG"
   if [ "$config" = cloudflare-tunnel ]; then
-    # Synthetic value only; the fixture reads it relative to its own config.
+    # Same synthetic token the workflow writes; check-render.sh greps for it.
     mkdir -p "$inputs/.local"
-    printf 'synthetic-local-gate-token\n' >"$inputs/.local/tunnel.token"
+    printf 'synthetic-ci-tunnel-token\n' >"$inputs/.local/tunnel.token"
   fi
   just init platform
   just configure platform
-  just check platform
+  bash tests/ci/check-render.sh "$config"
   bash "$ANYLINGS_OUTPUT_DIR/bootstrap/bootstrap.sh" render
   unset ANYLINGS_CONFIG SOPS_AGE_KEY_FILE ANYLINGS_OUTPUT_DIR ANYLINGS_BOOTSTRAP_MANIFESTS_DIR
 done

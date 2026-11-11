@@ -208,9 +208,14 @@ retained for seven days and uploaded best effort: a transport failure warns and
 never turns a passing rehearsal red.
 
 `bash tests/ci/local-gate.sh` runs the offline gate locally with the checkout's
-own tools. It writes nothing to the repository, is safe on a workstation, and is
-offline only: it renders and validates, but proves no runtime behavior, so it
-does not stand in for a native run, DOKS CSI, Cloudflare or multi-host checks.
+own tools. It writes nothing to the repository and is safe on a workstation.
+
+Both entry points call `tests/ci/check-render.sh` for the render assertions, so
+the tunnel Secret-source/plaintext check, the rendered formatting check and the
+partially-encrypted negative test cannot exist in one and be missing from the
+other. It is still offline only: it renders and validates, but proves no runtime
+behavior, so it does not stand in for a native run, DOKS CSI, Cloudflare or
+multi-host checks.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through

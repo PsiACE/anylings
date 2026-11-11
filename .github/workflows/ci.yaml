@@ -103,50 +103,13 @@ jobs:
       - name: Run configure recipe
         run: just configure platform
 
-      - name: Check tunnel credential delivery from the published Git source
-        if: matrix.config == 'cloudflare-tunnel'
-        run: |
-          # The Git-file generator passes manifestPath to the Application's
-          # Git source; exercise that published KSOPS path without exposing it.
-          source=$(jq -r '.manifestPath' .local/rendered/kubernetes/apps/network/cloudflare-tunnel/config.json)
-          case "$source" in
-            clusters/tunnel/*) source="${source#clusters/tunnel/}" ;;
-            *) echo "::error::tunnel Secret source is outside the configured Git prefix" >&2; exit 1 ;;
-          esac
-          kustomize build --enable-alpha-plugins --enable-exec ".local/rendered/$source" \
-            | yq -e 'select(.kind == "Secret" and .stringData.TUNNEL_TOKEN != null) | .stringData.TUNNEL_TOKEN == "synthetic-ci-tunnel-token"' >/dev/null
-          if grep -rqF 'synthetic-ci-tunnel-token' .local/rendered/kubernetes; then
-            echo "::error::synthetic tunnel token remains in plaintext"
-            exit 1
-          fi
-
-      # Rendered output must already match the format-yaml pre-commit hook,
-      # otherwise every `just configure platform` shows up as formatting churn. Only
-      # tracked-file types are checked: rendered plaintext is never inspected.
-      - name: Assert rendered output is formatted
-        run: oxfmt --check ./.local/rendered/.sops.yaml ./.local/rendered/kubernetes
+      # The confidentiality, formatting and partial-encryption assertions live
+      # in one script so tests/ci/local-gate.sh cannot drift from this job.
+      - name: Run render assertions
+        run: bash tests/ci/check-render.sh "${{ matrix.config }}"
 
       - name: Render the bootstrap manifests
         run: bash ./.local/rendered/bootstrap/bootstrap.sh render
-
-      # A single confidentiality contract, through the public output check.
-      # filestatus still says encrypted after a plaintext Helm value is added.
-      - name: Reject partially encrypted publication output
-        if: matrix.config == 'base'
-        run: |
-          values="$(find .local/rendered/kubernetes/apps -name 'values.sops.yaml' -print -quit)"
-          test -n "$values"
-          cp "$values" "$RUNNER_TEMP/encrypted-values.yaml"
-          trap 'mv "$RUNNER_TEMP/encrypted-values.yaml" "$values"' EXIT
-          yq -i '.publicationCheck = "synthetic-unencrypted"' "$values"
-          sops filestatus "$values" | jq -e '.encrypted == true' >/dev/null
-          if just check platform; then
-            echo "::error::accepted partially encrypted publication output"
-            exit 1
-          fi
-          mv "$RUNNER_TEMP/encrypted-values.yaml" "$values"
-          trap - EXIT
-          just check platform
 
       - name: Run reset recipe
         run: just --yes reset platform

@@ -1,0 +1,97 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: "Native rehearsal"
+
+# Opt-in runtime evidence, kept out of the ordinary CI workflow on purpose.
+#
+# GitHub reports a skipped job as success under the same check name, so an
+# ordinary-workflow job that is merely disabled for label events would publish
+# a misleading passing context. This workflow therefore owns the rehearsal
+# alone, runs for no code event by default, and shares no check name with the
+# gate.
+on:
+  pull_request:
+    # `labeled` starts the rehearsal when the opt-in label is added; `synchronize`
+    # keeps an already opted-in candidate rehearsed on new commits.
+    types: [labeled, synchronize]
+
+permissions: {}
+
+jobs:
+  native-e2e:
+    # Exactly two starts: the opt-in label being added, or a new code event on a
+    # candidate that already carries it. Any other label change must neither
+    # start nor supersede a real run, including its own.
+    if: >-
+      github.repository == 'PsiACE/anylings' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'ci/native-rehearsal') &&
+      (github.event.action == 'synchronize' ||
+       (github.event.action == 'labeled' && github.event.label.name == 'ci/native-rehearsal'))
+    name: native-rehearsal
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    # One group per pull request, and the job condition is evaluated before the
+    # group is joined: an unrelated label change selects no job, so it never
+    # enters this group and cannot start or cancel anything. A newer selected
+    # commit does supersede an older one here, because both are real rehearsal
+    # work for the same candidate and only the latest commit matters.
+    concurrency:
+      group: native-rehearsal-${{ github.repository_id }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.2
+          experimental: true
+          install_args: --locked
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      # k0s needs root for containerd, kubelet and CNI. The runner is
+      # disposable, and the rehearsal only ever owns the resources it creates.
+      - name: Prepare native prerequisites
+        run: |
+          # Only host tools the rehearsal shells out to that mise does not
+          # provide. jq, kubectl, helm, sops, yq, tofu and k0sctl come from the
+          # locked tool set; the OpenTofu k0s root invokes k0sctl internally.
+          need="curl git python3 sha256sum systemctl"
+          for tool in $need; do
+            command -v "$tool" >/dev/null || { echo "::error::missing $tool"; exit 1; }
+          done
+          test -x "$(git --exec-path)/git-daemon" || { echo "::error::Git daemon is required"; exit 1; }
+          sudo -n true || { echo "::error::native rehearsal needs passwordless sudo for k0s"; exit 1; }
+
+      # The fixture, not this selector, owns CI authorization: tests/ci/run.sh
+      # refuses to start without an explicitly disposable runner.
+      - name: Run native rehearsal
+        env:
+          ANYLINGS_CI_DISPOSABLE: "1"
+        run: bash tests/ci/run.sh
+
+      # Diagnostics are ordinary operational data, so they are short-lived and
+      # their transport never decides the check: the rehearsal step above fails
+      # on a real test failure. Without this, an artifact-API error paints a
+      # green rehearsal red and hides the actual result.
+      - name: Upload sanitized diagnostics
+        id: diagnostics
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        continue-on-error: true
+        with:
+          name: native-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/anylings-ci.*/diag/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Report unavailable diagnostics
+        if: ${{ !cancelled() && steps.diagnostics.outcome == 'failure' }}
+        run: echo "::warning::Diagnostics upload failed; the rehearsal result above stands."

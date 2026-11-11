@@ -5,10 +5,10 @@
 # This is a convenience aggregate, not a second implementation: every step is
 # an existing recipe or script, and it reuses the tools the caller already has
 # (the mise/uv environment, the OpenTofu plugin cache). It deliberately starts
-# no cluster, no k0s, no sudo and no cloud API, so it cannot produce native
-# rehearsal evidence and does not claim to. Full acceptance still requires the
-# opt-in native rehearsal on a disposable runner, plus separate evidence for
-# DOKS CSI, Cloudflare and multi-host behavior.
+# no cluster, no k0s, no sudo and no cloud API. It is an offline check, not a
+# runtime rehearsal: it does not reproduce the native suite, does not need the
+# opt-in CI label, and is not evidence about DOKS CSI, Cloudflare or multi-host
+# behavior.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -68,4 +68,4 @@ bash tests/ci/check-k0s-reset.sh
 log "workflow lint"
 zizmor --offline .github/workflows
 
-log "offline checks passed; this is not native rehearsal evidence"
+log "offline checks passed; runtime acceptance is still unevidenced"

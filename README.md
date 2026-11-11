@@ -194,20 +194,23 @@ inputs, and OpenTofu format/validate/test. Those checks take minutes, need no
 credentials and no cluster.
 
 The native rehearsal is heavier: it needs a disposable runner, passwordless
-sudo for k0s and most of an hour. It is therefore opt-in. Add the
-`ci/native-rehearsal` label to a pull request from this repository to run it; the
-label event starts only that job, and it is independent of the gate so the
-ordinary checks cannot make it irrelevant. Removing the label cancels nothing
-already running. `tests/ci/run.sh` still refuses to start without an explicitly
-disposable runner, so the label selects evidence collection rather than
-relaxing the fixture's own authorization. The Landing review needs only the
-offline gate; a missing rehearsal is not a missing check. Diagnostics upload is
-best effort: a transport failure warns and never turns a passing rehearsal red.
+sudo for k0s and most of an hour, so it has its own workflow and never runs for
+an ordinary pull request. Add the `ci/native-rehearsal` label to a pull request
+from this repository, or push a new commit to one that already carries it, to
+start it. No other label change starts or cancels it, and it shares no check
+name with the gate, so its absence is never mistaken for a passed gate. A newer
+commit supersedes an older rehearsal of the same pull request. Removing the
+label cancels nothing already running. `tests/ci/run.sh` still refuses to start
+without an explicitly disposable runner, so the label selects evidence
+collection rather than relaxing the fixture's own authorization. The Landing
+review needs only the offline gate. Diagnostics are ordinary operational data,
+retained for seven days and uploaded best effort: a transport failure warns and
+never turns a passing rehearsal red.
 
-`bash tests/ci/local-gate.sh` runs the same offline gate locally with the
-checkout's own tools. It writes nothing to the repository, is safe on a
-workstation, and proves no runtime behavior: it is not native rehearsal
-evidence and does not stand in for DOKS CSI, Cloudflare or multi-host checks.
+`bash tests/ci/local-gate.sh` runs the offline gate locally with the checkout's
+own tools. It writes nothing to the repository, is safe on a workstation, and is
+offline only: it renders and validates, but proves no runtime behavior, so it
+does not stand in for a native run, DOKS CSI, Cloudflare or multi-host checks.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through

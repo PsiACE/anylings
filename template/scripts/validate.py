@@ -77,7 +77,7 @@ class Repository(Model):
 class Argocd(Model):
     # The single source for the chart version: bootstrap.sh and the
     # self-managed Application both read it, so they cannot drift.
-    chart_version: str = Field(default="10.10.2", pattern=CHART_VERSION_PATTERN)
+    chart_version: str = Field(default="10.14.0", pattern=CHART_VERSION_PATTERN)
     namespace: str = Field(default="argo-system", pattern=NAMESPACE_PATTERN)
 
 

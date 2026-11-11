@@ -9,27 +9,26 @@ import (
 	"github.com/PsiACE/anylings/services/manager/domain"
 )
 
-// Limits are the reservation ceilings applied inside one transaction.
+// Limits are the admission ceilings applied inside one transaction. Budgets are
+// optional: a nil budget only enforces concurrency, which is the neutral
+// default. Amounts are supplied by configuration, never built into the domain.
 type Limits struct {
 	// MaxConcurrentRuns bounds live runs per workspace.
 	MaxConcurrentRuns int
 	// MaxGlobalConcurrentRuns bounds live runs across all workspaces.
 	MaxGlobalConcurrentRuns int
-	// WorkspaceMonthlyBudget is the per-workspace planning baseline. It is a
-	// reservation target, not a provider billing cap.
-	WorkspaceMonthlyBudget domain.Money
-	// GlobalMonthlyBudget bounds total reserved spend.
-	GlobalMonthlyBudget domain.Money
+	// WorkspaceBudget bounds the amount reserved per workspace, if set.
+	WorkspaceBudget *domain.Money
+	// GlobalBudget bounds the amount reserved in total, if set.
+	GlobalBudget *domain.Money
 }
 
-// DefaultLimits returns the fixed baseline. Elastic budget is not approved, so
-// spend above the baseline is refused rather than allowed to grow.
+// DefaultLimits enforces concurrency only. Budgets stay unset until an operator
+// configures them, so the default surface enforces concurrency only.
 func DefaultLimits() Limits {
 	return Limits{
 		MaxConcurrentRuns:       2,
 		MaxGlobalConcurrentRuns: 8,
-		WorkspaceMonthlyBudget:  domain.MonthlyBaseline,
-		GlobalMonthlyBudget:     domain.USDcents(domain.MonthlyBaseline.Minor * 4),
 	}
 }
 
@@ -66,27 +65,11 @@ func (s *Store) Reserve(ctx context.Context, runID domain.TaskRunID, amount doma
 			return domain.ErrQuotaExceeded
 		}
 
-		reserved, err := sumReservations(ctx, tx, wsID)
-		if err != nil {
+		if err := checkBudget(ctx, tx, wsID, amount, limits.WorkspaceBudget); err != nil {
 			return err
 		}
-		total, err := reserved.Add(amount)
-		if err != nil {
+		if err := checkBudget(ctx, tx, "", amount, limits.GlobalBudget); err != nil {
 			return err
-		}
-		if total.Minor > limits.WorkspaceMonthlyBudget.Minor {
-			return domain.ErrBudgetExceeded
-		}
-		globalReserved, err := sumReservations(ctx, tx, "")
-		if err != nil {
-			return err
-		}
-		globalTotal, err := globalReserved.Add(amount)
-		if err != nil {
-			return err
-		}
-		if globalTotal.Minor > limits.GlobalMonthlyBudget.Minor {
-			return domain.ErrBudgetExceeded
 		}
 
 		_, err = tx.ExecContext(ctx, `
@@ -98,6 +81,33 @@ func (s *Store) Reserve(ctx context.Context, runID domain.TaskRunID, amount doma
 		}
 		return nil
 	})
+}
+
+// checkBudget refuses a hold that would exceed the configured ceiling. An unset
+// budget allows any amount.
+func checkBudget(ctx context.Context, tx *sql.Tx, ws string, amount domain.Money, limit *domain.Money) error {
+	if limit == nil {
+		return nil
+	}
+	if amount.Currency != limit.Currency {
+		return domain.ErrCurrencyMismatch
+	}
+	reserved, err := sumReservations(ctx, tx, ws, amount.Currency)
+	if err != nil {
+		return err
+	}
+	total, err := reserved.Add(amount)
+	if err != nil {
+		return err
+	}
+	exceeds, err := total.Exceeds(*limit)
+	if err != nil {
+		return err
+	}
+	if exceeds {
+		return domain.ErrBudgetExceeded
+	}
+	return nil
 }
 
 // countLiveRuns counts other runs that still hold a concurrency slot. The run
@@ -121,20 +131,26 @@ func countLiveRuns(ctx context.Context, tx *sql.Tx, ws, exceptRun string) (int, 
 	return n, nil
 }
 
-func sumReservations(ctx context.Context, tx *sql.Tx, ws string) (domain.Money, error) {
+// sumReservations totals unreleased holds in one currency. An empty workspace
+// totals every workspace.
+func sumReservations(ctx context.Context, tx *sql.Tx, ws string, currency domain.Currency) (domain.Money, error) {
 	var (
 		total int64
 		err   error
 	)
 	if ws == "" {
-		err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(minor), 0) FROM reservations WHERE released = 0 AND currency = 'USD'`).Scan(&total)
+		err = tx.QueryRowContext(ctx,
+			`SELECT COALESCE(SUM(minor), 0) FROM reservations WHERE released = 0 AND currency = ?`,
+			string(currency)).Scan(&total)
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(minor), 0) FROM reservations WHERE released = 0 AND currency = 'USD' AND workspace_id = ?`, ws).Scan(&total)
+		err = tx.QueryRowContext(ctx,
+			`SELECT COALESCE(SUM(minor), 0) FROM reservations WHERE released = 0 AND currency = ? AND workspace_id = ?`,
+			string(currency), ws).Scan(&total)
 	}
 	if err != nil {
 		return domain.Money{}, fmt.Errorf("store: sum reservations: %w", err)
 	}
-	return domain.USDcents(total), nil
+	return domain.Amount(total, currency), nil
 }
 
 // ReleaseReservation returns held budget to the pool for one run. It is
@@ -148,17 +164,46 @@ func (s *Store) ReleaseReservation(ctx context.Context, runID domain.TaskRunID) 
 	return nil
 }
 
-// ReservedTotal reports live reservations, used by tests and accounting.
+// ReservedTotal reports live reservations for a workspace, or for all
+// workspaces when ws is empty. An empty result has the zero minor unit value
+// and an empty currency, because no amount was reserved.
 func (s *Store) ReservedTotal(ctx context.Context, ws domain.WorkspaceID) (domain.Money, error) {
-	var total int64
-	var err error
+	var (
+		rows *sql.Rows
+		err  error
+	)
 	if ws == "" {
-		err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(minor), 0) FROM reservations WHERE released = 0`).Scan(&total)
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT currency, COALESCE(SUM(minor), 0) FROM reservations
+			WHERE released = 0 GROUP BY currency`)
 	} else {
-		err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(minor), 0) FROM reservations WHERE released = 0 AND workspace_id = ?`, string(ws)).Scan(&total)
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT currency, COALESCE(SUM(minor), 0) FROM reservations
+			WHERE released = 0 AND workspace_id = ? GROUP BY currency`, string(ws))
 	}
 	if err != nil {
 		return domain.Money{}, fmt.Errorf("store: reserved total: %w", err)
 	}
-	return domain.USDcents(total), nil
+	defer rows.Close()
+
+	var total domain.Money
+	for rows.Next() {
+		var (
+			currency string
+			minor    int64
+		)
+		if err := rows.Scan(&currency, &minor); err != nil {
+			return domain.Money{}, fmt.Errorf("store: reserved total: %w", err)
+		}
+		if total.Currency == "" {
+			total = domain.Amount(minor, domain.Currency(currency))
+			continue
+		}
+		sum, err := total.Add(domain.Amount(minor, domain.Currency(currency)))
+		if err != nil {
+			return domain.Money{}, err
+		}
+		total = sum
+	}
+	return total, rows.Err()
 }

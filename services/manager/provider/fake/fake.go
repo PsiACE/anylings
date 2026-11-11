@@ -19,7 +19,9 @@ import (
 // timeout still records the resource (the real world may have created it), so
 // the reconciler must probe rather than allocate again.
 type Sandbox struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// Disabled is the default: a freshly constructed provider allocates
+	// nothing until a caller explicitly enables it.
 	Disabled bool
 	resource map[string]provider.Allocation
 	creates  map[string]int
@@ -36,13 +38,23 @@ type Sandbox struct {
 	DestroyFailures int
 }
 
-// NewSandbox returns an empty provider.
+// NewSandbox returns a disabled provider. Call Enable to let it allocate; the
+// zero-value default is intentional so an unconfigured manager cannot start
+// allocating by accident.
 func NewSandbox() *Sandbox {
 	return &Sandbox{
+		Disabled: true,
 		resource: map[string]provider.Allocation{},
 		creates:  map[string]int{},
 		destroys: map[string]int{},
 	}
+}
+
+// Enable allows allocation and destruction.
+func (s *Sandbox) Enable() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Disabled = false
 }
 
 func (s *Sandbox) Allocate(ctx context.Context, req provider.Request) (provider.Allocation, error) {

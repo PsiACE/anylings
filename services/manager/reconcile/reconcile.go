@@ -21,15 +21,14 @@ import (
 )
 
 // Config is the tunable policy. Zero values fall back to defaults so callers
-// cannot accidentally run with an unbounded retry count.
+// cannot accidentally run with an unbounded retry count or an unbounded
+// runtime. Nothing here encodes a price or a vendor catalogue.
 type Config struct {
-	MaxAttempts          int
-	TaskMaxRuntime       time.Duration
-	LeaseMaxRuntime      time.Duration
-	HeartbeatInterval    time.Duration
-	HeartbeatGrace       time.Duration
-	AttemptBudget        domain.Money
-	ArtifactAttemptLimit int
+	MaxAttempts       int
+	TaskMaxRuntime    time.Duration
+	LeaseMaxRuntime   time.Duration
+	HeartbeatInterval time.Duration
+	HeartbeatGrace    time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -47,12 +46,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.HeartbeatGrace <= 0 {
 		c.HeartbeatGrace = 90 * time.Second
-	}
-	if c.AttemptBudget.Minor <= 0 {
-		c.AttemptBudget = domain.USDcents(25)
-	}
-	if c.ArtifactAttemptLimit <= 0 {
-		c.ArtifactAttemptLimit = 2
 	}
 	return c
 }

@@ -5,21 +5,25 @@ import (
 	"fmt"
 )
 
-// Currency is a three-letter ISO-4217 style code. Only USD is modelled while
-// the platform has a single billing currency.
+// Currency is an upper-case three-letter currency code. The domain only does
+// integer arithmetic on minor units; it carries no notion of a price list.
 type Currency string
 
+// USD is a currency code constant. It names a unit of account; it does not
+// carry a price list or a budget.
 const USD Currency = "USD"
 
-// Money is an integer amount of minor units (cents for USD). Floating point is
-// never used for billing arithmetic.
+// Money is an integer amount of minor units (for example cents). Floating
+// point is never used for accounting arithmetic.
 type Money struct {
 	Minor    int64
 	Currency Currency
 }
 
-// USDcents builds a Money value in cents.
-func USDcents(c int64) Money { return Money{Minor: c, Currency: USD} }
+// Amount builds a Money value in minor units of the given currency.
+func Amount(minor int64, currency Currency) Money {
+	return Money{Minor: minor, Currency: currency}
+}
 
 var (
 	ErrCurrencyMismatch = errors.New("domain: currency mismatch")
@@ -27,8 +31,13 @@ var (
 )
 
 func (m Money) Validate() error {
-	if m.Currency != USD {
-		return fmt.Errorf("domain: unsupported currency %q", m.Currency)
+	if l := len(m.Currency); l != 3 {
+		return fmt.Errorf("domain: invalid currency %q", m.Currency)
+	}
+	for i := 0; i < len(m.Currency); i++ {
+		if m.Currency[i] < 'A' || m.Currency[i] > 'Z' {
+			return fmt.Errorf("domain: invalid currency %q", m.Currency)
+		}
 	}
 	if m.Minor < 0 {
 		return ErrNegativeAmount
@@ -53,10 +62,10 @@ func (m Money) Sub(n Money) (Money, error) {
 	return Money{Minor: m.Minor - n.Minor, Currency: m.Currency}, nil
 }
 
-// MonthlyBaseline is the fixed per-workspace planning baseline. It is a budget
-// target for reservation accounting, not an enforced provider billing cap.
-var MonthlyBaseline = Money{Minor: 2400, Currency: USD}
-
-// ElasticBudgetEnabled reports whether spend above MonthlyBaseline may be
-// reserved. Elastic budget is not approved, so it is always false.
-const ElasticBudgetEnabled = false
+// Exceeds reports whether m is larger than limit in the same currency.
+func (m Money) Exceeds(limit Money) (bool, error) {
+	if m.Currency != limit.Currency {
+		return false, ErrCurrencyMismatch
+	}
+	return m.Minor > limit.Minor, nil
+}

@@ -59,6 +59,7 @@ func newHarness(t *testing.T) *harness {
 	}
 
 	sandbox := fake.NewSandbox()
+	sandbox.Enable()
 	runner := fake.NewCommandRunner()
 	rec := New(s, sandbox, runner, c, Config{})
 	return &harness{t: t, dir: dir, store: s, clock: c, sandbox: sandbox, runner: runner, rec: rec, ws: ws}
@@ -82,6 +83,12 @@ func (h *harness) newRun(requestID domain.RequestID) domain.TaskRun {
 		h.t.Fatalf("expected a new run for %q", requestID)
 	}
 	return run
+}
+
+// budget builds an optional ceiling; nil means "concurrency only".
+func budget(minor int64) *domain.Money {
+	m := domain.Amount(minor, domain.USD)
+	return &m
 }
 
 func (h *harness) reopen() {
@@ -198,25 +205,25 @@ func TestParallelReservationsRespectQuotaAndBudget(t *testing.T) {
 	ctx := context.Background()
 	limits := store.DefaultLimits()
 	limits.MaxConcurrentRuns = 1
-	limits.WorkspaceMonthlyBudget = domain.USDcents(100)
+	limits.WorkspaceBudget = budget(100)
 
 	first := h.newRun("req-quota-1")
-	if err := h.store.Reserve(ctx, first.ID, domain.USDcents(60), limits); err != nil {
+	if err := h.store.Reserve(ctx, first.ID, domain.Amount(60, domain.USD), limits); err != nil {
 		t.Fatalf("first reservation: %v", err)
 	}
 
 	// Concurrency limit of one is now exhausted.
 	second := h.newRun("req-quota-2")
-	if err := h.store.Reserve(ctx, second.ID, domain.USDcents(10), limits); !errors.Is(err, domain.ErrQuotaExceeded) {
+	if err := h.store.Reserve(ctx, second.ID, domain.Amount(10, domain.USD), limits); !errors.Is(err, domain.ErrQuotaExceeded) {
 		t.Fatalf("second reservation error = %v, want ErrQuotaExceeded", err)
 	}
 
 	// Raising concurrency leaves the budget as the binding constraint.
 	limits.MaxConcurrentRuns = 4
-	if err := h.store.Reserve(ctx, second.ID, domain.USDcents(50), limits); !errors.Is(err, domain.ErrBudgetExceeded) {
+	if err := h.store.Reserve(ctx, second.ID, domain.Amount(50, domain.USD), limits); !errors.Is(err, domain.ErrBudgetExceeded) {
 		t.Fatalf("over-budget reservation error = %v, want ErrBudgetExceeded", err)
 	}
-	if err := h.store.Reserve(ctx, second.ID, domain.USDcents(40), limits); err != nil {
+	if err := h.store.Reserve(ctx, second.ID, domain.Amount(40, domain.USD), limits); err != nil {
 		t.Fatalf("reservation within budget: %v", err)
 	}
 
@@ -235,7 +242,7 @@ func TestConcurrentReservationsNeverExceedBudget(t *testing.T) {
 	limits := store.DefaultLimits()
 	limits.MaxConcurrentRuns = 8
 	limits.MaxGlobalConcurrentRuns = 16
-	limits.WorkspaceMonthlyBudget = domain.USDcents(100)
+	limits.WorkspaceBudget = budget(100)
 
 	runs := make([]domain.TaskRun, 8)
 	for i := range runs {
@@ -253,7 +260,7 @@ func TestConcurrentReservationsNeverExceedBudget(t *testing.T) {
 		go func(id domain.TaskRunID) {
 			defer wg.Done()
 			<-start
-			err := h.store.Reserve(ctx, id, domain.USDcents(30), limits)
+			err := h.store.Reserve(ctx, id, domain.Amount(30, domain.USD), limits)
 			if err != nil {
 				if !errors.Is(err, domain.ErrBudgetExceeded) {
 					mu.Lock()
@@ -278,8 +285,8 @@ func TestConcurrentReservationsNeverExceedBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserved total: %v", err)
 	}
-	if total.Minor > limits.WorkspaceMonthlyBudget.Minor {
-		t.Fatalf("reserved %d exceeds budget %d", total.Minor, limits.WorkspaceMonthlyBudget.Minor)
+	if total.Minor > limits.WorkspaceBudget.Minor {
+		t.Fatalf("reserved %d exceeds budget %d", total.Minor, limits.WorkspaceBudget.Minor)
 	}
 }
 
@@ -596,7 +603,9 @@ func TestProviderDisabledByDefaultBlocksAllocation(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	run := h.newRun("req-disabled")
-	h.sandbox.Disabled = true
+	// Reset to the construction default.
+	h.sandbox = fake.NewSandbox()
+	h.rec = New(h.store, h.sandbox, h.runner, h.clock, Config{})
 
 	// A disabled provider cannot allocate, so the run must end failed rather
 	// than appear reclaimed.
@@ -673,7 +682,7 @@ func TestReservationReleasedOnReclaim(t *testing.T) {
 	ctx := context.Background()
 	run := h.newRun("req-reserve")
 
-	if err := h.store.Reserve(ctx, run.ID, domain.USDcents(25), store.DefaultLimits()); err != nil {
+	if err := h.store.Reserve(ctx, run.ID, domain.Amount(25, domain.USD), store.DefaultLimits()); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 	if _, err := h.rec.RunToCompletion(ctx, run.ID); err != nil {
@@ -689,21 +698,32 @@ func TestReservationReleasedOnReclaim(t *testing.T) {
 }
 
 func TestMoneyUsesIntegerMinorUnits(t *testing.T) {
-	if domain.MonthlyBaseline.Minor != 2400 || domain.MonthlyBaseline.Currency != domain.USD {
-		t.Fatalf("baseline = %+v, want 2400 USD cents", domain.MonthlyBaseline)
-	}
-	if domain.ElasticBudgetEnabled {
-		t.Fatal("elastic budget must stay disabled until approved")
-	}
-	sum, err := domain.USDcents(1234).Add(domain.USDcents(766))
+	sum, err := domain.Amount(1234, domain.USD).Add(domain.Amount(766, domain.USD))
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	if sum.Minor != 2000 {
 		t.Fatalf("sum = %d, want 2000", sum.Minor)
 	}
-	if _, err := domain.USDcents(1).Add(domain.Money{Minor: 1, Currency: "EUR"}); !errors.Is(err, domain.ErrCurrencyMismatch) {
+	if _, err := domain.Amount(1, domain.USD).Add(domain.Amount(1, "EUR")); !errors.Is(err, domain.ErrCurrencyMismatch) {
 		t.Fatalf("mixed currency error = %v, want ErrCurrencyMismatch", err)
+	}
+}
+
+func TestDefaultLimitsCarryNoBudgetPolicy(t *testing.T) {
+	limits := store.DefaultLimits()
+	if limits.WorkspaceBudget != nil || limits.GlobalBudget != nil {
+		t.Fatalf("default limits carry a budget: %+v", limits)
+	}
+	if limits.MaxConcurrentRuns <= 0 || limits.MaxGlobalConcurrentRuns <= 0 {
+		t.Fatalf("default limits must bound concurrency: %+v", limits)
+	}
+	// A budget-free reservation therefore only has to respect concurrency.
+	h := newHarness(t)
+	ctx := context.Background()
+	run := h.newRun("req-unbounded-budget")
+	if err := h.store.Reserve(ctx, run.ID, domain.Amount(1_000_000, domain.USD), limits); err != nil {
+		t.Fatalf("address without a configured budget: %v", err)
 	}
 }
 

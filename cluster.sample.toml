@@ -47,18 +47,15 @@ namespace = "argo-system"
 
 
 # =============================================================================
-#    How traffic reaches the cluster. "none" keeps the cluster fully
-#    credential-free (CI default). "cloudflare-tunnel" runs cloudflared
-#    outbound-only; DNS records and routes are owned by the OpenTofu cloudflare
-#    root, not rendered here.
+#    How traffic reaches the cluster. The Cloudflare Tunnel connector is part
+#    of the baseline platform: it runs cloudflared outbound-only. DNS records
+#    and routes are owned by the OpenTofu cloudflare root, not rendered here,
+#    so this section only locates the tunnel token.
 # =============================================================================
 [ingress]
 
-# OPTIONAL. Default: "none". Allowed: "none" | "cloudflare-tunnel"
-mode = "none"
-
 # Path to the Cloudflare tunnel token, resolved relative to this file.
-# REQUIRED when mode is "cloudflare-tunnel"; must be empty otherwise.
-# The token is a file input, never a plaintext value in this file.
-# OPTIONAL. Example: ".local/cloudflare-tunnel.token"
-tunnel_token_file = ""
+# REQUIRED. Obtain it from the cloudflare OpenTofu root's `tunnel_token`
+# output. The token is a file input, never a plaintext value in this file.
+# Example: ".local/cloudflare-tunnel.token"
+tunnel_token_file = ".local/cloudflare-tunnel.token"

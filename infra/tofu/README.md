@@ -11,6 +11,9 @@ shape, inputs and safety policy here.
 | `cloudflare` | `cloudflare/cloudflare` provider                             | Account, existing zone, explicit routes, Cloudflare token |
 | `platform`   | Kubernetes provider; one bootstrap Application               | Rendered output, kubeconfig and context                   |
 
+Tunnel, routes, DNS and Access are fixed responsibilities of the platform. Only
+R2 bucket creation is optional, and it is empty unless `r2_buckets` is set.
+
 Provider versions and checksums are locked. `just plan/apply/destroy <root>` invokes
 `run.sh`, which initializes the selected backend before the requested operation.
 It does not silently auto-approve. `just export k0s|doks` prints only the sensitive
@@ -56,12 +59,14 @@ ordinary `TF_VAR_*`/tfvars inputs. Never use the same backend state for two root
   no autoscaling or automatic upgrade. The version must be a full offered DOKS
   slug; region defaults to `sgp1`. DigitalOcean supplies default networking/CSI.
   There is no optional VPC factory, tag interface or configurable node-pool module.
-- **Cloudflare:** explicit HTTP(S) origins in the selected zone. Routes default
-  to Access-protected and require allowed emails or existing group IDs. An
-  intentionally public route must say `access = false`. Policies precede tunnel
-  configuration, then DNS; no admin hostname or allow-everyone policy is invented.
-  `r2_buckets` is a set of optional bucket names in `apac`, using provider defaults.
-  WARP routes and R2 lock-rule configuration are not wrapped by this root.
+- **Cloudflare:** the tunnel, its ingress, explicit HTTP(S) origins in the selected
+  zone, their DNS records and Access policies are always managed; this root has no
+  enable/disable switch for them. Routes default to Access-protected and require
+  allowed emails or existing group IDs. An intentionally public route must say
+  `access = false`. Policies precede tunnel configuration, then DNS; no admin
+  hostname or allow-everyone policy is invented. Only `r2_buckets` is optional: a
+  set of bucket names in `apac` using provider defaults, empty by default. WARP
+  routes and R2 lock-rule configuration are not wrapped by this root.
 - **Platform:** OpenTofu owns only `bootstrap`, sourced from
   `kubernetes/bootstrap.yaml`. Argo owns `argo` and `root`; the latter applies the
   project and its ApplicationSet. Apply waits for bootstrap sync/health, not all
@@ -100,7 +105,7 @@ this root directly: deleting its old HCL resources otherwise schedules deletion.
 4. Review the platform plan: only the new bootstrap Application should be added.
    Existing Argo must not be reinstalled. Apply and check `bootstrap`, `root`,
    `argo`, the `kubernetes` ApplicationSet and all generated workload Applications.
-   Existing workload names (`echo`, `reloader`, optional `cloudflare-tunnel`) are
+   Existing workload names (`echo`, `reloader`, `cloudflare-tunnel`) are
    retained to avoid rename-driven replacement. Resolve ownership conflicts
    explicitly; do not force over another controller's resources.
 5. Remove obsolete Git paths only after the new owners reconcile successfully.

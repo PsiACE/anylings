@@ -1,11 +1,10 @@
 [repository]
 url = "https://github.com/PsiACE/anylings.git"
-path = "clusters/tunnel/"
+path = "clusters/example/"
 
 [argocd]
 namespace = "gitops-system"
 
 [ingress]
-mode = "cloudflare-tunnel"
 # CI writes a synthetic token here before rendering; never a real credential.
 tunnel_token_file = ".local/tunnel.token"

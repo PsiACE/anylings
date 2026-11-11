@@ -45,8 +45,9 @@ jobs:
       - name: Check k0s recovery without live kubeconfig
         run: bash tests/ci/check-k0s-reset.sh
 
-  # Rendering checks use no cloud credentials. The tunnel case supplies only
-  # a synthetic file and verifies its encrypted Secret source with a repo prefix.
+  # Rendering checks use no cloud credentials. Every case supplies a synthetic
+  # tunnel token file, because the connector is part of the baseline; the
+  # repository-prefix case also exercises a Git subdirectory.
   render-platform:
     if: ${{ github.repository == 'PsiACE/anylings' }}
     name: platform render (${{ matrix.config }})
@@ -58,7 +59,7 @@ jobs:
       matrix:
         config:
           - base
-          - cloudflare-tunnel
+          - repository-prefix
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,10 +85,8 @@ jobs:
           export ANYLINGS_CONFIG="$inputs/cluster.toml"
           export SOPS_AGE_KEY_FILE="$inputs/age.key"
           cp "./tests/config/${{ matrix.config }}.toml" "$ANYLINGS_CONFIG"
-          if [ "${{ matrix.config }}" = cloudflare-tunnel ]; then
-            mkdir "$inputs/.local"
-            printf 'synthetic-ci-tunnel-token\n' > "$inputs/.local/tunnel.token"
-          fi
+          mkdir "$inputs/.local"
+          printf 'synthetic-ci-tunnel-token\n' > "$inputs/.local/tunnel.token"
           echo "ANYLINGS_CONFIG=$ANYLINGS_CONFIG" >> "$GITHUB_ENV"
           echo "SOPS_AGE_KEY_FILE=$SOPS_AGE_KEY_FILE" >> "$GITHUB_ENV"
           just init platform
@@ -95,16 +94,23 @@ jobs:
       - name: Run configure recipe
         run: just configure platform
 
+      # The Git-file generator passes manifestPath to the Application's Git
+      # source; exercise that published KSOPS path without exposing it.
       - name: Check tunnel credential delivery from the published Git source
-        if: matrix.config == 'cloudflare-tunnel'
         run: |
-          # The Git-file generator passes manifestPath to the Application's
-          # Git source; exercise that published KSOPS path without exposing it.
           source=$(jq -r '.manifestPath' .local/rendered/kubernetes/apps/network/cloudflare-tunnel/config.json)
-          case "$source" in
-            clusters/tunnel/*) source="${source#clusters/tunnel/}" ;;
-            *) echo "::error::tunnel Secret source is outside the configured Git prefix" >&2; exit 1 ;;
-          esac
+          prefix=$(yq -p=toml -oy -r '.repository.path // ""' "$ANYLINGS_CONFIG")
+          prefix="${prefix%/}"
+          expected="${prefix:+$prefix/}kubernetes/apps/network/cloudflare-tunnel"
+          if [ "$source" != "$expected" ]; then
+            echo "::error::tunnel Secret source is not the published path $expected" >&2
+            exit 1
+          fi
+          if [ -n "$prefix" ]; then
+            case "$source" in
+              "$prefix"/*) source="${source#"$prefix/"}" ;;
+            esac
+          fi
           kustomize build --enable-alpha-plugins --enable-exec ".local/rendered/$source" \
             | yq -e 'select(.kind == "Secret" and .stringData.TUNNEL_TOKEN != null) | .stringData.TUNNEL_TOKEN == "synthetic-ci-tunnel-token"' >/dev/null
           if grep -rqF 'synthetic-ci-tunnel-token' .local/rendered/kubernetes; then
@@ -292,8 +298,9 @@ jobs:
             tofu-static=${{ needs.tofu-static.result }}, native-rehearsal=${{ needs.native-e2e.result }}.
             The native-rehearsal job uses disposable fixtures around the shared platform implementation: an owned k0s
             cluster, local-path storage, an upstream read-only Git daemon, the rendered bootstrap, and the OpenTofu
-            bootstrap Application and ApplicationSet-generated children, then asserts Synced+Healthy at the pushed revision, a KSOPS-decrypted Secret, the
-            echo HTTP endpoint, Git-driven ApplicationSet deletion/recreation, PVC data restore and a repeat no-op. Treat its result as advisory evidence of
+            bootstrap Application and ApplicationSet-generated children, then asserts Synced status at the pushed revision for every
+            application and Healthy status for the credential-free ones, a KSOPS-decrypted Secret,
+            the echo HTTP endpoint, Git-driven ApplicationSet deletion/recreation, PVC data restore and a repeat no-op. Treat its result as advisory evidence of
             runtime behavior, not as proof of cloud, CSI or ingress behavior.
             Ignore the Landing review job when assessing native check completion.
             Review affected user-visible behavior against repository guidance. Reuse these check results and

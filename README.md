@@ -45,9 +45,11 @@ OpenTofu k0s root              OpenTofu DOKS root
 - Initial Git access and the age key are seeded before reconciliation. The
   AppProject is applied before its ApplicationSet. Bootstrap health does not
   imply generated workload health; those reconcile asynchronously.
-- The optional Cloudflare root uses its official provider for Access, Tunnel,
-  DNS and R2. Access precedes route activation and DNS; the cluster runs only
-  the connector. R2 retention/backups remain an explicit operational concern.
+- The Cloudflare root uses its official provider for Access, Tunnel, DNS and
+  R2. Tunnel, routes, Access and DNS are baseline responsibilities, applied for
+  every deployment without a toggle; R2 buckets are optional. Access precedes
+  route activation and DNS; the cluster runs only the connector. R2
+  retention/backups remain an explicit operational concern.
 
 ## Use
 
@@ -75,7 +77,8 @@ export ANYLINGS_CONTEXT="$(kubectl --kubeconfig "$KUBECONFIG" config current-con
 just wait cluster
 
 just init platform
-# Edit cluster.toml: repository URL, branch/prefix, ingress and chart settings.
+# Edit cluster.toml: repository URL, branch/prefix, tunnel token file and chart
+# settings.
 just configure platform
 # Review and publish only rendered/kubernetes/ to the configured Git location.
 just bootstrap platform      # first install only; existing Argo is rejected
@@ -96,7 +99,8 @@ ApplicationSet discovers `kubernetes/apps/*/*/config.json` in the published Git
 repository. Each config supplies the app name, namespace, chart coordinates,
 values path and optional manifest path; it contains no credentials. The Git
 source carries values only unless `manifestPath` is set (the tunnel's KSOPS
-Secret). Argo self-management stays outside this generated workload set.
+Secret). Argo self-management stays outside this generated workload set. The
+`cloudflare-tunnel` connector is part of that baseline set, not an add-on.
 
 Deletion follows [Autopilot's application semantics](https://github.com/argoproj-labs/argocd-autopilot/blob/c102467016841f0532a6def064d618322156a7a7/cmd/commands/common.go):
 Git removal deletes the generated Application and its workloads. Automated sync
@@ -140,10 +144,11 @@ and the cluster; encrypt whole sensitive files, not just Secret data fields.
 ## CI
 
 One platform renderer is exercised with two inputs: `tests/config/base.toml`
-(defaults, no ingress) and `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
-credentials, a Git subdirectory and a custom Argo namespace). They are configuration
-cases, not k0s/DOKS implementations. Infrastructure validation checks the independent
-OpenTofu configurations; the native integration run uses the same base input.
+(defaults) and `tests/config/repository-prefix.toml` (a Git subdirectory and a
+custom Argo namespace). Both supply only a synthetic tunnel token file, because
+the connector is baseline. They are configuration cases, not k0s/DOKS
+implementations. Infrastructure validation checks the independent OpenTofu
+configurations; the native integration run uses the same base input.
 
 The workflow runs `tests/ci/run.sh` only on an explicitly disposable GitHub runner.
 Each run creates a fresh private temporary directory; there is no resume/local
@@ -163,8 +168,10 @@ repeats. Narrow safety checks cover confidentiality and failed reset/state reten
 its disposable volume data; only sanitized diagnostics are uploaded.
 
 Single-host CI does not prove multi-host upgrades, HA, database-consistent recovery,
-DOKS CSI recovery, Cloudflare Access propagation or R2 permissions. Those require
-separate authorization and environment-specific validation. No workstation cluster
+DOKS CSI recovery, Cloudflare Access propagation or R2 permissions. Its
+credential-free runner has no Cloudflare account, so the connector is verified as
+published and Synced from Git, not as edge-connected. Those require separate
+authorization and environment-specific validation. No workstation cluster
 installation or cloud apply is implied by rendering/static checks.
 
 ## Migration and review
@@ -175,7 +182,10 @@ The single entrypoint is `kubernetes/bootstrap.yaml`; its source is
 `kubernetes/bootstrap/`, and the project root reads `kubernetes/projects/`.
 The repository Secret remains `platform-repository`.
 Remove the unused `cluster.storage_class` input; it never affected generated PVCs.
-Retain backend/state when renaming the former `edge` root to `cloudflare`.
+Remove `ingress.mode` from existing `cluster.toml` files: the Cloudflare Tunnel
+connector is baseline, so only `ingress.tunnel_token_file` remains and configs
+that still set a mode are rejected. Retain backend/state when renaming the former
+`edge` root to `cloudflare`.
 
 This is deliberately not a generic cloud module: DOKS has a fixed small pool;
 Cloudflare does not wrap WARP private routes or R2 retention rules. If older roots

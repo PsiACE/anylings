@@ -145,6 +145,10 @@ phase_git() {
 phase_configure() {
   sed "s|^url = .*|url = \"$GIT_SYNC_URL\"|" \
     "$REPO_ROOT/tests/config/base.toml" >"$ANYLINGS_CONFIG"
+  # The connector is baseline, so the rendered platform always needs a token
+  # file. This is a synthetic value, never a credential.
+  mkdir -p "$STATE/.local"
+  printf 'synthetic-ci-tunnel-token\n' >"$STATE/.local/tunnel.token"
   just init platform
   just configure platform
   E2E_ARGOCD_NS="$(yq -r '.metadata.namespace' "$RENDERED/kubernetes/bootstrap.yaml")"
@@ -217,12 +221,18 @@ assert_apps() {
   local deadline=$((SECONDS + 900))
   # One API snapshot: no per-object requests or duplicate existence passes.
   # Include the expected apps so an empty or partially created list cannot pass.
+  # The Cloudflare Tunnel connector is baseline, but this runner has no
+  # Cloudflare account, so cloudflared never reaches the edge: it must be
+  # Synced from Git here, and only the credential-free apps must be Healthy.
   until kc --namespace "$E2E_ARGOCD_NS" get applications -o json | jq -e --arg rev "$E2E_REVISION" '
-    (["bootstrap", "root", "argo", "echo", "reloader"]
+    (["bootstrap", "root", "argo", "echo", "reloader", "cloudflare-tunnel"]
       - [.items[].metadata.name] | length == 0) and
     all(.items[];
-      .status.sync.status == "Synced" and .status.health.status == "Healthy" and
-      ([.status.sync.revision, .status.sync.revisions[]?] | index($rev) != null))
+      .status.sync.status == "Synced" and
+      ([.status.sync.revision, .status.sync.revisions[]?] | index($rev) != null)) and
+    all(.items[];
+      if .metadata.name == "cloudflare-tunnel" then true
+      else .status.health.status == "Healthy" end)
   ' >/dev/null; do
     (( SECONDS < deadline )) || die "Applications did not converge on $E2E_REVISION"
     sleep 10

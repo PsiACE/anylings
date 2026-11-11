@@ -111,8 +111,8 @@ init:
     # repository, and this recipe must not change directory modes it did not
     # create.
     mkdir -p "$(dirname "$config_file")" "$(dirname "$age_key_file")"
-    # The sample is a valid, credential-free starting point (mode none); edit
-    # it afterwards for a real deployment.
+    # The sample is a valid starting point that names a tunnel token file but
+    # holds no credential; supply the token before configuring a deployment.
     [ -f "$config_file" ] || cp "{{ sample_config_file }}" "$config_file"
     if [ ! -s "$age_key_file" ]; then
         (umask 077 && age-keygen --output "$age_key_file")

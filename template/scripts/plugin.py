@@ -85,12 +85,9 @@ class Plugin(makejinja.plugin.Plugin):
         # A relative tunnel token path is resolved against the config file,
         # which is what the rehearsal and CI pass in.
         ingress = data['ingress']
-        if ingress['mode'] == 'cloudflare-tunnel':
-            ingress['tunnel_token_path'] = str(
-                validate.resolve_relative(self._config_file, ingress['tunnel_token_file'])
-            )
-        else:
-            ingress['tunnel_token_path'] = ''
+        ingress['tunnel_token_path'] = str(
+            validate.resolve_relative(self._config_file, ingress['tunnel_token_file'])
+        )
         return data
 
     def functions(self) -> makejinja.plugin.Functions:
@@ -102,10 +99,7 @@ class Plugin(makejinja.plugin.Plugin):
 
         def tunnel_token(file_path: str | None = None) -> str:
             """Read the cloudflare tunnel token from its configured file."""
-            path = file_path or self._load()['ingress']['tunnel_token_path']
-            if not path:
-                raise ValueError('ingress.tunnel_token_file is not configured')
-            return _read_stripped(path)
+            return _read_stripped(file_path or self._load()['ingress']['tunnel_token_path'])
 
         return [
             age_key,

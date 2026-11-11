@@ -9,7 +9,7 @@ config is invalid.
 """
 
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 import json
 import sys
@@ -82,24 +82,18 @@ class Argocd(Model):
 
 
 class Ingress(Model):
-    # "none" keeps the cluster credential-free and reachable only inside the
-    # cluster; "cloudflare-tunnel" runs cloudflared with a token file.
-    mode: Literal["none", "cloudflare-tunnel"] = "none"
-    # Path to the tunnel token, resolved relative to the config file. The
-    # token itself is never a TOML value.
-    tunnel_token_file: str = ""
+    # The Cloudflare Tunnel connector is part of the baseline: every cluster
+    # runs cloudflared, and the cloudflare OpenTofu root owns DNS and routes.
+    # Only the token's location is configurable; the token itself is never a
+    # TOML value, and no credential path is invented by a default.
+    tunnel_token_file: str
 
-    @model_validator(mode="after")
-    def check(self) -> Self:
-        if self.mode == "cloudflare-tunnel" and not self.tunnel_token_file:
-            raise ValueError(
-                "tunnel_token_file is required when ingress.mode is 'cloudflare-tunnel'"
-            )
-        if self.mode == "none" and self.tunnel_token_file:
-            raise ValueError(
-                "tunnel_token_file must be empty when ingress.mode is 'none'"
-            )
-        return self
+    @field_validator("tunnel_token_file")
+    @classmethod
+    def check_token_file(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("tunnel_token_file must name the Cloudflare tunnel token file")
+        return value
 
 
 class Config(Model):
@@ -107,7 +101,10 @@ class Config(Model):
 
     repository: Repository
     argocd: Argocd = Argocd()
-    ingress: Ingress = Ingress()
+    # Required: the connector is baseline, so its token location is not
+    # optional. A config without [ingress] is rejected instead of silently
+    # rendering a cluster with no ingress path.
+    ingress: Ingress
 
 
 def format_errors(error: ValidationError) -> str:

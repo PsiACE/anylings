@@ -1,4 +1,5 @@
-# Official Cloudflare resources: protected host routes and optional buckets.
+# Official Cloudflare resources: the tunnel, protected host routes and DNS are
+# baseline capabilities of the platform. R2 buckets are the only optional part.
 data "cloudflare_zones" "this" {
   name = var.zone_name
 }

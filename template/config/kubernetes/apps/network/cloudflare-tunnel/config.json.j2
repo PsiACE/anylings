@@ -1,4 +1,3 @@
-#% if ingress.mode == 'cloudflare-tunnel' %#
 {
   "appName": "cloudflare-tunnel",
   "namespace": "network",
@@ -8,4 +7,3 @@
   "valuesFile": #{ repository_path('kubernetes/apps/network/cloudflare-tunnel/values.sops.yaml') | tojson }#,
   "manifestPath": #{ repository_path('kubernetes/apps/network/cloudflare-tunnel') | tojson }#
 }
-#% endif %#

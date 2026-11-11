@@ -130,7 +130,8 @@ container image rather than a local rebuild.
 - Probes use the image's own `magpie healthcheck`, which succeeds only while the
   gateway answers.
 - Runs as uid/gid `65532` with a read-only root filesystem; `/config` holds all
-  state and `/tmp` is scratch, both provided as `emptyDir` volumes.
+  state and `/tmp` is scratch. `/tmp` is always an `emptyDir`; `/config` is an
+  `emptyDir` by default (see below).
 
 Because the gateway binds `0.0.0.0`, any caller outside the pod is remote, and
 upstream answers a remote caller without an enabled gateway key with HTTP 401.
@@ -139,10 +140,34 @@ before publishing it.
 
 ### Operator inputs and prerequisites
 
-1. **Persistent storage for `/config`.** With `emptyDir`, providers, gateway
-   keys and sign-ins are lost when the pod is replaced, so this instance is not
-   a durable gateway yet. Choose a StorageClass for the cluster (see above) and
-   switch the `config` entry to a `persistentVolumeClaim` sized for it.
+1. **Persistent storage for `/config`.** By default `/config` is an `emptyDir`,
+   so providers, gateway keys and sign-ins are lost when the pod is replaced.
+   This is unchanged for anyone who has not chosen durable storage. To keep them
+   across pod replacement, set one input:
+
+    ```toml
+    [magpie]
+    config_claim = "magpie-config"
+    ```
+
+    That names an **existing** `PersistentVolumeClaim` in the application's own
+    namespace (`default`). Prerequisites, all outside this repository:
+
+    - Create the claim before syncing the Application, with the StorageClass and
+      size you want. The platform mounts it and never creates it.
+    - You own the claim and its data: this tree renders no
+      `PersistentVolumeClaim` for it, so removing Magpie from Git removes the
+      workload but leaves the claim. The claim and its volume still follow the
+      cluster's own storage and reclaim policy, so back up what you need as you
+      would any application data.
+    - The pod runs as uid/gid `65532` and sets `fsGroup: 65532`, so `/config`
+      must be writable by gid `65532`. Whether the driver enforces that group on
+      mount is driver- and volume-dependent: check the CSI driver or volume
+      configuration in use rather than assuming all of them do, and set matching
+      ownership on a volume type that does not.
+
+    Leaving `config_claim` empty keeps the ephemeral default.
+
 2. **Provider credentials.** Add vendor credentials to the running instance's
    `/config`; they are not part of this repository. Do not put vendor API keys in
    `values.sops.yaml` or add a second secret-delivery path for them.
@@ -154,7 +179,10 @@ before publishing it.
    must keep gateway-key authentication on.
 
 The rehearsal covers rendering, reconciliation and gateway-key enforcement. It
-does not cover vendor access, durable storage or public exposure.
+does not cover vendor access, durable storage or public exposure. The
+existing-claim rendering is covered; a pod replacement or re-mount on real CSI
+storage is not tested, and moving data onto a claim does not by itself show that
+a replaced volume keeps it.
 
 ## Observability
 

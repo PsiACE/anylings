@@ -67,12 +67,19 @@ defaultPodOptions:
     seccompProfile:
       type: RuntimeDefault
 persistence:
-  # Magpie keeps providers, gateway keys and sign-ins under /config. An
-  # emptyDir keeps the pod writable without inventing a StorageClass this
-  # deployment has not chosen; see the operator note in the README before
-  # treating this instance as the durable gateway.
+  # Magpie keeps providers, gateway keys and sign-ins under /config. Without
+  # magpie.config_claim this is an emptyDir: writable, but lost on pod
+  # replacement, without inventing a StorageClass this deployment has not
+  # chosen. With a claim name it mounts that existing claim instead.
   config:
+    #% if magpie.config_claim %#
+    # The claim is owned outside this Application: the chart mounts an
+    # existingClaim and renders no PVC, so Git removal cannot delete its data.
+    type: persistentVolumeClaim
+    existingClaim: #{ magpie.config_claim | tojson }#
+    #% else %#
     type: emptyDir
+    #% endif %#
     globalMounts:
       - path: /config
   tmp:

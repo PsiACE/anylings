@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import json
+import re
 import sys
 import tomllib
 
@@ -33,6 +34,8 @@ REPO_URL_PATTERN = r"^(https?://|git://|ssh://git@)[^/]+/.+$"
 CHART_VERSION_PATTERN = r"^v?[0-9]+\.[0-9]+\.[0-9]+$"
 # A namespace is a DNS label: dots are not allowed.
 NAMESPACE_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+# A PersistentVolumeClaim name is a DNS subdomain (RFC 1123), like a Service.
+PVC_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
 
 
 class Model(BaseModel):
@@ -102,6 +105,25 @@ class Ingress(Model):
         return self
 
 
+class Magpie(Model):
+    # Empty keeps the default ephemeral emptyDir /config volume. A name opts
+    # into an existing claim in the application's own namespace; the platform
+    # never creates that claim, so removing the app cannot delete its data.
+    config_claim: str = ""
+
+    @field_validator("config_claim")
+    @classmethod
+    def check_config_claim(cls, value: str) -> str:
+        if not value:
+            return value
+        if len(value) > 253 or not PVC_NAME_RE.fullmatch(value):
+            raise ValueError(
+                f"{value!r} is not a valid PersistentVolumeClaim name "
+                "(lowercase DNS subdomain, at most 253 characters)"
+            )
+        return value
+
+
 class Observability(Model):
     # Off by default: the slice needs ClusterIP-only access and its own
     # monitoring decision, so it never appears in a cluster that did not ask
@@ -115,6 +137,7 @@ class Config(Model):
     repository: Repository
     argocd: Argocd = Argocd()
     ingress: Ingress = Ingress()
+    magpie: Magpie = Magpie()
     observability: Observability = Observability()
 
 

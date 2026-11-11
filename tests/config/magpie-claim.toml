@@ -1,0 +1,7 @@
+[repository]
+url = "git://git.example.test/platform.git"
+
+# The opt-in durable gateway: mount an operator-owned claim at /config instead
+# of the ephemeral emptyDir. No claim is created by this tree.
+[magpie]
+config_claim = "magpie-config"

@@ -1,6 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "Agents": {
+      "additionalProperties": false,
+      "properties": {
+        "image_repository": {
+          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$",
+          "title": "Image Repository",
+          "type": "string"
+        },
+        "image_tag": {
+          "default": "0.1.8",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$",
+          "title": "Image Tag",
+          "type": "string"
+        },
+        "storage_existing_claim": {
+          "default": "",
+          "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "title": "Storage Existing Claim",
+          "type": "string"
+        }
+      },
+      "required": ["image_repository"],
+      "title": "Agents",
+      "type": "object"
+    },
     "Argocd": {
       "additionalProperties": false,
       "properties": {
@@ -86,6 +111,17 @@
         "mode": "none",
         "tunnel_token_file": ""
       }
+    },
+    "agents": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Agents"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": ["repository"],

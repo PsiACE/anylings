@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import json
+import re
 import sys
 import tomllib
 
@@ -33,6 +34,11 @@ REPO_URL_PATTERN = r"^(https?://|git://|ssh://git@)[^/]+/.+$"
 CHART_VERSION_PATTERN = r"^v?[0-9]+\.[0-9]+\.[0-9]+$"
 # A namespace is a DNS label: dots are not allowed.
 NAMESPACE_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+# A container image repository without a tag or digest: the tag is separate so
+# the rendered values never carry two sources for the same version.
+IMAGE_REPOSITORY_PATTERN = r"^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$"
+IMAGE_TAG_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"
+CLAIM_NAME_PATTERN = r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
 
 
 class Model(BaseModel):
@@ -102,12 +108,39 @@ class Ingress(Model):
         return self
 
 
+class Agents(Model):
+    # The T3 Code runtime image is built from this repository but published to
+    # a registry this template must not guess: an operator names it, so no
+    # private registry or vendor path is baked into the rendered tree.
+    image_repository: str = Field(pattern=IMAGE_REPOSITORY_PATTERN)
+    image_tag: str = Field(default="0.1.8", pattern=IMAGE_TAG_PATTERN)
+    # An existing claim to mount at /home/t3 instead of an emptyDir. Empty means
+    # the pod gets ephemeral state and the operator is told so; this template
+    # never creates a claim or picks a StorageClass on its own.
+    storage_existing_claim: str = Field(default="", pattern=CLAIM_NAME_PATTERN)
+
+    @field_validator("storage_existing_claim")
+    @classmethod
+    def check_claim(cls, value: str) -> str:
+        if value == "":
+            return value
+        # A claim name is a DNS subdomain; keep it to the conservative subset so
+        # an accidental path or Secret reference cannot be expressed here.
+        if not re.fullmatch(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?", value):
+            raise ValueError(f"{value!r} is not a valid PersistentVolumeClaim name")
+        return value
+
+
 class Config(Model):
     model_config = ConfigDict(extra="forbid", title="cluster.toml")
 
     repository: Repository
     argocd: Argocd = Argocd()
     ingress: Ingress = Ingress()
+    # Optional: a cluster without an operator-supplied registry simply has no
+    # agent runtime. Making it required would block every existing deployment
+    # and the native rehearsal on a registry that does not exist there.
+    agents: Agents | None = None
 
 
 def format_errors(error: ValidationError) -> str:

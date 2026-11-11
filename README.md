@@ -156,6 +156,55 @@ before publishing it.
 The rehearsal covers rendering, reconciliation and gateway-key enforcement. It
 does not cover vendor access, durable storage or public exposure.
 
+## Agent runtime
+
+`kubernetes/apps/agents/t3-code/` in the rendered tree runs the [T3 Code](https://github.com/pingdotgg/t3code)
+web server, with the [Bub](https://github.com/bubbuild/bub) ACP executable on its
+`PATH` as the provider T3 can launch. It is **opt-in**: without an `[agents]`
+section in `cluster.toml` nothing is rendered, so a cluster with no published
+runtime image stays deployable.
+
+The image is built here from `images/t3-code/Containerfile` rather than pulled:
+
+- T3 Code `0.1.8`, the upstream self-contained release binary, verified against
+  that release's published `SHA256SUMS` during the build and pinned for both
+  `linux/amd64` and `linux/arm64`.
+- Bub `0.6.1` from PyPI, installed with its `app` extra and hash-verified from
+  `images/t3-code/requirements.txt`.
+- Runs as uid/gid `65532` with a read-only root filesystem; T3's database and
+  project checkouts live under the writable `/home/t3`, and `/tmp` is scratch.
+
+The server is reachable only through a cluster-internal `ClusterIP` Service on
+port `3773`. Its own authentication is never disabled: a caller that is not the
+pod's own loopback needs a pairing token or a bearer token, minted with
+`t3 auth pairing create` / `t3 auth session issue` inside the pod.
+
+### Operator inputs and prerequisites
+
+1. **Publish the image.** Build and push `images/t3-code/` to a registry of your
+   choice and set `agents.image_repository`. The template never guesses a
+   registry, and no image is committed or published by CI.
+2. **Persistent state.** `agents.storage_existing_claim` names a claim you
+   created, mounted at `/home/t3`. Empty means `emptyDir`, which loses the
+   database and every checkout when the pod is replaced. This template creates
+   no claim and selects no StorageClass.
+3. **Provider registration.** Sign in to a provider and choose models inside the
+   running instance. T3 writes that state under `/home/t3/.t3`; it is never in
+   `values.yaml`, and no vendor key or model is preselected here.
+4. **Remote reachability.** Exposing the server beyond the cluster is an ingress
+   decision made elsewhere, and any route must keep T3's authentication on.
+
+Not yet part of this slice, and not simulated by it: registering a remote
+environment or DOKS-based runner for agent work. That path currently has no
+supported interface in this repository, so it stays an explicit pending
+integration rather than a fake adapter.
+
+`bash tests/runtime/check-t3-code.sh` checks the image definition and the
+entrypoint against a synthetic `HOME`, renders the template, and validates the
+values through the pinned `app-template` chart; `--image <ref>` also checks a
+built image's toolchain versions and startup. The check makes no registry push
+and no cluster or cloud call.
+
 Other action-first commands:
 
 | Command                     | Purpose                                                               |
@@ -183,11 +232,17 @@ and the cluster; encrypt whole sensitive files, not just Secret data fields.
 
 ## CI
 
-One platform renderer is exercised with two inputs: `tests/config/base.toml`
-(defaults, no ingress) and `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
-credentials, a Git subdirectory and a custom Argo namespace). They are configuration
-cases, not k0s/DOKS implementations. Infrastructure validation checks the independent
-OpenTofu configurations; the native integration run uses the same base input.
+One platform renderer is exercised with three inputs: `tests/config/base.toml`
+(defaults, no ingress), `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
+credentials, a Git subdirectory and a custom Argo namespace) and
+`tests/config/agents.toml` (the optional agent runtime with a synthetic registry
+and claim). They are configuration cases, not k0s/DOKS implementations.
+Infrastructure validation checks the independent OpenTofu configurations; the
+native integration run uses the same base input.
+
+The agent runtime is checked by `tests/runtime/check-t3-code.sh`, which also
+builds and exercises the image in CI. It pushes nothing, runs no cluster and
+makes no cloud call, so an image that cannot start still fails the build.
 
 Every pull request runs the offline gate: safety contracts, both platform render
 inputs, and OpenTofu format/validate/test. Those checks take minutes, need no

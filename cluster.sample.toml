@@ -62,3 +62,32 @@ mode = "none"
 # The token is a file input, never a plaintext value in this file.
 # OPTIONAL. Example: ".local/cloudflare-tunnel.token"
 tunnel_token_file = ""
+
+
+
+# =============================================================================
+#    The T3 Code agent runtime. Optional: without this section no agent runtime
+#    is rendered, which keeps a cluster that has no published runtime image
+#    deployable. The image is built from `images/t3-code` in this repository and
+#    pushed to a registry this template cannot guess, so the operator names it.
+#    Provider credentials, model choice and any public route are instance
+#    decisions made after deployment; none of them are committed here.
+# =============================================================================
+# [agents]
+
+# Container image repository of the T3 Code runtime image, without a tag.
+# REQUIRED when this section is present.
+# Example: "registry.example.test/anylings/t3-code"
+# image_repository = "registry.example.test/anylings/t3-code"
+
+# OPTIONAL. Default: "0.1.8". The T3 Code release the image carries. Keep this
+# in step with the Containerfile's T3_VERSION, and prefer a release at least
+# three days old.
+# image_tag = "0.1.8"
+
+# Name of an existing PersistentVolumeClaim to mount at /home/t3, which holds
+# T3's database and the project checkouts it references. Empty means an
+# emptyDir: state is then lost when the pod is replaced. This template never
+# creates the claim, so its size and StorageClass stay an explicit choice.
+# OPTIONAL. Default: "" (ephemeral)
+# storage_existing_claim = ""

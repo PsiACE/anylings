@@ -188,6 +188,15 @@ jobs:
           tofu -chdir="infra/tofu/${ROOT}" init -backend=false -input=false -no-color
           tofu -chdir="infra/tofu/${ROOT}" validate -no-color
 
+      # Offline pool contracts for DOKS use a mocked provider only: no token,
+      # no DigitalOcean API call and no state. Roots without test files pass.
+      - name: Run offline contracts
+        env:
+          ROOT: ${{ matrix.root }}
+        run: |
+          export TF_DATA_DIR="$RUNNER_TEMP/tofu-${ROOT}"
+          tofu -chdir="infra/tofu/${ROOT}" test -no-color
+
   # The native integration suite runs only on a disposable CI runner.
   # Fixtures require explicit CI authorization. No cloud credentials and no
   # pre-existing Kubernetes Secret is required.

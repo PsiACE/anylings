@@ -52,10 +52,11 @@ ordinary `TF_VAR_*`/tfvars inputs. Never use the same backend state for two root
 
 - **k0s:** see [k0s/README.md](k0s/README.md). OpenTofu tracks desired inputs;
   this is not full runtime drift detection. Reset must not require live kubeconfig.
-- **DOKS:** ordinary non-HA control plane, two fixed `s-2vcpu-4gb` workers,
-  no autoscaling or automatic upgrade. The version must be a full offered DOKS
+- **DOKS:** ordinary non-HA control plane, one fixed pool of two `s-2vcpu-4gb`
+  workers by default, no autoscaling or automatic upgrade. `node_size` and
+  `node_count` are the only pool inputs. The version must be a full offered DOKS
   slug; region defaults to `sgp1`. DigitalOcean supplies default networking/CSI.
-  There is no optional VPC factory, tag interface or configurable node-pool module.
+  There is no optional VPC factory, tag interface or autoscaling controller.
 - **Cloudflare:** explicit HTTP(S) origins in the selected zone. Routes default
   to Access-protected and require allowed emails or existing group IDs. An
   intentionally public route must say `access = false`. Policies precede tunnel
@@ -80,6 +81,33 @@ Cloud tokens stay in environment variables (`DIGITALOCEAN_TOKEN`,
 `CLOUDFLARE_API_TOKEN`). Tunnel credentials and kubeconfig outputs/state are sensitive.
 Read the tunnel token into a private file referenced by platform configuration.
 Live cloud behavior, Access propagation and data recovery are not proven by `validate`.
+
+## DOKS worker pool inputs
+
+| Input        | Default       | Validation             |
+| ------------ | ------------- | ---------------------- |
+| `node_size`  | `s-2vcpu-4gb` | DigitalOcean size slug |
+| `node_count` | `2`           | Whole number, 1 to 512 |
+
+The pool is one fixed, non-HA pool with `auto_scale = false`; `node_size` and
+`node_count` are its only inputs. Both defaults reproduce the previous fixed
+shape. A single-node cluster is a deliberate choice, not a default:
+
+```hcl
+# One worker instead of two; every other input keeps its default.
+node_count = 1
+```
+
+One node is non-HA: node maintenance, an upgrade or a node fault stops all
+workloads, with no second worker to receive them.
+
+Changing `node_size` on an existing cluster is not an in-place resize. A node
+pool's size slug is immutable, so it needs a reviewed pool migration (new pool,
+drain, removal of the old one) rather than an ordinary apply. `node_count` can
+change in place, and `prevent_destroy` still guards replacement and deletion.
+
+The DigitalOcean token is an environment credential
+(`DIGITALOCEAN_TOKEN`), never an input variable or a tracked tfvars value.
 
 ## Platform migration
 
@@ -114,7 +142,14 @@ Never substitute `destroy platform` or a whole-state reset for the handoff.
 tofu fmt -check -recursive infra/tofu
 tofu -chdir=infra/tofu/ROOT init -backend=false -lockfile=readonly
 tofu -chdir=infra/tofu/ROOT validate
+tofu -chdir=infra/tofu/ROOT test
 ```
 
-CI validates all four roots and applies the normal k0s/platform roots on a disposable
-host. It does not apply cloud roots. Locks cover Linux/macOS on amd64/arm64.
+The DOKS root's `tests/cluster_pool.tftest.hcl` is an offline contract over a
+mocked provider: it covers the defaults, the explicit `ha = false`, a single node
+and an explicit size, and rejects an invalid count or size. It needs no token,
+makes no DigitalOcean API call, and writes no state.
+
+CI validates all four roots, runs those offline contracts, and applies the normal
+k0s/platform roots on a disposable host. It does not apply cloud roots. Locks
+cover Linux/macOS on amd64/arm64.

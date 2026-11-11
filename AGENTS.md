@@ -20,6 +20,12 @@ Test observable contracts through supported inputs and entrypoints. Do not pin p
 
 CI integration uses synthetic credentials and isolated state in a fresh private directory under `$RUNNER_TEMP`. The integration fixture runner requires explicit disposable GitHub runner authorization; do not spoof these guards or install k0s on the workstation. CI may create and clean up its own disposable k0s instance, but must never operate production clusters or use production keys. Host service installation and paid cloud operations require explicit authorization. Collect sanitized diagnostics on failure; do not publish private keys, decrypted manifests, kubeconfig credentials, or OpenTofu state as artifacts.
 
+The per-pull-request gate is the offline set: safety contracts, both render inputs
+and OpenTofu format/validate/test. The native rehearsal is opt-in through the
+`ci/native-rehearsal` label, so it needs a maintainer decision rather than every
+push. Do not add it back to the gate or to the advisory review's dependencies
+without a maintainer asking for that cost.
+
 Push candidates normally and let pull-request CI run automatically. Do not manually dispatch or rerun CI, and do not continuously poll it. If a workflow-token push suppresses normal PR events, report that checks were not triggered rather than dispatching a substitute run. Native checks determine acceptance; Landing feedback is advisory. Maintainers decide merges and alert dismissal.
 
 Publish only the rendered `kubernetes/` tree at the configured Git prefix. Keep bootstrap inspection manifests outside rendered output, private and untracked. Infrastructure roots are `k0s`, `doks` and `cloudflare`; the platform follows Argo CD Autopilot: one bootstrap Application owns Argo self-management and a projects root; the project ApplicationSet discovers application config files. Preserve existing backend/state when moving root directories. No automatic Release substitutes for an explicit Git publication.

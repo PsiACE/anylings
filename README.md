@@ -189,9 +189,25 @@ credentials, a Git subdirectory and a custom Argo namespace). They are configura
 cases, not k0s/DOKS implementations. Infrastructure validation checks the independent
 OpenTofu configurations; the native integration run uses the same base input.
 
-The workflow runs `tests/ci/run.sh` only on an explicitly disposable GitHub runner.
-Each run creates a fresh private temporary directory; there is no resume/local
-rehearsal interface or public CI command.
+Every pull request runs the offline gate: safety contracts, both platform render
+inputs, and OpenTofu format/validate/test. Those checks take minutes, need no
+credentials and no cluster.
+
+The native rehearsal is heavier: it needs a disposable runner, passwordless
+sudo for k0s and most of an hour. It is therefore opt-in. Add the
+`ci/native-rehearsal` label to a pull request from this repository to run it; the
+label event starts only that job, and it is independent of the gate so the
+ordinary checks cannot make it irrelevant. Removing the label cancels nothing
+already running. `tests/ci/run.sh` still refuses to start without an explicitly
+disposable runner, so the label selects evidence collection rather than
+relaxing the fixture's own authorization. The Landing review needs only the
+offline gate; a missing rehearsal is not a missing check. Diagnostics upload is
+best effort: a transport failure warns and never turns a passing rehearsal red.
+
+`bash tests/ci/local-gate.sh` runs the same offline gate locally with the
+checkout's own tools. It writes nothing to the repository, is safe on a
+workstation, and proves no runtime behavior: it is not native rehearsal
+evidence and does not stand in for DOKS CSI, Cloudflare or multi-host checks.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through

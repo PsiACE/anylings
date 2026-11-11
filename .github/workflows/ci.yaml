@@ -7,19 +7,32 @@ on:
     branches:
       - main
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `labeled` lets a maintainer request the opt-in native rehearsal on an
+    # existing pull request without pushing a commit or dispatching a run.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     branches:
       - main
 
+# A label event only selects the opt-in native rehearsal, so it keeps its own
+# group per label name: labelling must never cancel the code run it is added to.
+# Code events keep one group per pull request, so a new push still supersedes an
+# older run of the same candidate.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.repository_id }}-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    ${{ github.workflow }}-${{ github.repository_id }}-${{ github.event.pull_request.number || github.ref }}-${{
+    (github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+    format('label-{0}', github.event.label.name) || 'code' }}
   cancel-in-progress: true
 
 permissions: {}
 
 jobs:
+  # Label changes only select the opt-in native rehearsal, so they must not
+  # re-run the ordinary gate.
   contracts:
-    if: ${{ github.repository == 'PsiACE/anylings' }}
+    if: >-
+      github.repository == 'PsiACE/anylings' &&
+      github.event.action != 'labeled' && github.event.action != 'unlabeled'
     name: safety contracts
     runs-on: ubuntu-latest
     permissions:
@@ -48,7 +61,9 @@ jobs:
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.
   render-platform:
-    if: ${{ github.repository == 'PsiACE/anylings' }}
+    if: >-
+      github.repository == 'PsiACE/anylings' &&
+      github.event.action != 'labeled' && github.event.action != 'unlabeled'
     name: platform render (${{ matrix.config }})
     runs-on: ubuntu-latest
     permissions:
@@ -146,7 +161,9 @@ jobs:
   # Static checks for every OpenTofu root. No cloud credentials are involved:
   # init runs without a backend and validate only inspects the configuration.
   tofu-static:
-    if: ${{ github.repository == 'PsiACE/anylings' }}
+    if: >-
+      github.repository == 'PsiACE/anylings' &&
+      github.event.action != 'labeled' && github.event.action != 'unlabeled'
     name: OpenTofu validation (${{ matrix.root }})
     runs-on: ubuntu-latest
     permissions:
@@ -197,13 +214,25 @@ jobs:
           export TF_DATA_DIR="$RUNNER_TEMP/tofu-${ROOT}"
           tofu -chdir="infra/tofu/${ROOT}" test -no-color
 
-  # The native integration suite runs only on a disposable CI runner.
-  # Fixtures require explicit CI authorization. No cloud credentials and no
-  # pre-existing Kubernetes Secret is required.
+  # The native integration suite needs a disposable runner, root for k0s and
+  # most of the workflow's wall time, so it is not part of the per-pull-request
+  # gate. A maintainer opts a candidate in by adding the `ci/native-rehearsal`
+  # label; ordinary reviews stay fast and the label event re-runs nothing else.
+  #
+  # Fixtures still require explicit CI authorization from the runner itself
+  # (tests/ci/run.sh), not from this condition: the job selector only decides
+  # whether the evidence is collected. No cloud credentials and no pre-existing
+  # Kubernetes Secret is involved.
+  #
+  # It deliberately declares no `needs`. A label event skips the gate jobs, so a
+  # dependency on them would make the opt-in label select nothing.
   native-e2e:
-    if: ${{ github.repository == 'PsiACE/anylings' }}
-    name: native-rehearsal
-    needs: [contracts]
+    if: >-
+      github.repository == 'PsiACE/anylings' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'ci/native-rehearsal')
+    name: native-rehearsal (opt-in)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -242,22 +271,36 @@ jobs:
           ANYLINGS_CI_DISPOSABLE: "1"
         run: bash tests/ci/run.sh
 
+      # Diagnostics are optional evidence, so a transport failure must not
+      # decide the check: the rehearsal step above already fails on a real test
+      # failure. Without this, an artifact-API error paints a green rehearsal
+      # red and hides the actual result.
       - name: Upload sanitized diagnostics
+        id: diagnostics
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
+        continue-on-error: true
         with:
           name: native-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/anylings-ci.*/diag/
           retention-days: 30
           if-no-files-found: ignore
 
+      - name: Report unavailable diagnostics
+        if: ${{ !cancelled() && steps.diagnostics.outcome == 'failure' }}
+        run: echo "::warning::Diagnostics upload failed; the rehearsal result above stands."
+
   # Landing review adapted from bubbuild/republic at 2fa76b5407ba1cf035293121bfab9e782ea199f3.
   landing-feedback:
     name: Landing review
-    needs: [contracts, render-platform, tofu-static, native-e2e]
+    # Advisory review of the ordinary gate only. The opt-in native rehearsal is
+    # separate evidence and must not delay or block review on a candidate that
+    # never requested it.
+    needs: [contracts, render-platform, tofu-static]
     if: >-
       always() && !cancelled() && vars.LANDING_MODEL != '' &&
       github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+      github.event.action != 'labeled' && github.event.action != 'unlabeled' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -298,13 +341,15 @@ jobs:
           checked-revision: ${{ github.sha }}
           instruction: >-
             Native checks: contracts=${{ needs.contracts.result }}, platform-render=${{ needs.render-platform.result }},
-            tofu-static=${{ needs.tofu-static.result }}, native-rehearsal=${{ needs.native-e2e.result }}.
-            The native-rehearsal job uses disposable fixtures around the shared platform implementation: an owned k0s
-            cluster, local-path storage, an upstream read-only Git daemon, the rendered bootstrap, and the OpenTofu
-            bootstrap Application and ApplicationSet-generated children, then asserts Synced+Healthy at the pushed revision, a KSOPS-decrypted Secret, the
-            magpie gateway answering and refusing unkeyed remote callers, Git-driven ApplicationSet deletion/recreation,
-            PVC data restore and a repeat no-op. Treat its result as advisory evidence of
-            runtime behavior, not as proof of cloud, CSI or ingress behavior.
+            tofu-static=${{ needs.tofu-static.result }}.
+            The native rehearsal is opt-in through the ci/native-rehearsal label and is not part of this gate, so do not
+            ask for it or treat its absence as a missing check. When it was requested it uses disposable fixtures around
+            the shared platform implementation: an owned k0s cluster, local-path storage, an upstream read-only Git
+            daemon, the rendered bootstrap, and the OpenTofu bootstrap Application and ApplicationSet-generated
+            children, then asserts Synced+Healthy at the pushed revision, a KSOPS-decrypted Secret, the magpie gateway
+            answering and refusing unkeyed remote callers, Git-driven ApplicationSet deletion/recreation, PVC data
+            restore and a repeat no-op. Its result, when present, is advisory evidence of runtime behavior, not proof of
+            cloud, CSI or ingress behavior.
             Ignore the Landing review job when assessing native check completion.
             Review affected user-visible behavior against repository guidance. Reuse these check results and
             relevant review history; investigate unresolved questions and publish useful findings or a brief

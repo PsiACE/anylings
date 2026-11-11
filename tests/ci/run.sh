@@ -320,11 +320,42 @@ EOF
 
   # Raw HTTP through nc, not wget: busybox wget discards a 4xx body, and the
   # body is where the refusal is stated.
+  #
+  # Every header line is terminated by CRLF and the header block by one
+  # further empty line, in both the keyed and the unkeyed case. Interpolating
+  # an optional header into a single printf cannot express that: an empty one
+  # happens to yield the blank line, a present one does not, and the request
+  # then has no end-of-headers marker.
+  request_bytes() {
+    local auth_header="${1-}"
+    printf 'GET /v1/models HTTP/1.0\r\n'
+    printf 'Host: %s\r\n' "$svc"
+    if [ -n "$auth_header" ]; then
+      printf '%s\r\n' "$auth_header"
+    fi
+    printf '\r\n'
+  }
   request() {
-    local auth_header="$1"
-    printf 'GET /v1/models HTTP/1.0\r\nHost: %s\r\n%s\r\n' "$svc" "$auth_header" \
+    request_bytes "${1-}" \
       | kc --namespace default exec -i e2e-gateway-client -- nc -w 10 "$svc" 3425
   }
+
+  # Byte-level guard, so a malformed request cannot silently turn this into an
+  # assertion about a connection that never delivered a request. The wire form
+  # must end with exactly one blank line and contain no other.
+  local wire
+  wire="$(request_bytes "Authorization: Bearer $E2E_GATEWAY_KEY" | od -An -tx1 | tr -d ' \n')"
+  case "$wire" in
+    *0d0a0d0a) ;;
+    *) die "keyed request is not terminated by CRLFCRLF: $wire" ;;
+  esac
+  [ "$(printf '%s' "$wire" | grep -o '0d0a0d0a' | wc -l || true)" = 1 ] \
+    || die "keyed request carries more than one blank line: $wire"
+  wire="$(request_bytes '' | od -An -tx1 | tr -d ' \n')"
+  case "$wire" in
+    *0d0a0d0a) ;;
+    *) die "unkeyed request is not terminated by CRLFCRLF: $wire" ;;
+  esac
 
   # Unkeyed: an authentication refusal that names the gateway key, not a
   # connection failure or an anonymous success.

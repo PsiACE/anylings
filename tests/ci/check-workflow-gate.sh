@@ -55,18 +55,43 @@ for job in "${gate[@]}"; do
     || fail "$job is duplicated into the native workflow"
 done
 
-# The gate workflow holds the gate and its review, nothing else: a heavy job
-# added back here would report success whenever it is skipped.
-[ "$(q '.jobs | keys | join(" ")' "$ci")" = "contracts render-platform tofu-static landing-feedback" ] \
-  || fail "the gate workflow holds unexpected jobs: $(q '.jobs | keys | join(" ")' "$ci")"
+# The gate workflow holds the gate and its review, and may also hold other
+# offline checks. What it must never hold is the heavy rehearsal: that job would
+# report success whenever it is skipped. Additional offline jobs are allowed, so
+# independent work can add its own bounded check without editing this contract.
+for job in "${gate[@]}" landing-feedback; do
+  [ "$(q ".jobs | has(\"$job\")" "$ci")" = true ] \
+    || fail "the gate workflow lost its $job job"
+done
+while read -r job; do
+  case " ${gate[*]} landing-feedback " in
+    *" $job "*) continue ;;
+  esac
+  # A new job must stay offline: no rehearsal entrypoint, no nested workflow,
+  # no sudo, no longer than the gate's own bound.
+  if yq ".jobs.\"$job\".steps[]? | .run // \"\"" "$ci" | grep -q 'tests/ci/run.sh'; then
+    fail "the gate workflow runs the native rehearsal in job: $job"
+  fi
+  if [ "$(q ".jobs.\"$job\".uses // \"\"" "$ci")" != "" ]; then
+    fail "the gate workflow delegates to another workflow in job: $job"
+  fi
+  if yq ".jobs.\"$job\".steps[]? | .run // \"\"" "$ci" | grep -Eq '(^|[^[:alnum:]_])sudo '; then
+    fail "the gate workflow holds a privileged job: $job"
+  fi
+  timeout="$(q ".jobs.\"$job\".timeout-minutes // 45" "$ci")"
+  [ "$timeout" -le 45 ] || fail "the gate workflow holds a long job: $job ($timeout minutes)"
+done < <(q '.jobs | keys | .[]' "$ci")
 
-# The advisory review waits on the gate only.
+# The advisory review waits on the gate, plus any other offline check that
+# exists in the workflow. It must not wait on the rehearsal, which is what made
+# a label-only run able to hold or skip the review.
 read -r -a needs <<<"$(q '.jobs."landing-feedback".needs | join(" ")' "$ci")"
 for job in "${needs[@]}"; do
-  case " ${gate[*]} " in
-    *" $job "*) ;;
-    *) fail "landing-feedback depends on unexpected job: $job" ;;
-  esac
+  [ "$(q ".jobs | has(\"$job\")" "$ci")" = true ] \
+    || fail "landing-feedback depends on a job that does not exist: $job"
+  if yq ".jobs.\"$job\".steps[]? | .run // \"\"" "$ci" | grep -q 'tests/ci/run.sh'; then
+    fail "landing-feedback waits on the native rehearsal: $job"
+  fi
 done
 for job in "${gate[@]}"; do
   case " ${needs[*]} " in

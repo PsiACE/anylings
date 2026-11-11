@@ -47,6 +47,12 @@ jobs:
       - name: Check k0s recovery without live kubeconfig
         run: bash tests/ci/check-k0s-reset.sh
 
+      # The workflows themselves are a checked artifact: this asserts that the
+      # gate stays offline and that the heavy rehearsal cannot report success by
+      # being skipped. Offline, no runner and no GitHub API.
+      - name: Check workflow gate wiring
+        run: bash tests/ci/check-workflow-gate.sh
+
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.
   render-platform:

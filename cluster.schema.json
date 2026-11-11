@@ -38,6 +38,18 @@
       "title": "Ingress",
       "type": "object"
     },
+    "Magpie": {
+      "additionalProperties": false,
+      "properties": {
+        "config_claim": {
+          "default": "",
+          "title": "Config Claim",
+          "type": "string"
+        }
+      },
+      "title": "Magpie",
+      "type": "object"
+    },
     "Repository": {
       "additionalProperties": false,
       "properties": {
@@ -85,6 +97,12 @@
       "default": {
         "mode": "none",
         "tunnel_token_file": ""
+      }
+    },
+    "magpie": {
+      "$ref": "#/$defs/Magpie",
+      "default": {
+        "config_claim": ""
       }
     }
   },

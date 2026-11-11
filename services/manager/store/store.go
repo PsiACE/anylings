@@ -69,6 +69,10 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB exposes the handle for packages that own an adjacent table, such as the
+// audit log. It is not a general escape hatch: domain writes go through Store.
+func (s *Store) DB() *sql.DB { return s.db }
+
 // now returns the current UTC time.
 func (s *Store) now() string { return formatTime(s.clock.Now()) }
 

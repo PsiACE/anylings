@@ -35,9 +35,11 @@ var (
 	// ErrDisabled means the provider is intentionally switched off. The
 	// default deployment runs with every real provider disabled.
 	ErrDisabled = errors.New("provider: disabled")
-	// ErrCreateTimeout means the provider did not confirm allocation in time.
-	// The caller must treat the outcome as unknown and probe by ResourceID.
+	// ErrCreateTimeout means the provider did not confirm allocation in time
+	// but may have created the resource. Callers probe by ResourceID.
 	ErrCreateTimeout = errors.New("provider: allocation timed out")
+	// ErrUnavailable means allocation failed and no resource exists.
+	ErrUnavailable = errors.New("provider: unavailable")
 	// ErrDestroyFailed means release was refused or failed; the lease becomes
 	// Stranded and must stay visible for the janitor.
 	ErrDestroyFailed = errors.New("provider: destroy failed")

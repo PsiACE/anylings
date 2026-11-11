@@ -91,7 +91,7 @@ var taskTransitions = map[TaskState][]TaskState{
 }
 
 var attemptTransitions = map[AttemptState][]AttemptState{
-	AttemptStarted:   {AttemptRunning, AttemptFailed, AttemptCancelled, AttemptExpired},
+	AttemptStarted:   {AttemptRunning, AttemptSucceeded, AttemptFailed, AttemptCancelled, AttemptExpired},
 	AttemptRunning:   {AttemptSucceeded, AttemptFailed, AttemptCancelled, AttemptExpired},
 	AttemptSucceeded: nil,
 	AttemptFailed:    nil,

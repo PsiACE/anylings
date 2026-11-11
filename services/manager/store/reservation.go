@@ -51,14 +51,14 @@ func (s *Store) Reserve(ctx context.Context, runID domain.TaskRunID, amount doma
 			return fmt.Errorf("store: read run workspace: %w", err)
 		}
 
-		live, err := countLiveRuns(ctx, tx, wsID)
+		live, err := countLiveRuns(ctx, tx, wsID, string(runID))
 		if err != nil {
 			return err
 		}
 		if live >= limits.MaxConcurrentRuns {
 			return domain.ErrQuotaExceeded
 		}
-		global, err := countLiveRuns(ctx, tx, "")
+		global, err := countLiveRuns(ctx, tx, "", "")
 		if err != nil {
 			return err
 		}
@@ -100,18 +100,20 @@ func (s *Store) Reserve(ctx context.Context, runID domain.TaskRunID, amount doma
 	})
 }
 
-// countLiveRuns counts runs that still hold a concurrency slot. An empty
-// workspace counts every workspace.
-func countLiveRuns(ctx context.Context, tx *sql.Tx, ws string) (int, error) {
+// countLiveRuns counts other runs that still hold a concurrency slot. The run
+// being reserved excludes itself: its own slot is the one it is asking for. An
+// empty workspace counts every workspace.
+func countLiveRuns(ctx context.Context, tx *sql.Tx, ws, exceptRun string) (int, error) {
 	const live = `state NOT IN ('Reclaimed', 'Failed', 'Interrupted')`
 	var (
 		n   int
 		err error
 	)
 	if ws == "" {
-		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_runs WHERE `+live).Scan(&n)
+		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_runs WHERE `+live+` AND id <> ?`, exceptRun).Scan(&n)
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_runs WHERE workspace_id = ? AND `+live, ws).Scan(&n)
+		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_runs WHERE workspace_id = ? AND `+live+` AND id <> ?`,
+			ws, exceptRun).Scan(&n)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("store: count live runs: %w", err)

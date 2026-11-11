@@ -91,24 +91,41 @@ func (r *Reconciler) Step(ctx context.Context, runID domain.TaskRunID) (done boo
 		return true, nil
 	}
 	if r.expired(run) {
-		return true, r.failRun(ctx, run, domain.TaskFailed, "max runtime exceeded")
+		if err := r.failRun(ctx, run, domain.TaskFailed, "max runtime exceeded"); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 
 	switch run.State {
 	case domain.TaskRequested:
-		return false, r.store.TransitionTask(ctx, runID, domain.TaskProvisioning, "")
+		err = r.store.TransitionTask(ctx, runID, domain.TaskProvisioning, "")
 	case domain.TaskProvisioning:
-		return false, r.provision(ctx, run)
+		err = r.provision(ctx, run)
 	case domain.TaskReady:
-		return false, r.start(ctx, run)
+		err = r.start(ctx, run)
 	case domain.TaskRunning:
-		return false, r.observe(ctx, run)
+		err = r.observe(ctx, run)
 	case domain.TaskCollecting:
-		return false, r.collect(ctx, run)
+		err = r.collect(ctx, run)
 	case domain.TaskTerminating:
-		return r.terminate(ctx, run)
+		var settled bool
+		settled, err = r.terminate(ctx, run)
+		if err == nil && settled {
+			return true, nil
+		}
+	default:
+		return false, fmt.Errorf("reconcile: unhandled state %q", run.State)
 	}
-	return false, fmt.Errorf("reconcile: unhandled state %q", run.State)
+	if err != nil {
+		return false, err
+	}
+	// done is derived from persisted state, never from the branch that ran.
+	after, err := r.store.GetTaskRun(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	return after.State.Terminal(), nil
 }
 
 // RunToCompletion steps a run until it is terminal or a step fails. It is the
@@ -191,7 +208,9 @@ func (r *Reconciler) retryAttempt(ctx context.Context, run domain.TaskRun, attem
 	if run.Attempts >= run.MaxAttempts {
 		return r.failRun(ctx, run, domain.TaskFailed, cause)
 	}
-	return r.store.TransitionTask(ctx, run.ID, domain.TaskProvisioning, cause)
+	// The run stays in Provisioning: the next step opens the next attempt.
+	// No edge is written, which keeps every persisted transition meaningful.
+	return nil
 }
 
 // classifyAttemptError maps the attempt-budget conflict into a terminal task
@@ -242,6 +261,14 @@ func (r *Reconciler) observe(ctx context.Context, run domain.TaskRun) error {
 	}
 	if result.ExitCode != 0 {
 		return r.failRun(ctx, run, domain.TaskFailed, fmt.Sprintf("command exited %d", result.ExitCode))
+	}
+	// Persist the artifact reference and checksum before the run may release
+	// its lease; Collecting verifies that the row is really there.
+	if err := r.store.SaveArtifact(ctx, run.ID, result.Artifact); err != nil {
+		if errors.Is(err, domain.ErrConflict) || result.Artifact.URI == "" {
+			return r.failRun(ctx, run, domain.TaskFailed, "artifact could not be persisted")
+		}
+		return err
 	}
 	return r.store.TransitionTask(ctx, run.ID, domain.TaskCollecting, "")
 }

@@ -5,8 +5,9 @@ package fake
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sync"
-	"time"
 
 	"github.com/PsiACE/anylings/services/manager/domain"
 	"github.com/PsiACE/anylings/services/manager/provider"
@@ -23,23 +24,24 @@ type Sandbox struct {
 	resource map[string]provider.Allocation
 	creates  map[string]int
 	destroys map[string]int
-	// CreateTimeoutFor makes the first Allocate for a resource id return
-	// ErrCreateTimeout after recording it as existing.
-	CreateTimeoutFor map[string]bool
-	// DestroyFailFor makes Destroy return ErrDestroyFailed for a resource id.
-	DestroyFailFor map[string]bool
-	// AllocationDelay is honoured through the caller's clock, never a sleep.
-	AllocationDelay time.Duration
+	// CreateTimeouts counts down: while positive, Allocate records the
+	// resource and returns ErrCreateTimeout, modelling an ambiguous create
+	// where the resource may exist despite the error.
+	CreateTimeouts int
+	// CreateFailures counts down: while positive, Allocate fails with
+	// ErrUnavailable and records nothing.
+	CreateFailures int
+	// DestroyFailures counts down: while positive, Destroy returns
+	// ErrDestroyFailed without removing the resource.
+	DestroyFailures int
 }
 
 // NewSandbox returns an empty provider.
 func NewSandbox() *Sandbox {
 	return &Sandbox{
-		resource:         map[string]provider.Allocation{},
-		creates:          map[string]int{},
-		destroys:         map[string]int{},
-		CreateTimeoutFor: map[string]bool{},
-		DestroyFailFor:   map[string]bool{},
+		resource: map[string]provider.Allocation{},
+		creates:  map[string]int{},
+		destroys: map[string]int{},
 	}
 }
 
@@ -56,8 +58,12 @@ func (s *Sandbox) Allocate(ctx context.Context, req provider.Request) (provider.
 		s.creates[req.ResourceID]++
 		return existing, nil
 	}
-	if s.CreateTimeoutFor[req.ResourceID] {
-		delete(s.CreateTimeoutFor, req.ResourceID)
+	if s.CreateFailures > 0 {
+		s.CreateFailures--
+		return provider.Allocation{}, provider.ErrUnavailable
+	}
+	if s.CreateTimeouts > 0 {
+		s.CreateTimeouts--
 		// Record the resource: a timeout is ambiguous, not "nothing happened".
 		s.resource[req.ResourceID] = provider.Allocation{ResourceID: req.ResourceID, Endpoint: "fake://" + req.ResourceID}
 		s.creates[req.ResourceID]++
@@ -78,8 +84,8 @@ func (s *Sandbox) Destroy(ctx context.Context, resourceID string) error {
 	if s.Disabled {
 		return provider.ErrDisabled
 	}
-	if s.DestroyFailFor[resourceID] {
-		delete(s.DestroyFailFor, resourceID)
+	if s.DestroyFailures > 0 {
+		s.DestroyFailures--
 		s.destroys[resourceID]++
 		return provider.ErrDestroyFailed
 	}
@@ -107,6 +113,30 @@ func (s *Sandbox) CreateCount(resourceID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.creates[resourceID]
+}
+
+// TotalCreates reports how many Allocate calls were served, across resource
+// ids. It is the duplicate-prevention assertion: one run allocates once.
+func (s *Sandbox) TotalCreates() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := 0
+	for _, n := range s.creates {
+		total += n
+	}
+	return total
+}
+
+// TotalDestroys reports how many Destroy calls were served, across resource
+// ids.
+func (s *Sandbox) TotalDestroys() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := 0
+	for _, n := range s.destroys {
+		total += n
+	}
+	return total
 }
 
 // DestroyCount reports how many Destroy calls a resource id saw.
@@ -145,6 +175,17 @@ type RunResult struct {
 	Error    string
 }
 
+// syntheticArtifact is a deterministic placeholder for executed output. It has
+// no bytes on disk: the checksum covers the run identity, not real content.
+func syntheticArtifact(req RunRequest) domain.ArtifactRef {
+	sum := sha256.Sum256([]byte(string(req.TaskRunID) + "\x00" + req.Command))
+	return domain.ArtifactRef{
+		URI:       "fake://runs/" + string(req.TaskRunID) + "/output",
+		Checksum:  "sha256:" + hex.EncodeToString(sum[:]),
+		SizeBytes: 0,
+	}
+}
+
 // CommandRunner returns scripted results keyed by task run id.
 type CommandRunner struct {
 	mu      sync.Mutex
@@ -152,7 +193,7 @@ type CommandRunner struct {
 }
 
 // NewCommandRunner returns a runner with no scripted results; every run
-// succeeds with an empty artifact until scripted otherwise.
+// succeeds and reports a synthetic artifact, as a real runner would.
 func NewCommandRunner() *CommandRunner {
 	return &CommandRunner{results: map[domain.TaskRunID][]RunResult{}}
 }
@@ -172,7 +213,7 @@ func (r *CommandRunner) Run(ctx context.Context, req RunRequest) (RunResult, err
 	defer r.mu.Unlock()
 	queue := r.results[req.TaskRunID]
 	if len(queue) == 0 {
-		return RunResult{ExitCode: 0}, nil
+		return RunResult{ExitCode: 0, Artifact: syntheticArtifact(req)}, nil
 	}
 	next := queue[0]
 	r.results[req.TaskRunID] = queue[1:]

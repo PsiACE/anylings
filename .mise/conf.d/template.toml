@@ -1,4 +1,4 @@
 # Tools used to validate and render the maintained platform templates.
 [tools]
-uv = "0.12.23"
+uv = "0.13.7"
 taplo = "0.10.0"

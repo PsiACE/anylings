@@ -133,12 +133,13 @@ requests, load balancers if any are added later, pooled-bandwidth overage beyond
 the node allowance ($0.01/GiB), and sales tax. None of those are part of the
 $24 figure, and none are provisioned by this root.
 
-Do not assume a cheaper 2 vCPU / 4 GiB option: in DigitalOcean's public Droplet
-price list, `s-2vcpu-4gb` is the lowest 2 vCPU / 4 GiB entry (the only other 4 GiB
-slug, `c-2`, is dedicated CPU at $42/month). DigitalOcean publishes one global
-Droplet list and no per-region DOKS price table, so confirm slug availability and
-a one-node pool in your region and account in the DigitalOcean console; that check
-needs credentials and is outside this repository's offline validation.
+The checked standard `s-2vcpu-4gb` list entry is $24/month; we have not verified a
+cheaper like-for-like DOKS-eligible option for this shape. Other size families
+exist, so this is not an enumeration of every SKU. DigitalOcean publishes one
+global Droplet list and no per-region DOKS price table, so confirm eligibility and
+pricing, and a one-node pool, in the DigitalOcean console for this region and
+account; that check needs credentials and is outside this repository's offline
+validation.
 
 ### What one node costs in behavior
 
@@ -150,9 +151,10 @@ needs credentials and is outside this repository's offline validation.
   claim the platform's workloads fit until they have been measured on the real
   cluster with `kubectl describe node` and observed usage.
 - **Evictions.** With no second node, kubelet memory pressure evicts Pods on the
-  only worker. Burstable workloads are the first candidates, and an evicted
-  singleton is unavailable until it reschedules on the same node, which can
-  itself be under pressure.
+  only worker. Which Pods go first depends on QoS class, priority and how far
+  requests are exceeded, so no fixed ordering is promised. An evicted singleton
+  is unavailable until it reschedules on the same node, which can itself be under
+  pressure.
 - **No failure tolerance.** A node drain for maintenance or upgrade, or any node
   fault, stops all workloads: there is no other node to receive them.
 - **Upgrade downtime.** `auto_upgrade = false` keeps upgrades manual, but a

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Run the repository's offline checks the way the pull-request gate does, on
-# the current checkout.
+# Run the pull-request gate's offline checks on the current checkout.
 #
-# This is a convenience aggregate, not a second implementation: every step is
-# an existing recipe or script, and it reuses the tools the caller already has
-# (the mise/uv environment, the OpenTofu plugin cache). It deliberately starts
-# no cluster, no k0s, no sudo and no cloud API. It is an offline check, not a
-# runtime rehearsal: it does not reproduce the native suite, does not need the
-# opt-in CI label, and is not evidence about DOKS CSI, Cloudflare or multi-host
-# behavior.
+# This is an aggregate, not a second implementation: every check is an existing
+# recipe or script, and the render assertions come from
+# tests/ci/check-render.sh, the same script the render job calls. It reuses the
+# tools the caller already has (the mise/uv environment, the OpenTofu plugin
+# cache). It deliberately starts no cluster, no k0s, no sudo and no cloud API.
+# It is an offline check, not a runtime rehearsal: it does not reproduce the
+# native suite, does not need the opt-in CI label, and is not evidence about
+# DOKS CSI, Cloudflare or multi-host behavior.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

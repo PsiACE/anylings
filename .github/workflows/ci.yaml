@@ -45,6 +45,11 @@ jobs:
       - name: Check k0s recovery without live kubeconfig
         run: bash tests/ci/check-k0s-reset.sh
 
+      # The default stays ephemeral; a named claim is mounted by reference and
+      # never rendered as an app-owned PVC. Uses the pinned chart, no cluster.
+      - name: Check the magpie config-claim persistence contract
+        run: bash tests/ci/check-magpie-config-claim.sh
+
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.
   render-platform:

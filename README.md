@@ -160,10 +160,11 @@ before publishing it.
       workload but leaves the claim. The claim and its volume still follow the
       cluster's own storage and reclaim policy, so back up what you need as you
       would any application data.
-    - The pod runs as uid/gid `65532` and sets `fsGroup: 65532`, so the claim
-      must let that group write `/config`. CSI and local-path provisioners
-      honour it; a volume type that ignores group ownership, such as an NFS
-      export with fixed permissions, needs matching ownership set on the share.
+    - The pod runs as uid/gid `65532` and sets `fsGroup: 65532`, so `/config`
+      must be writable by gid `65532`. Whether the driver enforces that group on
+      mount is driver- and volume-dependent: check the CSI driver or volume
+      configuration in use rather than assuming all of them do, and set matching
+      ownership on a volume type that does not.
 
     Leaving `config_claim` empty keeps the ephemeral default.
 
@@ -178,8 +179,10 @@ before publishing it.
    must keep gateway-key authentication on.
 
 The rehearsal covers rendering, reconciliation and gateway-key enforcement. It
-does not cover vendor access, durable storage or public exposure. Persistence
-across an actual volume replacement is not rehearsed.
+does not cover vendor access, durable storage or public exposure. The
+existing-claim rendering is covered; a pod replacement or re-mount on real CSI
+storage is not tested, and moving data onto a claim does not by itself show that
+a replaced volume keeps it.
 
 Other action-first commands:
 

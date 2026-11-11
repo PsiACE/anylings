@@ -31,7 +31,7 @@ run "baseline_defaults" {
 
   assert {
     condition     = digitalocean_kubernetes_cluster.this.node_pool[0].node_count == 2
-    error_message = "The baseline worker count must stay two."
+    error_message = "The default worker count must stay two."
   }
 
   assert {
@@ -53,11 +53,11 @@ run "baseline_defaults" {
 
   assert {
     condition     = digitalocean_kubernetes_cluster.this.node_pool[0].auto_scale == false
-    error_message = "Node autoscaling must stay off; elastic capacity is separate work."
+    error_message = "Node autoscaling must stay off."
   }
 }
 
-run "single_node_economy_profile" {
+run "single_node" {
   command = plan
 
   variables {
@@ -67,17 +67,17 @@ run "single_node_economy_profile" {
 
   assert {
     condition     = digitalocean_kubernetes_cluster.this.node_pool[0].node_count == 1
-    error_message = "The economy profile is one worker."
+    error_message = "An explicit node_count of one must reach the pool."
   }
 
   assert {
     condition     = digitalocean_kubernetes_cluster.this.node_pool[0].size == "s-2vcpu-4gb"
-    error_message = "The economy profile keeps the baseline size."
+    error_message = "The single-node case keeps the default size."
   }
 
   assert {
     condition     = digitalocean_kubernetes_cluster.this.ha == false
-    error_message = "The economy profile remains non-HA."
+    error_message = "A single node remains non-HA."
   }
 }
 
@@ -139,7 +139,7 @@ run "reject_empty_size" {
   expect_failures = [var.node_size]
 }
 
-run "reject_blank_size" {
+run "reject_malformed_size" {
   command = plan
 
   variables {

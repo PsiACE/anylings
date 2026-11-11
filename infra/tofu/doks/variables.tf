@@ -32,7 +32,7 @@ variable "node_size" {
 }
 
 variable "node_count" {
-  description = "Fixed worker count for the single pool. Defaults to two; one is the explicit economy profile, never a silent reduction."
+  description = "Fixed worker count for the single pool. Defaults to two; set one deliberately, not as a silent reduction."
   type        = number
   nullable    = false
   default     = 2

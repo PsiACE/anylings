@@ -6,9 +6,8 @@ resource "digitalocean_kubernetes_cluster" "this" {
   region  = var.region
   version = var.kubernetes_version
 
-  # Both stay explicit because they are cost and availability decisions, not
-  # provider defaults: DOKS 1.36+ enables HA when `ha` is omitted (+$40/month),
-  # and an implicit upgrade would replace workers without review.
+  # Both stay explicit: DOKS 1.36+ enables HA when `ha` is omitted, and an
+  # implicit upgrade would replace workers without review.
   ha           = false
   auto_upgrade = false
 

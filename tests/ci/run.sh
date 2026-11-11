@@ -31,7 +31,8 @@ STORAGE_PATH="$STATE/storage"
 E2E_ARGOCD_NS="argo-system"
 E2E_REVISION=""
 SOPS_VALUE="anylings-ci-decrypted"
-MAGPIE_PORT=18080
+# Synthetic gateway key for the cross-pod auth assertion; never a real one.
+E2E_GATEWAY_KEY="synthetic-ci-gateway-key"
 PIDS=()
 mkdir "$DIAG"
 
@@ -203,18 +204,33 @@ EOF
 
 # -------------------------------------------------------------- assertions --
 
+# The expected workload set is the one published, not a hardcoded list: adding
+# or replacing an application must not require editing this assertion. The
+# connectors that cannot be Healthy without a real provider credential are
+# named here, and only they are excused from the health check; they must still
+# be Synced at the pushed revision.
+CREDENTIAL_FREE_EXCEPTIONS="cloudflare-tunnel"
+
 assert_apps() {
-  log "wait for Applications to be Synced+Healthy at the pushed revision"
+  log "wait for Applications to be Synced, and Healthy when credential-free"
   [ -n "$E2E_REVISION" ] || die "no pushed revision recorded"
-  local deadline=$((SECONDS + 900))
+  local expected deadline=$((SECONDS + 900))
+  expected="$(jq -r '.appName' "$GITWORK"/kubernetes/apps/*/*/config.json | sort -u | jq -R . | jq -sc .)"
+  [ "$(jq 'length' <<<"$expected")" -gt 0 ] || die "no workload config.json was published"
   # One API snapshot: no per-object requests or duplicate existence passes.
   # Include the expected apps so an empty or partially created list cannot pass.
-  until kc --namespace "$E2E_ARGOCD_NS" get applications -o json | jq -e --arg rev "$E2E_REVISION" '
-    (["bootstrap", "root", "argo", "magpie", "reloader"]
+  until kc --namespace "$E2E_ARGOCD_NS" get applications -o json | jq -e \
+    --arg rev "$E2E_REVISION" --argjson expected "$expected" \
+    --arg excused "$CREDENTIAL_FREE_EXCEPTIONS" '
+    ((["bootstrap", "root", "argo"] + $expected)
       - [.items[].metadata.name] | length == 0) and
     all(.items[];
-      .status.sync.status == "Synced" and .status.health.status == "Healthy" and
-      ([.status.sync.revision, .status.sync.revisions[]?] | index($rev) != null))
+      .status.sync.status == "Synced" and
+      ([.status.sync.revision, .status.sync.revisions[]?] | index($rev) != null)) and
+    all(.items[];
+      .metadata.name as $name
+      | if ($excused | split(" ") | index($name)) != null then true
+        else .status.health.status == "Healthy" end)
   ' >/dev/null; do
     (( SECONDS < deadline )) || die "Applications did not converge on $E2E_REVISION"
     sleep 10
@@ -262,28 +278,73 @@ assert_gitops_removal() {
   assert_apps
 }
 
-# Port-forwarding makes the caller remote, so the gateway must refuse an
-# unkeyed request. That refusal is the security contract this asserts, not a
-# model call: no provider, key or upstream API is involved.
-assert_magpie_http() {
-  log "assert the magpie gateway answers and refuses unkeyed remote callers"
-  local svc code
+# A genuine cross-pod request: kubectl port-forward is not used, because it
+# forwards through the kubelet to the pod's own loopback, which magpie treats as
+# this computer and never asks for a key. A client pod in the same cluster
+# reaches the Service from another network namespace, so magpie sees a peer that
+# is not loopback and applies its documented remote rule.
+#
+# Both directions are asserted, so the test cannot pass by refusing everything:
+# without a key the gateway answers 401 and names the missing gateway key, and
+# with a synthetic key minted inside the pod it answers 200. No provider, model
+# or upstream API is involved; /v1/models is served from magpie itself.
+assert_magpie_gateway_auth() {
+  log "assert the magpie gateway refuses unkeyed and serves keyed cross-pod callers"
+  local svc unkeyed keyed
   svc="$(kc --namespace default get service \
     -l app.kubernetes.io/name=magpie -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [ -n "$svc" ] || die "expected magpie Service is missing"
-  kc --namespace default port-forward --address=127.0.0.1 "service/$svc" "$MAGPIE_PORT:3425" \
-    >"$DIAG/magpie-port-forward.log" 2>&1 &
-  PIDS+=("$!")
-  local deadline=$((SECONDS + 180))
-  while :; do
-    code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 \
-      "http://127.0.0.1:$MAGPIE_PORT/v1/models" 2>/dev/null || true)"
-    [ -n "$code" ] && [ "$code" != 000 ] && break
-    (( SECONDS < deadline )) || die "magpie gateway did not answer on $MAGPIE_PORT"
-    sleep 2
-  done
-  [ "$code" = 401 ] || die "magpie answered an unkeyed remote request with HTTP $code, not 401"
-  log "magpie gateway answered on $MAGPIE_PORT and refused the unkeyed remote request with 401"
+  clean_client() {
+    kc --namespace default delete pod e2e-gateway-client \
+      --ignore-not-found --wait=true --timeout=120s >/dev/null
+  }
+  # Same pinned image the rehearsal already uses for its storage probe.
+  clean_client
+  kc apply --namespace default --filename - >/dev/null <<EOF
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-gateway-client
+  namespace: default
+  labels:
+    anylings.dev/owner: e2e
+spec:
+  restartPolicy: Never
+  containers:
+    - name: client
+      image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      command: ["sleep", "3600"]
+EOF
+  kc --namespace default wait pod/e2e-gateway-client --for=condition=Ready --timeout=180s >/dev/null
+
+  # Raw HTTP through nc, not wget: busybox wget discards a 4xx body, and the
+  # body is where the refusal is stated.
+  request() {
+    local auth_header="$1"
+    printf 'GET /v1/models HTTP/1.0\r\nHost: %s\r\n%s\r\n' "$svc" "$auth_header" \
+      | kc --namespace default exec -i e2e-gateway-client -- nc -w 10 "$svc" 3425
+  }
+
+  # Unkeyed: an authentication refusal that names the gateway key, not a
+  # connection failure or an anonymous success.
+  unkeyed="$(request '')" || true
+  grep -q '^HTTP/1\.[01] 401' <<<"$unkeyed" \
+    || die "magpie did not answer an unkeyed cross-pod request with 401: ${unkeyed:0:120}"
+  grep -q 'gateway key' <<<"$unkeyed" \
+    || die "the cross-pod refusal did not identify the missing gateway key"
+
+  # Keyed: mint an ephemeral key inside the pod. The value is synthetic and is
+  # never printed, so no credential reaches the log.
+  kc --namespace default exec "$(kc --namespace default get pod \
+    -l app.kubernetes.io/name=magpie -o jsonpath='{.items[0].metadata.name}')" -- \
+    /magpie gateway-key add e2e-cross-pod --key "$E2E_GATEWAY_KEY" >/dev/null \
+    || die "could not mint the ephemeral gateway key inside the magpie pod"
+  keyed="$(request "Authorization: Bearer $E2E_GATEWAY_KEY")" || true
+  clean_client
+  grep -q '^HTTP/1\.[01] 200' <<<"$keyed" \
+    || die "magpie did not answer a keyed cross-pod request with 200: ${keyed:0:120}"
+  log "magpie refused the unkeyed and served the keyed cross-pod request"
 }
 
 # Everything below lives in the rehearsal's own labeled objects in its own
@@ -452,7 +513,7 @@ verify() {
   assert_apps
   assert_sops_secret
   assert_gitops_removal
-  assert_magpie_http
+  assert_magpie_gateway_auth
   assert_storage_restore
   assert_gitops_handoff
   assert_repeatable

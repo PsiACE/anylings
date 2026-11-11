@@ -98,9 +98,11 @@ values path and optional manifest path; it contains no credentials. The Git
 source carries values only unless `manifestPath` is set (the tunnel's KSOPS
 Secret). Argo self-management stays outside this generated workload set.
 
-The applications in that set are the platform's real workloads, not samples:
-`magpie` (first, the shared model gateway) and `reloader`, plus
-`cloudflare-tunnel` when ingress is enabled.
+The applications in that set are the platform's real workloads, not samples.
+`magpie` is the first of them, the shared model gateway; `reloader` and the
+`cloudflare-tunnel` connector accompany it. Which set is published depends on
+the configured inputs, so documentation names the workload rather than assuming
+a fixed list.
 
 ## Magpie
 
@@ -207,10 +209,13 @@ are disabled. There is no Soft Serve deployment, SSH administration, GitHub
 publication branch or repository-write token. Plaintext unauthenticated Git transport
 is restricted to this disposable network; deployments should use HTTPS or trusted SSH.
 
-CI checks the pushed revision and application health, actual decryption, the
-magpie gateway answering while refusing unkeyed remote callers, PVC persistence
-and fresh-volume restore, Git-only Argo configuration change and restoration,
-Git removal/recreation of magpie through ApplicationSet, and no-change OpenTofu
+The expected workload set is derived from the published `config.json` files
+rather than hardcoded, so replacing an application does not silently weaken the
+assertion. CI checks the pushed revision, `Synced` for every Application and
+`Healthy` for the credential-free ones, actual decryption, the magpie gateway
+answering while refusing unkeyed remote callers, PVC persistence and
+fresh-volume restore, Git-only Argo configuration change and restoration, Git
+removal/recreation of magpie through ApplicationSet, and no-change OpenTofu
 repeats. Narrow safety checks cover confidentiality and failed reset/state
 retention. Cleanup resets the recorded cluster before deleting its disposable
 volume data; only sanitized diagnostics are uploaded.

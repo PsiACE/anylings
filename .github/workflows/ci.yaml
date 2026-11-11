@@ -31,9 +31,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup mise
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          version: 2026.11.1
+          version: 2026.11.2
           experimental: true
           install_args: --locked
         env:
@@ -66,9 +66,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup mise
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          version: 2026.11.1
+          version: 2026.11.2
           experimental: true
           install_args: --locked
         env:
@@ -166,9 +166,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup mise
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          version: 2026.11.1
+          version: 2026.11.2
           experimental: true
           install_args: --locked
         env:
@@ -206,9 +206,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup mise
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          version: 2026.11.1
+          version: 2026.11.2
           experimental: true
           install_args: --locked
         env:
@@ -234,7 +234,7 @@ jobs:
         run: bash tests/ci/run.sh
 
       - name: Upload sanitized diagnostics
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: native-e2e-${{ github.run_id }}-${{ github.run_attempt }}
@@ -262,9 +262,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          version: 2026.11.1
+          version: 2026.11.2
           experimental: true
           install_args: --locked
       - name: Review the candidate
@@ -302,7 +302,7 @@ jobs:
       - name: Report unsuccessful feedback
         if: ${{ !cancelled() && steps.landing.outcome == 'failure' }}
         run: echo "::warning::Landing feedback failed. Inspect the task artifact; native checks determine acceptance."
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: landing-review-${{ github.run_id }}-${{ github.run_attempt }}

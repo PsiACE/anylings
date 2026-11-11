@@ -100,7 +100,7 @@ Secret). Argo self-management stays outside this generated workload set.
 
 The applications in that set are the platform's real workloads. `magpie` is the
 shared model gateway and the first of them; `reloader` and, where the configured
-inputs enable it, `cloudflare-tunnel` accompany it.
+inputs enable it, `cloudflare-tunnel` and `observability` accompany it.
 
 Deletion follows [Autopilot's application semantics](https://github.com/argoproj-labs/argocd-autopilot/blob/c102467016841f0532a6def064d618322156a7a7/cmd/commands/common.go):
 Git removal deletes the generated Application and its workloads. Automated sync
@@ -155,6 +155,62 @@ before publishing it.
 
 The rehearsal covers rendering, reconciliation and gateway-key enforcement. It
 does not cover vendor access, durable storage or public exposure.
+
+## Observability
+
+Opt in with `[observability] enabled = true`. That publishes two applications
+into the `observability` namespace; leaving it disabled publishes nothing, adds
+no namespace and allows no extra chart registry.
+
+- **victoria-metrics** — single-node VictoriaMetrics (`victoria-metrics-single`
+  chart), the only metric store. It scrapes its own `/metrics` and Gatus, and
+  serves queries and dashboards through vmui on `/vmui/`. No Prometheus operator,
+  vmagent, Loki or database is deployed with it.
+- **gatus** — probe-based status and alerting. Its dashboard is a status page;
+  it also exports `gatus_results_*` metrics that VictoriaMetrics scrapes, so
+  probe history that outlives the status page is read from metrics.
+
+Read these as operational facts, not guarantees:
+
+- **Retention is a target, not erasure.** `-retentionPeriod=7d` bounds what you
+  can query. VictoriaMetrics prunes whole per-month partitions, and its docs
+  state that background merges may never run for a month that stopped receiving
+  data, so old bytes can outlive seven days on disk. Do not treat the store as a
+  hard seven-day audit boundary. Audit retention belongs in a separate store with
+  its own policy.
+- **Gatus history is bounded memory, not a seven-day archive.** It runs with
+  `storage.type: memory`, so its own results and events are capped by count and
+  lost on restart. Longer probe history means querying the scraped metrics.
+- **Nothing survives a reschedule by default.** VictoriaMetrics uses a bounded
+  `emptyDir`, and no `PersistentVolumeClaim` is provisioned for either
+  application, so no cloud volume is created or billed implicitly. To keep
+  metrics across a pod replacement, create a claim yourself and point
+  `server.persistentVolume.existingClaim` at it.
+- **Access is in-cluster.** Both Services are `ClusterIP`; no Ingress, route,
+  LoadBalancer or NodePort is rendered. Reaching vmui or Gatus from outside is a
+  separate ingress decision, and it must keep authentication in front of them.
+
+Alerting is off unless you provide credentials. Gatus reads
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from an optional Secret reference
+named `gatus-telegram` in the `observability` namespace. Without that Secret the
+pod still starts, and Gatus ignores the declared Telegram alerts because the
+provider does not validate. Create the Secret with your normal secret-delivery
+mechanism; no token is stored in this repository:
+
+```bash
+kubectl --namespace observability create secret generic gatus-telegram \
+  --from-literal=TELEGRAM_BOT_TOKEN=... --from-literal=TELEGRAM_CHAT_ID=...
+```
+
+The rendered values do not carry resource sizing for your environment: the
+committed limits (`768Mi` for the metric store, `128Mi` for Gatus) are a small
+default, and ingestion is additionally capped by series and label budgets.
+Dashboards live in the published `victoria-metrics-dashboards` ConfigMap and are
+loaded by vmui, not by a separate dashboard server.
+
+Web analytics and access-log analysis are not part of this slice. Aggregate
+usage reporting would need its own store; until then, treat web analytics as
+pending rather than inferring it from these metrics.
 
 Other action-first commands:
 
@@ -216,6 +272,19 @@ partially-encrypted negative test cannot exist in one and be missing from the
 other. It is still offline only: it renders and validates, but proves no runtime
 behavior, so it does not stand in for a native run, DOKS CSI, Cloudflare or
 multi-host checks.
+
+`tests/ci/check-observability.sh` renders `tests/config/observability.toml` and
+then renders the actually pinned charts from its output, so the optional slice is
+checked against real artifacts rather than against the values file's intent. It
+asserts that the default input publishes nothing, then on the enabled render:
+explicit 7d retention, resource limits, non-root and read-only root filesystems,
+ClusterIP-only Services with no route or LoadBalancer, no automatically
+provisioned claim, no cluster-scoped metrics RBAC, an optional notification
+Secret reference rather than embedded credentials, and that the vmui dashboard
+flag, its mount, the ConfigMap, the scrape target and the probe Services all name
+things that render actually creates, with no empty dashboard panel. The
+contracts job and `tests/ci/local-gate.sh` both call it, before any native run
+exists.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through

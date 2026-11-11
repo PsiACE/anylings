@@ -64,6 +64,8 @@ log "workflow and safety contracts"
 bash tests/ci/check-workflow-gate.sh
 bash tests/ci/check-safety.sh
 bash tests/ci/check-k0s-reset.sh
+# Renders the pinned observability charts from an enabled input; offline.
+bash tests/ci/check-observability.sh
 
 log "workflow lint"
 zizmor --offline .github/workflows

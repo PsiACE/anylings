@@ -1,0 +1,150 @@
+#% if observability.enabled %#
+---
+# Gatus: probe-based status page and alerting. It keeps its own bounded
+# in-memory history for the dashboard and exports Prometheus metrics that the
+# single-node VictoriaMetrics instance scrapes.
+#
+# The in-memory history is deliberately NOT a 7-day archive. Gatus runs with
+# `storage.type: memory`, so its results and events are lost on restart and are
+# capped by count, not by age. Anything that must be retained for seven days is
+# derived from the metrics in VictoriaMetrics, not from Gatus's own store.
+controllers:
+  gatus:
+    strategy: Recreate
+    containers:
+      app:
+        image:
+          repository: ghcr.io/twin/gatus
+          tag: "v5.38.0"
+          # Pinned multi-arch index digest of the release above.
+          digest: "sha256:085ed63da963728965d00a3c78aa6167e3bf135218485b893201758e079e8415"
+        env:
+          GATUS_CONFIG_PATH: /config/config.yaml
+        # Telegram credentials are never part of this repository or this
+        # values file. An operator-provided Secret of this name supplies
+        # TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID. The reference is optional, so
+        # a cluster without that Secret still starts Gatus: Gatus expands the
+        # unset variables to empty strings, refuses to validate the Telegram
+        # provider, and ignores the telegram alerts declared below.
+        envFrom:
+          - secretRef:
+              name: gatus-telegram
+              optional: true
+        probes:
+          # The image's own /health endpoint. Gatus still serves it when every
+          # monitored endpoint is failing, so a probe failure means the process
+          # is broken rather than the platform being unhealthy.
+          liveness: &probes
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /health
+                port: 8080
+              initialDelaySeconds: 5
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 3
+          readiness: *probes
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            # Bounded together with storage.maximum-number-of-results/events.
+            memory: 128Mi
+        ports:
+          - name: http
+            containerPort: 8080
+            protocol: TCP
+defaultPodOptions:
+  securityContext:
+    runAsNonRoot: true
+    # Gatus publishes its scratch-only image under this nonroot account.
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+persistence:
+  # The configuration is a ConfigMap, so no claim is provisioned and the pod
+  # needs no writable volume beyond the emptyDir the chart gives /tmp.
+  config:
+    type: configMap
+    identifier: config
+    globalMounts:
+      - path: /config
+        readOnly: true
+configMaps:
+  config:
+    data:
+      config.yaml: |
+        metrics: true
+        storage:
+          # Bounded memory history: newest N results and events per endpoint.
+          type: memory
+          maximum-number-of-results: 100
+          maximum-number-of-events: 20
+        ui:
+          title: "Anylings platform status"
+          dashboard-heading: "Platform status"
+          dashboard-subheading: "In-cluster probes. Not a 7-day history."
+        alerting:
+          telegram:
+            token: "${TELEGRAM_BOT_TOKEN}"
+            id: "${TELEGRAM_CHAT_ID}"
+        endpoints:
+          # One probe per platform dependency, each a real request or
+          # connection. The gateway is expected to refuse an unkeyed remote
+          # caller, so a 401 is the healthy answer here.
+          - name: magpie-gateway
+            group: platform
+            url: "http://magpie.default.svc.cluster.local:3425/v1/models"
+            interval: 60s
+            conditions:
+              - "[STATUS] == 401"
+            alerts:
+              - type: telegram
+                description: "magpie gateway did not refuse an unkeyed remote caller"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
+          - name: argocd-server
+            group: platform
+            url: "http://argocd-server.#{ argocd.namespace }#.svc.cluster.local:80/healthz"
+            interval: 60s
+            conditions:
+              - "[STATUS] == 200"
+            alerts:
+              - type: telegram
+                description: "argocd-server health endpoint is failing"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
+          - name: victoria-metrics
+            group: platform
+            url: "http://victoria-metrics.observability.svc.cluster.local:8428/health"
+            interval: 60s
+            conditions:
+              - "[STATUS] == 200"
+            alerts:
+              - type: telegram
+                description: "the metric store is not answering its own health check"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
+service:
+  app:
+    controller: gatus
+    # ClusterIP only: publishing a status page is an ingress decision made
+    # elsewhere, and nothing here creates an Ingress or LoadBalancer.
+    type: ClusterIP
+    ports:
+      http:
+        port: 8080
+        primary: true
+#% endif %#

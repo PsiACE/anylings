@@ -24,11 +24,13 @@ import (
 // cannot accidentally run with an unbounded retry count or an unbounded
 // runtime. Nothing here encodes a price or a vendor catalogue.
 type Config struct {
-	MaxAttempts       int
-	TaskMaxRuntime    time.Duration
-	LeaseMaxRuntime   time.Duration
-	HeartbeatInterval time.Duration
-	HeartbeatGrace    time.Duration
+	MaxAttempts     int
+	TaskMaxRuntime  time.Duration
+	LeaseMaxRuntime time.Duration
+	// HeartbeatGrace is how long an attempt may stay silent before recovery
+	// treats it as lost. Callers whose workers report liveness must do so more
+	// often than this; there is no background ticker here.
+	HeartbeatGrace time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -40,9 +42,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.LeaseMaxRuntime <= 0 {
 		c.LeaseMaxRuntime = 15 * time.Minute
-	}
-	if c.HeartbeatInterval <= 0 {
-		c.HeartbeatInterval = 30 * time.Second
 	}
 	if c.HeartbeatGrace <= 0 {
 		c.HeartbeatGrace = 90 * time.Second
@@ -68,10 +67,10 @@ func New(s *store.Store, sandbox provider.Sandbox, runner fake.Runner, c clock.C
 	return &Reconciler{store: s, sandbox: sandbox, runner: runner, clock: c, cfg: cfg.withDefaults()}
 }
 
-// leaseResourceID is the deterministic provider name for a lease. Deriving it
-// from the lease id is what makes retried allocation idempotent: the provider
-// sees the same name and returns the existing resource.
-func leaseResourceID(id domain.LeaseID) string { return "sbx-" + string(id) }
+// leaseResourceID is the deterministic provider name for a lease, shared with
+// the store so the lease row is created with the same identity the reconciler
+// allocates against.
+func leaseResourceID(id domain.LeaseID) string { return domain.LeaseResourceID(id) }
 
 // Step advances one run by at most one durable transition. Returning done=true
 // means the run reached a terminal state.
@@ -194,7 +193,15 @@ func (r *Reconciler) provision(ctx context.Context, run domain.TaskRun) error {
 
 // retryAttempt closes a failed attempt and either requeues the run or fails it
 // once the bounded retry budget is spent.
+//
+// The lease is settled first. A failed allocation must not leave an Allocating
+// lease behind: nothing else would ever release it, so its hold would be
+// retained forever. The deterministic name is probed, so a provider that failed
+// ambiguously still gets its resource destroyed.
 func (r *Reconciler) retryAttempt(ctx context.Context, run domain.TaskRun, attempt domain.Attempt, cause string) error {
+	if err := r.settleFailedAllocation(ctx, attempt.LeaseID); err != nil {
+		return err
+	}
 	if err := r.store.TransitionAttempt(ctx, attempt.ID, domain.AttemptFailed, cause); err != nil {
 		return err
 	}
@@ -204,6 +211,46 @@ func (r *Reconciler) retryAttempt(ctx context.Context, run domain.TaskRun, attem
 	// The run stays in Provisioning: the next step opens the next attempt.
 	// No edge is written, which keeps every persisted transition meaningful.
 	return nil
+}
+
+// settleFailedAllocation releases a lease whose allocation failed. If the
+// provider did create the resource despite the error, it is destroyed instead of
+// being abandoned.
+func (r *Reconciler) settleFailedAllocation(ctx context.Context, leaseID domain.LeaseID) error {
+	lease, err := r.store.GetLease(ctx, leaseID)
+	if err != nil {
+		return err
+	}
+	if lease.State.Terminal() {
+		return nil
+	}
+	resourceID := lease.ProviderResourceID
+	if resourceID == "" {
+		resourceID = domain.LeaseResourceID(lease.ID)
+	}
+	exists, err := r.sandbox.Probe(ctx, resourceID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if err := r.store.AttachLeaseResource(ctx, lease.ID, resourceID, domain.LeaseActive); err != nil &&
+			!errors.Is(err, domain.ErrInvalidTransition) {
+			return err
+		}
+		adopted, err := r.store.GetLease(ctx, lease.ID)
+		if err != nil {
+			return err
+		}
+		if err := r.releaseLease(ctx, adopted); err != nil {
+			var cleanup *CleanupError
+			if errors.As(err, &cleanup) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	return r.store.TransitionLease(ctx, lease.ID, domain.LeaseReleased, "allocation failed")
 }
 
 // classifyAttemptError maps the attempt-budget conflict into a terminal task
@@ -286,7 +333,7 @@ func (r *Reconciler) terminate(ctx context.Context, run domain.TaskRun) (bool, e
 	attempt, err := r.activeAttempt(ctx, run.ID)
 	if errors.Is(err, domain.ErrNotFound) {
 		// No live attempt: the lease was already settled.
-		return true, r.finish(ctx, run, domain.TaskReclaimed, "")
+		return true, r.store.TransitionTask(ctx, run.ID, domain.TaskReclaimed, "")
 	}
 	if err != nil {
 		return false, err
@@ -296,7 +343,7 @@ func (r *Reconciler) terminate(ctx context.Context, run domain.TaskRun) (bool, e
 		return false, err
 	}
 	if lease.State == domain.LeaseReleased {
-		return true, r.finish(ctx, run, domain.TaskReclaimed, "")
+		return true, r.store.TransitionTask(ctx, run.ID, domain.TaskReclaimed, "")
 	}
 	if err := r.store.TransitionLease(ctx, lease.ID, domain.LeaseReleasing, ""); err != nil &&
 		!errors.Is(err, domain.ErrInvalidTransition) {
@@ -309,7 +356,7 @@ func (r *Reconciler) terminate(ctx context.Context, run domain.TaskRun) (bool, e
 		!errors.Is(err, domain.ErrInvalidTransition) {
 		return false, err
 	}
-	return true, r.finish(ctx, run, domain.TaskReclaimed, "")
+	return true, r.store.TransitionTask(ctx, run.ID, domain.TaskReclaimed, "")
 }
 
 func (r *Reconciler) releaseLease(ctx context.Context, lease domain.SandboxLease) error {
@@ -399,13 +446,6 @@ func (r *Reconciler) releaseForRun(ctx context.Context, runID domain.TaskRunID, 
 		return transitionErr
 	}
 	return nil
-}
-
-func (r *Reconciler) finish(ctx context.Context, run domain.TaskRun, outcome domain.TaskState, detail string) error {
-	if err := r.store.ReleaseReservation(ctx, run.ID); err != nil {
-		return err
-	}
-	return r.store.TransitionTask(ctx, run.ID, outcome, detail)
 }
 
 // Cancel marks a pending or running task interrupted and releases its lease.

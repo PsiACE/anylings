@@ -82,14 +82,20 @@ func (s *Store) RequestTask(ctx context.Context, req RequestTask) (domain.TaskRu
 	return out, created, err
 }
 
+// requireWorkspace checks the workspace exists and still owns a box. A
+// reclaimed box cannot accept new runs, so a request that races a reclaim in
+// either order is refused rather than admitted against a deleted box.
 func requireWorkspace(ctx context.Context, tx *sql.Tx, id domain.WorkspaceID) error {
-	var exists int
-	err := tx.QueryRowContext(ctx, `SELECT 1 FROM workspaces WHERE id = ?`, string(id)).Scan(&exists)
+	var boxState string
+	err := tx.QueryRowContext(ctx, `SELECT box_state FROM workspaces WHERE id = ?`, string(id)).Scan(&boxState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("store: check workspace: %w", err)
+	}
+	if domain.ResourceLifecycle(boxState) == domain.ResourceReclaimed {
+		return fmt.Errorf("store: workspace %s box is reclaimed: %w", id, domain.ErrConflict)
 	}
 	return nil
 }
@@ -161,7 +167,11 @@ func (s *Store) ListTaskRunsInState(ctx context.Context, state domain.TaskState)
 }
 
 // TransitionTask applies one task state edge. A terminal target records the
-// finish time; the outcome string is stored for the audit story.
+// finish time and releases the run's admission hold in the same transaction.
+//
+// The hold is only released when no lease of this run is still unreclaimed.
+// That keeps the reservation attached to a resource that may still exist, and
+// lets a later pass release it once cleanup succeeds.
 func (s *Store) TransitionTask(ctx context.Context, id domain.TaskRunID, to domain.TaskState, outcome string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		var current string
@@ -185,8 +195,72 @@ func (s *Store) TransitionTask(ctx context.Context, id domain.TaskRunID, to doma
 		if err != nil {
 			return fmt.Errorf("store: transition task: %w", mapWriteError(err))
 		}
+		if to.Terminal() {
+			return releaseHoldIfClean(ctx, tx, id)
+		}
 		return nil
 	})
+}
+
+// releaseHoldIfClean releases the admission hold for a run whose resources are
+// all reclaimed. It is the only place a hold is released, so every terminal
+// path (failure, cancellation, expiry, retry exhaustion, reclamation) uses the
+// same rule and can be retried safely.
+func releaseHoldIfClean(ctx context.Context, tx *sql.Tx, id domain.TaskRunID) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE reservations SET released = 1
+		WHERE request_id = ? AND released = 0
+		  AND NOT EXISTS (
+			SELECT 1 FROM leases l JOIN attempts a ON a.id = l.attempt_id
+			WHERE a.task_run_id = ? AND l.state <> ?
+		  )`, string(id), string(id), string(domain.LeaseReleased))
+	if err != nil {
+		return fmt.Errorf("store: release hold: %w", mapWriteError(err))
+	}
+	return nil
+}
+
+// ReleaseCleanHolds releases retained holds for runs that have no unreclaimed
+// lease. Recovery calls it so a hold kept during a cleanup failure is returned
+// as soon as the resource is confirmed gone.
+func (s *Store) ReleaseCleanHolds(ctx context.Context, runIDs []domain.TaskRunID) error {
+	if len(runIDs) == 0 {
+		return nil
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, id := range runIDs {
+			if err := releaseHoldIfClean(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// HeldRuns reports runs that are terminal but still hold a reservation,
+// because a resource of theirs is unreclaimed. It is the visible handover
+// between task accounting and resource cleanup.
+func (s *Store) HeldRuns(ctx context.Context) ([]domain.TaskRunID, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id FROM task_runs r
+		JOIN reservations res ON res.request_id = r.id AND res.released = 0
+		WHERE r.state IN (?, ?, ?)
+		GROUP BY r.id ORDER BY r.id`,
+		string(domain.TaskReclaimed), string(domain.TaskFailed), string(domain.TaskInterrupted))
+	if err != nil {
+		return nil, fmt.Errorf("store: held runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.TaskRunID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: held runs: %w", err)
+		}
+		out = append(out, domain.TaskRunID(id))
+	}
+	return out, rows.Err()
 }
 
 // IncrementAttempts records that a new attempt consumes one of the bounded

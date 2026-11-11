@@ -109,6 +109,11 @@ var (
 	ErrHeartbeatExpired = errors.New("domain: heartbeat expired")
 )
 
+// LeaseResourceID is the deterministic provider name for a lease. Deriving it
+// from the lease id is what makes allocation idempotent and lets recovery probe
+// or destroy the right resource even if it never stored the provider's answer.
+func LeaseResourceID(id LeaseID) string { return "sbx-" + string(id) }
+
 // ParseUTC normalizes a timestamp to UTC. All persisted times are UTC.
 func ParseUTC(t time.Time) time.Time { return t.UTC() }
 

@@ -37,14 +37,17 @@ func timeValue(t *time.Time) any {
 	return formatTime(*t)
 }
 
-// mapWriteError turns SQLite constraint failures into a stable domain error.
+// mapWriteError turns a uniqueness violation into a stable domain error.
 // Callers branch on the value; no driver text is parsed elsewhere.
+//
+// Only uniqueness is mapped. A foreign-key or check violation is a real bug in
+// the caller's data and must surface as itself, not as a duplicate request.
 func mapWriteError(err error) error {
 	if err == nil {
 		return nil
 	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "unique constraint") || strings.Contains(msg, "constraint failed") {
+	if strings.Contains(msg, "unique constraint") {
 		return fmt.Errorf("%w: %v", domain.ErrConflict, err)
 	}
 	return err

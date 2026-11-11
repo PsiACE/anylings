@@ -13,6 +13,12 @@ import (
 // StartAttempt records one bounded attempt and its lease in a single
 // transaction, so an attempt never exists without the lease row that the
 // janitor would look for.
+//
+// The provider resource id is written in that same transaction, before any
+// provider call. Deriving the name from the lease id makes it deterministic, so
+// a crash at any later point leaves enough persisted identity for recovery to
+// probe or destroy the right resource; there is no window where the lease row
+// exists with an unknown provider name.
 func (s *Store) StartAttempt(
 	ctx context.Context,
 	runID domain.TaskRunID,
@@ -41,11 +47,15 @@ func (s *Store) StartAttempt(
 			string(attempt.LeaseID), formatTime(now), formatTime(now)); err != nil {
 			return fmt.Errorf("store: insert attempt: %w", mapWriteError(err))
 		}
+		resourceID := lease.ProviderResourceID
+		if resourceID == "" {
+			resourceID = domain.LeaseResourceID(attempt.LeaseID)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO leases (id, attempt_id, provider, provider_resource_id, state, last_error, created_at)
-			VALUES (?, ?, ?, '', ?, '', ?)`,
+			VALUES (?, ?, ?, ?, ?, '', ?)`,
 			string(attempt.LeaseID), string(attempt.ID), lease.Provider,
-			string(domain.LeaseAllocating), formatTime(now)); err != nil {
+			resourceID, string(domain.LeaseAllocating), formatTime(now)); err != nil {
 			return fmt.Errorf("store: insert lease: %w", mapWriteError(err))
 		}
 		out = attempt

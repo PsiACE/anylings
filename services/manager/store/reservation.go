@@ -153,17 +153,6 @@ func sumReservations(ctx context.Context, tx *sql.Tx, ws string, currency domain
 	return domain.Amount(total, currency), nil
 }
 
-// ReleaseReservation returns held budget to the pool for one run. It is
-// idempotent: releasing twice leaves the row released rather than adding spend.
-func (s *Store) ReleaseReservation(ctx context.Context, runID domain.TaskRunID) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE reservations SET released = 1 WHERE request_id = ? AND released = 0`, string(runID))
-	if err != nil {
-		return fmt.Errorf("store: release reservation: %w", mapWriteError(err))
-	}
-	return nil
-}
-
 // ReservedTotal reports live reservations for a workspace, or for all
 // workspaces when ws is empty. An empty result has the zero minor unit value
 // and an empty currency, because no amount was reserved.

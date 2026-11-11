@@ -92,7 +92,14 @@ func (r *Reconciler) Recover(ctx context.Context) (JanitorReport, error) {
 		if r.clock.Now().Sub(lease.CreatedAt) < r.cfg.LeaseMaxRuntime {
 			continue
 		}
-		exists, probeErr := r.sandbox.Probe(ctx, lease.ProviderResourceID)
+		// Probe by the persisted identity. A lease row always carries its
+		// deterministic provider name, so an empty name would mean a corrupt
+		// row rather than an absent resource.
+		resourceID := lease.ProviderResourceID
+		if resourceID == "" {
+			resourceID = domain.LeaseResourceID(lease.ID)
+		}
+		exists, probeErr := r.sandbox.Probe(ctx, resourceID)
 		if probeErr != nil {
 			return report, probeErr
 		}
@@ -101,7 +108,33 @@ func (r *Reconciler) Recover(ctx context.Context) (JanitorReport, error) {
 				return report, err
 			}
 			report.LeasesFreed = append(report.LeasesFreed, lease.ID)
+			continue
 		}
+		// The resource is real: adopt the identity and release it.
+		if err := r.store.AttachLeaseResource(ctx, lease.ID, resourceID, domain.LeaseActive); err != nil &&
+			!errors.Is(err, domain.ErrInvalidTransition) {
+			return report, err
+		}
+		adopted, err := r.store.GetLease(ctx, lease.ID)
+		if err != nil {
+			return report, err
+		}
+		if err := r.releaseLease(ctx, adopted); err != nil {
+			report.Stranded = append(report.Stranded, lease.ID)
+			continue
+		}
+		report.LeasesFreed = append(report.LeasesFreed, lease.ID)
+	}
+
+	// 5. Terminal runs whose hold was retained now that cleanup succeeded get
+	//    their reservation back. This is what keeps a retained hold temporary
+	//    instead of a permanent one.
+	held, err := r.store.HeldRuns(ctx)
+	if err != nil {
+		return report, err
+	}
+	if err := r.store.ReleaseCleanHolds(ctx, held); err != nil {
+		return report, err
 	}
 	return report, nil
 }
@@ -136,26 +169,10 @@ func (r *Reconciler) Heartbeat(ctx context.Context, runID domain.TaskRunID) erro
 }
 
 // ReclaimBox reclaims a persistent workspace box. It is deliberately separate
-// from task termination and refuses to run while the workspace still has a
-// live task, so a task cleanup can never delete the box out from under a run.
+// from task termination, and the store refuses while any run or lease of the
+// workspace could still use the box, so task cleanup can never erase it.
 func (r *Reconciler) ReclaimBox(ctx context.Context, ws domain.WorkspaceID) error {
-	runs, err := r.store.ListTaskRunsInState(ctx, domain.TaskRunning)
-	if err != nil {
-		return err
-	}
-	for _, run := range runs {
-		if run.WorkspaceID == ws {
-			return fmt.Errorf("reconcile: workspace %s still has a running task: %w", ws, domain.ErrConflict)
-		}
-	}
-	workspace, err := r.store.GetWorkspace(ctx, ws)
-	if err != nil {
-		return err
-	}
-	if workspace.BoxState == domain.ResourceReclaimed {
-		return nil
-	}
-	return r.store.TransitionBox(ctx, ws, domain.ResourceReclaimed, "", "")
+	return r.store.ReclaimBox(ctx, ws)
 }
 
 // HeartbeatDeadline reports when an attempt is considered lost. Tests use it to

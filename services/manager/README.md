@@ -64,6 +64,9 @@ command.
   leaves resumable work. Nothing depends on a `finally` block.
 - **Bounded work.** Attempts, task runtime and lease runtime are all bounded by
   `Config`.
+- **Holds are temporary.** A terminal run releases its admission hold in the
+  same transaction, unless one of its leases is still unreleased. A retained
+  hold is returned as soon as a later pass confirms cleanup.
 
 ## Configuration
 
@@ -72,7 +75,6 @@ command.
 | `MaxAttempts` | 2 | attempts per task run |
 | `TaskMaxRuntime` | 30m | wall clock a run may take before it fails |
 | `LeaseMaxRuntime` | 15m | wall clock a lease may exist |
-| `HeartbeatInterval` | 30s | expected liveness cadence |
 | `HeartbeatGrace` | 90s | silence before an attempt is treated as lost |
 
 Admission limits live in `store.Limits`:

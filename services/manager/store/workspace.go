@@ -105,6 +105,71 @@ func (s *Store) TransitionBox(
 	})
 }
 
+// ReclaimBox moves a persistent box to Reclaimed in one transaction, refusing
+// while any run or lease of the workspace could still use it.
+//
+// The guard covers the whole workspace, not just one state: a run in any
+// non-terminal state, or any lease that is not released (including a stranded
+// one), blocks reclamation. Because the check and the update share a
+// transaction, a run requested concurrently cannot slip between them.
+func (s *Store) ReclaimBox(ctx context.Context, id domain.WorkspaceID) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var current string
+		err := tx.QueryRowContext(ctx, `SELECT box_state FROM workspaces WHERE id = ?`, string(id)).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: read box state: %w", err)
+		}
+		if domain.ResourceLifecycle(current) == domain.ResourceReclaimed {
+			return nil
+		}
+		if err := requireBoxIdle(ctx, tx, id); err != nil {
+			return err
+		}
+		if err := domain.ResourceLifecycle(current).Transition(domain.ResourceReclaimed); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workspaces SET box_state = ?, updated_at = ? WHERE id = ?`,
+			string(domain.ResourceReclaimed), s.now(), string(id)); err != nil {
+			return fmt.Errorf("store: reclaim box: %w", mapWriteError(err))
+		}
+		return nil
+	})
+}
+
+// requireBoxIdle refuses when anything in the workspace may still hold the box.
+func requireBoxIdle(ctx context.Context, tx *sql.Tx, id domain.WorkspaceID) error {
+	var active int
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM task_runs
+		WHERE workspace_id = ? AND state NOT IN (?, ?, ?)`,
+		string(id), string(domain.TaskReclaimed), string(domain.TaskFailed), string(domain.TaskInterrupted)).
+		Scan(&active)
+	if err != nil {
+		return fmt.Errorf("store: count active runs: %w", err)
+	}
+	if active > 0 {
+		return fmt.Errorf("store: workspace %s still has %d live task run(s): %w", id, active, domain.ErrConflict)
+	}
+	var unreleased int
+	err = tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM leases l
+		JOIN attempts a ON a.id = l.attempt_id
+		JOIN task_runs r ON r.id = a.task_run_id
+		WHERE r.workspace_id = ? AND l.state <> ?`,
+		string(id), string(domain.LeaseReleased)).Scan(&unreleased)
+	if err != nil {
+		return fmt.Errorf("store: count unreleased leases: %w", err)
+	}
+	if unreleased > 0 {
+		return fmt.Errorf("store: workspace %s still has %d unreleased lease(s): %w", id, unreleased, domain.ErrConflict)
+	}
+	return nil
+}
+
 // ListWorkspacesInBoxState returns workspaces whose box is in the given state.
 func (s *Store) ListWorkspacesInBoxState(ctx context.Context, state domain.ResourceLifecycle) ([]domain.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx, `

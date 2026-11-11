@@ -46,6 +46,9 @@ err = rec.Cancel(ctx, run.ID)      // Interrupted, lease released
 report, err := rec.Sweep(ctx)      // resume or interrupt after a restart
 ```
 
+Run the tests with `go test -race ./...` from this directory. CI runs the same
+command.
+
 ## Behaviour and limits
 
 - **Idempotent requests.** `(workspace, request_id)` is unique, so a retried

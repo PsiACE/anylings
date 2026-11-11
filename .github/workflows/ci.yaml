@@ -45,6 +45,40 @@ jobs:
       - name: Check k0s recovery without live kubeconfig
         run: bash tests/ci/check-k0s-reset.sh
 
+  # The manager module is exercised by its own tests; the platform jobs above
+  # never compile or run it. No credentials and no network provider calls.
+  manager:
+    if: ${{ github.repository == 'PsiACE/anylings' }}
+    name: manager test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: services/manager
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/manager/go.mod
+          cache-dependency-path: services/manager/go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt required for: ${unformatted}"
+            exit 1
+          fi
+
+      - name: Test with the race detector
+        run: go test -race ./...
+
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.
   render-platform:

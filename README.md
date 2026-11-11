@@ -217,9 +217,33 @@ credentials, a Git subdirectory and a custom Argo namespace). They are configura
 cases, not k0s/DOKS implementations. Infrastructure validation checks the independent
 OpenTofu configurations; the native integration run uses the same base input.
 
-The workflow runs `tests/ci/run.sh` only on an explicitly disposable GitHub runner.
-Each run creates a fresh private temporary directory; there is no resume/local
-rehearsal interface or public CI command.
+Every pull request runs the offline gate: safety contracts, both platform render
+inputs, and OpenTofu format/validate/test. Those checks take minutes, need no
+credentials and no cluster.
+
+The native rehearsal is heavier: it needs a disposable runner, passwordless
+sudo for k0s and most of an hour, so it has its own workflow and never runs for
+an ordinary pull request. Add the `ci/native-rehearsal` label to a pull request
+from this repository, or push a new commit to one that already carries it, to
+start it. No other label change starts or cancels it, and it shares no check
+name with the gate, so its absence is never mistaken for a passed gate. A newer
+commit supersedes an older rehearsal of the same pull request. Removing the
+label cancels nothing already running. `tests/ci/run.sh` still refuses to start
+without an explicitly disposable runner, so the label selects evidence
+collection rather than relaxing the fixture's own authorization. The Landing
+review needs only the offline gate. Diagnostics are ordinary operational data,
+retained for seven days and uploaded best effort: a transport failure warns and
+never turns a passing rehearsal red.
+
+`bash tests/ci/local-gate.sh` runs the offline gate locally with the checkout's
+own tools. It writes nothing to the repository and is safe on a workstation.
+
+Both entry points call `tests/ci/check-render.sh` for the render assertions, so
+the tunnel Secret-source/plaintext check, the rendered formatting check and the
+partially-encrypted negative test cannot exist in one and be missing from the
+other. It is still offline only: it renders and validates, but proves no runtime
+behavior, so it does not stand in for a native run, DOKS CSI, Cloudflare or
+multi-host checks.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through

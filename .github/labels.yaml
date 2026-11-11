@@ -7,3 +7,6 @@
   color: ff9800
 - name: type/major
   color: f6412d
+- name: ci/native-rehearsal
+  color: 1d76db
+  description: Run the disposable native rehearsal for this pull request

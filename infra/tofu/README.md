@@ -52,10 +52,12 @@ ordinary `TF_VAR_*`/tfvars inputs. Never use the same backend state for two root
 
 - **k0s:** see [k0s/README.md](k0s/README.md). OpenTofu tracks desired inputs;
   this is not full runtime drift detection. Reset must not require live kubeconfig.
-- **DOKS:** ordinary non-HA control plane, two fixed `s-2vcpu-4gb` workers,
-  no autoscaling or automatic upgrade. The version must be a full offered DOKS
-  slug; region defaults to `sgp1`. DigitalOcean supplies default networking/CSI.
-  There is no optional VPC factory, tag interface or configurable node-pool module.
+- **DOKS:** ordinary non-HA control plane, one fixed pool of two `s-2vcpu-4gb`
+  workers by default, no autoscaling or automatic upgrade. `node_size` and
+  `node_count` are the only pool inputs; the count accepts whole numbers from 1
+  to 512. The version must be a full offered DOKS slug; region defaults to `sgp1`.
+  DigitalOcean supplies default networking/CSI. There is no optional VPC factory,
+  tag interface or autoscaling controller.
 - **Cloudflare:** explicit HTTP(S) origins in the selected zone. Routes default
   to Access-protected and require allowed emails or existing group IDs. An
   intentionally public route must say `access = false`. Policies precede tunnel
@@ -80,6 +82,92 @@ Cloud tokens stay in environment variables (`DIGITALOCEAN_TOKEN`,
 `CLOUDFLARE_API_TOKEN`). Tunnel credentials and kubeconfig outputs/state are sensitive.
 Read the tunnel token into a private file referenced by platform configuration.
 Live cloud behavior, Access propagation and data recovery are not proven by `validate`.
+
+## DOKS worker profiles and cost
+
+The two default workers are the baseline. A single-node economy profile is an
+**explicit operator choice**, never a silent reduction:
+
+```bash
+# Baseline (unchanged): two s-2vcpu-4gb workers, non-HA, no autoscaling.
+tofu -chdir=infra/tofu/doks plan -var kubernetes_version=1.36.3-do.0
+
+# Economy profile: one s-2vcpu-4gb worker. Compute only.
+tofu -chdir=infra/tofu/doks plan \
+  -var kubernetes_version=1.36.3-do.0 \
+  -var node_count=1
+```
+
+`node_size` and `node_count` carry the current fixed values as defaults, so
+existing inputs render the same resource address and attributes; only the two
+attributes now come from variables. `node_count` must be a whole number from 1
+to 512.
+
+The same inputs can live in a private tfvars file; the API token is never one of
+them. It comes from `DIGITALOCEAN_TOKEN` in the environment.
+
+```hcl
+# Private file, never committed. Placeholders only.
+kubernetes_version = "<full-doks-slug>" # for example 1.36.3-do.0
+region             = "sgp1"
+node_size          = "s-2vcpu-4gb"
+node_count         = 1 # economy profile; omit for the two-worker baseline
+```
+
+### Verified prices (USD, DigitalOcean list, 2026-11-12)
+
+| Item                                                   | Price                       |
+| ------------------------------------------------------ | --------------------------- |
+| DOKS control plane (non-HA, `ha = false`)              | $0, included                |
+| HA control plane (`ha = true`)                         | $40.00/month                |
+| One `s-2vcpu-4gb` worker (2 vCPU, 4 GiB)               | $24.00/month; $0.03571/hour |
+| Its included resources: 80 GiB SSD, 4,000 GiB transfer | bundled                     |
+| Two such workers (the default)                         | $48.00/month                |
+
+**$24/month is the compute line item of the single-node profile, not a total.**
+The control plane is free only while HA stays off; DOKS 1.36 and later enable HA
+by default when `ha` is omitted, which is why this root keeps `ha = false`
+explicit in the resource and in its offline test. A total monthly cost can also
+include PVC-backed DigitalOcean Volumes ($0.10/GiB-month), R2 storage and
+requests, load balancers if any are added later, pooled-bandwidth overage beyond
+the node allowance ($0.01/GiB), and sales tax. None of those are part of the
+$24 figure, and none are provisioned by this root.
+
+Do not assume a cheaper 2 vCPU / 4 GiB option: in DigitalOcean's public Droplet
+price list, `s-2vcpu-4gb` is the lowest 2 vCPU / 4 GiB entry (the only other 4 GiB
+slug, `c-2`, is dedicated CPU at $42/month). DigitalOcean publishes one global
+Droplet list and no per-region DOKS price table, so confirm slug availability and
+a one-node pool in your region and account in the DigitalOcean console; that check
+needs credentials and is outside this repository's offline validation.
+
+### What one node costs in behavior
+
+- **Memory.** DOKS reserves memory for kubelet, containerd, kube-proxy, Cilium,
+  CoreDNS, `do-node-agent`, `csi-do-node`, `konnectivity-agent`,
+  `cpc-bridge-proxy` and the OS. On a 4 GiB node only **2.5 GiB is allocatable
+  to Pods** (the same table gives 1 GiB on a 2 GiB node and 6 GiB on an 8 GiB
+  node). Do not plan an application stack against the full 4 GiB, and do not
+  claim the platform's workloads fit until they have been measured on the real
+  cluster with `kubectl describe node` and observed usage.
+- **Evictions.** With no second node, kubelet memory pressure evicts Pods on the
+  only worker. Burstable workloads are the first candidates, and an evicted
+  singleton is unavailable until it reschedules on the same node, which can
+  itself be under pressure.
+- **No failure tolerance.** A node drain for maintenance or upgrade, or any node
+  fault, stops all workloads: there is no other node to receive them.
+- **Upgrade downtime.** `auto_upgrade = false` keeps upgrades manual, but a
+  manual Kubernetes upgrade still replaces the only node. Expect a workload
+  outage for the duration.
+- **Pod density is not the limit.** 110 Pods per node is the platform maximum;
+  memory and the single point of failure bind first.
+
+Changing `node_size` on an existing cluster is not an in-place resize. DigitalOcean
+documents a node pool's size slug as immutable and its recommended path as a new
+pool, a drain, then removal of the old one; this root keeps one pool by design, so
+that sequence is a reviewed migration with temporary double cost and downtime,
+not a variable change an ordinary apply can complete. `node_count` can change in
+place, and `prevent_destroy` still blocks replacement or deletion of the tracked
+cluster.
 
 ## Platform migration
 
@@ -114,7 +202,14 @@ Never substitute `destroy platform` or a whole-state reset for the handoff.
 tofu fmt -check -recursive infra/tofu
 tofu -chdir=infra/tofu/ROOT init -backend=false -lockfile=readonly
 tofu -chdir=infra/tofu/ROOT validate
+tofu -chdir=infra/tofu/ROOT test
 ```
 
-CI validates all four roots and applies the normal k0s/platform roots on a disposable
-host. It does not apply cloud roots. Locks cover Linux/macOS on amd64/arm64.
+The DOKS root's `tests/cluster_pool.tftest.hcl` is an offline contract over a
+mocked provider: it pins the default pool shape and the explicit `ha = false`,
+and it rejects a zero, negative or fractional count and an empty size slug. It
+needs no token, makes no DigitalOcean API call, and writes no state.
+
+CI validates all four roots, runs those offline contracts, and applies the normal
+k0s/platform roots on a disposable host. It does not apply cloud roots. Locks
+cover Linux/macOS on amd64/arm64.

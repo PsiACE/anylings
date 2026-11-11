@@ -177,10 +177,11 @@ The repository Secret remains `platform-repository`.
 Remove the unused `cluster.storage_class` input; it never affected generated PVCs.
 Retain backend/state when renaming the former `edge` root to `cloudflare`.
 
-This is deliberately not a generic cloud module: DOKS has a fixed small pool;
-Cloudflare does not wrap WARP private routes or R2 retention rules. If older roots
-were already applied, retain or migrate their VPC/private-route/bucket-lock resources
-before applying the simplified configuration. Never discard state or accept unintended
+This is deliberately not a generic cloud module: DOKS keeps one fixed, non-HA
+worker pool whose size and count are its only pool inputs, and Cloudflare does
+not wrap WARP private routes or R2 retention rules. If older roots were already
+applied, retain or migrate their VPC/private-route/bucket-lock resources before
+applying the simplified configuration. Never discard state or accept unintended
 data/policy deletion merely to complete a refactor.
 
 [Landing](https://github.com/bubbuild/landing) provides advisory reviews and dependency

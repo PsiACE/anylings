@@ -169,6 +169,10 @@ not a variable change an ordinary apply can complete. `node_count` can change in
 place, and `prevent_destroy` still blocks replacement or deletion of the tracked
 cluster.
 
+On-demand elastic CPU capacity is a separate future feature, not part of this
+profile. Here `auto_scale` stays `false` and no autoscaler is installed; sizing is
+the fixed `node_count` an operator chooses.
+
 ## Platform migration
 
 Fresh installations use the normal bootstrap -> wait -> platform plan/apply flow.

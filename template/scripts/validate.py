@@ -45,6 +45,8 @@ IMAGE_TAG_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"
 # Editor hint only: the empty string means "use an emptyDir". Runtime
 # validation stays in the validators, where empty is allowed.
 EMPTY_OR_PVC_NAME_PATTERN = r"^$|" + PVC_NAME_RE.pattern
+# Editor hint for an optional registry digest: empty, or sha256 and 64 hex.
+EMPTY_OR_DIGEST_PATTERN = r"^$|sha256:[0-9a-f]{64}"
 
 
 class Model(BaseModel):
@@ -120,6 +122,31 @@ class Agents(Model):
     # private registry or vendor path is baked into the rendered tree.
     image_repository: str = Field(pattern=IMAGE_REPOSITORY_PATTERN)
     image_tag: str = Field(default="0.1.8", pattern=IMAGE_TAG_PATTERN)
+    # An immutable pin. A tag can be moved; the registry digest the publisher
+    # records cannot, so a deployment that must not drift sets this. Empty
+    # leaves the tag as the only reference.
+    #
+    # No Field `pattern` here, for the same reason as the claim below: it would
+    # run before the validator and reject the documented empty default.
+    image_digest: str = Field(
+        default="",
+        json_schema_extra={"pattern": EMPTY_OR_DIGEST_PATTERN},
+    )
+
+    @field_validator("image_digest")
+    @classmethod
+    def check_image_digest(cls, value: str) -> str:
+        if not value:
+            return value
+        # A registry digest is `sha256:` and 64 lowercase hex characters. An
+        # algorithm that is not sha256 is not something this template pins.
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise ValueError(
+                f"{value!r} is not a registry digest "
+                "(expected sha256: followed by 64 lowercase hex characters)"
+            )
+        return value
+
     # Empty keeps the default ephemeral emptyDir /home/t3; a name opts into an
     # existing claim the operator created. The platform never creates a claim
     # or picks a StorageClass.

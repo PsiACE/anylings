@@ -512,4 +512,205 @@ if PATH="$stub_dir:$PATH" T3_CHECK_NESTED=1 bash "$REPO_ROOT/tests/runtime/check
 fi
 fi
 
+# ---------------------------------------------------------- image publishing --
+
+# Publishing is a separate concern from building, and the difference is who can
+# trigger it. These assertions are about the workflow as data: no pull-request
+# event, no fork, and no long-lived credential can reach a push.
+log "check the publisher is limited to trusted main pushes"
+workflow="$REPO_ROOT/.github/workflows/runtime-image.yaml"
+[ -f "$workflow" ] || die "the runtime image workflow is missing"
+
+# Only a push to main starts it. A `pull_request` or `pull_request_target`
+# trigger would let a fork's code reach a package write.
+triggers="$(yq -r '.on | keys | join(" ")' "$workflow")"
+[ "$triggers" = push ] || die "the publisher has unexpected triggers: $triggers"
+[ "$(yq -r '.on.push.branches | join(" ")' "$workflow")" = main ] \
+    || die "the publisher does not run on main pushes only"
+
+# The job condition repeats the trust boundary, so a trigger edit alone does not
+# widen it.
+job_if="$(yq -r '.jobs.publish.if' "$workflow")"
+expected_if="github.repository=='PsiACE/anylings'&&github.event_name=='push'&&github.ref=='refs/heads/main'"
+[ "$(printf '%s' "$job_if" | tr -d '[:space:]')" = "$expected_if" ] \
+    || die "the publisher condition does not restrict all three trust boundaries"
+
+# package write is the one extra permission, and it is never granted workflow-wide.
+yq -o=json '.permissions' "$workflow" | jq -e 'type == "object" and length == 0' >/dev/null \
+    || die "the publisher must explicitly deny workflow-level permissions"
+[ "$(yq -r '.jobs.publish.permissions | keys | join(" ")' "$workflow")" = "contents packages" ] \
+    || die "the publisher holds unexpected job permissions"
+[ "$(yq -r '.jobs.publish.permissions.packages' "$workflow")" = write ] \
+    || die "the publisher cannot write a package"
+[ "$(yq -r '.jobs.publish.permissions.contents' "$workflow")" = read ] \
+    || die "the publisher does not keep contents read-only"
+
+# One job: no publishable step hides in a second, differently-conditioned job.
+[ "$(yq -r '.jobs | keys | length' "$workflow")" = 1 ] \
+    || die "the publisher holds more than one job"
+
+# The credential is the run's own token. A PAT, deploy key or sealed cloud
+# secret in this workflow would be a long-lived credential in CI.
+if grep -qE 'secrets\.[A-Za-z_]+' "$workflow"; then
+    unexpected="$(grep -oE 'secrets\.[A-Za-z_]+' "$workflow" | sort -u | grep -vxF 'secrets.GITHUB_TOKEN' || true)"
+    [ -z "$unexpected" ] || die "the publisher references a non-ephemeral secret: $unexpected"
+fi
+# Order is a contract, not a comment: check this build before either push.
+yq -o=json '.jobs.publish.steps' "$workflow" | jq -e '
+    map(.id) as $ids |
+    ($ids | index("build")) as $build | ($ids | index("check")) as $check |
+    ($ids | index("push")) as $push |
+    $build != null and $check != null and $push != null and
+    $build < $check and $check < $push and
+    .[$check].run == "bash tests/runtime/check-t3-code.sh --image \"${REPOSITORY}:${SOURCE_TAG}\""
+' >/dev/null || die "the publisher must check the built image before pushing"
+
+# Exercise the actual publish script without a network or registry. A synthetic
+# podman checks stdin/authfile use, records the digest and observes cleanup on
+# success, push failure and an invalid registry digest. Comments cannot satisfy
+# these assertions, and no real credential or Podman auth store is involved.
+publish_script="$(yq -r '.jobs.publish.steps[] | select(.id == "push") | .run' "$workflow")"
+publish_bin="$scratch/publisher-bin"
+mkdir "$publish_bin"
+cat >"$publish_bin/podman" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+command="$1"; shift
+authfile=""; digestfile=""; stdin_password=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --authfile) authfile="$2"; shift 2 ;;
+        --digestfile) digestfile="$2"; shift 2 ;;
+        --username) shift 2 ;;
+        --password-stdin) stdin_password=1; shift ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$command" >>"$STUB_LOG"
+case "$authfile" in
+    "$RUNNER_TEMP"/*) ;;
+    *) exit 97 ;;
+esac
+case "$command" in
+    login)
+        [ "$stdin_password" = 1 ] && [ "$(cat)" = "$GHCR_TOKEN" ] || exit 96
+        printf '%s' "$authfile" >"$STUB_AUTH_PATH"
+        printf '{"auths":{}}\n' >"$authfile"
+        ;;
+    push)
+        [ -f "$authfile" ]
+        [ "$STUB_PUSH_FAIL" = 0 ] || exit 125
+        if [ -n "$digestfile" ]; then printf '%s\n' "$STUB_DIGEST" >"$digestfile"; fi
+        ;;
+    logout) [ -f "$authfile" ] ;;
+    *) exit 98 ;;
+esac
+STUB
+chmod +x "$publish_bin/podman"
+for scenario in success push-failure invalid-digest; do
+    probe="$scratch/publisher-$scenario"
+    mkdir -p "$probe/home" "$probe/temp"
+    fail_push=0; fixture_digest="sha256:$(printf 'a%.0s' {1..64})"
+    [ "$scenario" != push-failure ] || fail_push=1
+    [ "$scenario" != invalid-digest ] || fixture_digest=sha256:not-a-digest
+    fixture_token=synthetic-publisher-stdin-token
+    if (
+        cd "$probe"
+        env -i PATH="$publish_bin:$PATH" HOME="$probe/home" RUNNER_TEMP="$probe/temp" \
+            REPOSITORY=ghcr.io/example/test/t3-code SOURCE_TAG=sha-synthetic VERSION_TAG=0.1.8 \
+            GHCR_TOKEN="$fixture_token" ACTOR=synthetic GITHUB_OUTPUT="$probe/output" \
+            STUB_LOG="$probe/calls" STUB_AUTH_PATH="$probe/auth-path" \
+            STUB_PUSH_FAIL="$fail_push" STUB_DIGEST="$fixture_digest" \
+            bash -euo pipefail -c "$publish_script" >"$probe/log" 2>&1
+    ); then result=0; else result=$?; fi
+    if [ "$scenario" = success ]; then
+        [ "$result" = 0 ] || die "the synthetic publisher failed"
+        grep -qxF "digest=$fixture_digest" "$probe/output" || die "the registry digest was not recorded"
+    elif [ "$scenario" = push-failure ]; then
+        [ "$result" = 125 ] || die "the publisher did not preserve the push failure"
+    else
+        [ "$result" != 0 ] || die "the publisher accepted an invalid registry digest"
+    fi
+    grep -qxF logout "$probe/calls" || die "the publisher did not log out after $scenario"
+    [ -s "$probe/auth-path" ] || die "the publisher did not create a private authfile"
+    [ ! -e "$(cat "$probe/auth-path")" ] || die "the publisher kept its authfile after $scenario"
+    if grep -rqF -- "$fixture_token" "$probe"; then
+        die "the publisher persisted the synthetic plaintext token after $scenario"
+    fi
+done
+
+# The image path is derived, not configured: no registry or owner is hardcoded
+# in the workflow, so a fork or rename cannot publish to somebody's namespace.
+grep -q 'ghcr.io/${REPOSITORY,,}/t3-code' "$workflow" \
+    || die "the published image path is not derived from the repository"
+if grep -qE 'ghcr\.io/[A-Za-z0-9._-]+/' "$workflow"; then
+    die "the publisher hardcodes an image namespace"
+fi
+
+# The gate never publishes: its jobs stay offline and keep contents: read.
+if grep -q 'packages: write' "$REPO_ROOT/.github/workflows/ci.yaml"; then
+    die "the pull-request gate can write packages"
+fi
+if yq -e '.jobs[] | select(.uses != null)' "$REPO_ROOT/.github/workflows/ci.yaml" >/dev/null 2>&1; then
+    die "the gate delegates to another workflow"
+fi
+
+# ------------------------------------------------------------ digest pinning --
+
+# A deployment may pin an immutable digest instead of trusting a moving tag.
+log "check the digest pin renders and the tag-only path does not"
+digest="sha256:$(printf 'a%.0s' {1..64})"
+cat >"$scratch/pinned.toml" <<TOML
+[repository]
+url = "git://git.example.test/platform.git"
+
+[agents]
+image_repository = "ghcr.io/psiace/anylings/t3-code"
+image_tag = "sha-0123456789abcdef"
+image_digest = "$digest"
+TOML
+(
+    export ANYLINGS_CONFIG="$scratch/pinned.toml"
+    export ANYLINGS_OUTPUT_DIR="$scratch/rendered-pinned"
+    export SOPS_AGE_KEY_FILE="$scratch/age.key"
+    just init platform >/dev/null
+    just configure platform >/dev/null
+)
+pinned_values="$scratch/rendered-pinned/kubernetes/apps/agents/t3-code/values.yaml"
+[ "$(yq -r '.controllers."t3-code".containers.app.image.digest' "$pinned_values")" = "$digest" ] \
+    || die "a configured digest was not rendered"
+# The chart must combine tag and digest, or the pin would silently do nothing.
+helm template t3-code "$chart_file" --namespace agents --values "$pinned_values" \
+    >"$scratch/pinned-manifests.yaml"
+pinned_image="$(yq -r 'select(.kind == "Deployment")
+  | .spec.template.spec.containers[0].image' "$scratch/pinned-manifests.yaml")"
+case "$pinned_image" in
+    *:sha-0123456789abcdef@"$digest") ;;
+    *) die "the pinned image is not tag@digest: $pinned_image" ;;
+esac
+
+# The tag-only path must not render a stale or empty digest key at all.
+yq -e '.controllers."t3-code".containers.app.image | has("digest") | not' "$values" >/dev/null \
+    || die "the tag-only values carry a digest key"
+yq -r 'select(.kind == "Deployment")
+  | .spec.template.spec.containers[0].image' "$scratch/manifests-claim.yaml" \
+    | grep -qv '@' || die "the tag-only image is pinned to a digest anyway"
+
+# Invalid digests are rejected by the config validator, including a truncated
+# value and a non-sha256 algorithm.
+bad_digests=(
+    "sha256:abc"
+    "sha256:$(printf 'a%.0s' {1..63})"
+    "sha256:$(printf 'A%.0s' {1..64})"
+    "md5:$(printf 'a%.0s' {1..64})"
+    "$(printf 'a%.0s' {1..64})"
+)
+for bad in "${bad_digests[@]}"; do
+    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "ghcr.io/psiace/anylings/t3-code"\nimage_digest = "%s"\n' \
+        "$bad" >"$scratch/bad-digest.toml"
+    if ANYLINGS_CONFIG="$scratch/bad-digest.toml" just check config >/dev/null 2>&1; then
+        die "the config validator accepted the invalid digest '${bad:0:24}...'"
+    fi
+done
+
 log "all checks passed"

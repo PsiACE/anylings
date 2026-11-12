@@ -87,31 +87,28 @@ defaultPodOptions:
     seccompProfile:
       type: RuntimeDefault
 persistence:
-  # One writable root carries T3's database and the project checkouts it
-  # references, so they cannot be split across differently-mounted paths. It is
-  # mounted at the two directories the image expects rather than at /home/t3
-  # itself: a mount there would replace the directory tree the image creates and
-  # chowns, and the entrypoint would then fail its own writability check.
-  # Distinct subPaths keep state and workspace apart inside that one volume.
+  # One writable root carries T3's database, the project checkouts it references
+  # and the agent's own $HOME state (Bub keeps its tapes under ~/.bub), so it is
+  # mounted at /home/t3 itself. Mounting leaf directories instead would move the
+  # volume's internal layout (`<volume>/.t3`, `<volume>/workspace`) and strand the
+  # state already stored on an existing claim, and it would leave $HOME read-only
+  # so the agent could not create its own state directory.
+  #
+  # A fresh volume root belongs to root, so the pod sets fsGroup below and the
+  # image's entrypoint creates its own subdirectories once it can write there.
 #% if agents.storage_existing_claim %#
   home:
     type: persistentVolumeClaim
     existingClaim: #{ agents.storage_existing_claim | tojson }#
     globalMounts:
-      - path: /home/t3/.t3
-        subPath: state
-      - path: /home/t3/workspace
-        subPath: workspace
+      - path: /home/t3
 #% else %#
   # emptyDir is the default because this template does not choose a StorageClass
   # or buy storage. State is lost when the pod is replaced; see the README.
   home:
     type: emptyDir
     globalMounts:
-      - path: /home/t3/.t3
-        subPath: state
-      - path: /home/t3/workspace
-        subPath: workspace
+      - path: /home/t3
 #% endif %#
   tmp:
     type: emptyDir

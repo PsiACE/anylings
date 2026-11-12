@@ -343,23 +343,24 @@ checks = {
     "nonroot enforced": pod["securityContext"].get("runAsNonRoot") is True,
     "fsGroup for the mounted claim": pod["securityContext"].get("fsGroup") == 65532,
     "resource limits": "limits" in container.get("resources", {}),
-        # State and workspace must be mounted as the image's own leaf directories.
-    # A mount at /home/t3 replaces the directory tree the image creates and
-    # chowns, so the entrypoint's writability check fails at startup even though
-    # the pod schedules and Argo reports Synced.
-    "state mounted at /home/t3/.t3": any(
-        m.get("mountPath") == "/home/t3/.t3" for m in container.get("volumeMounts", [])
-    ),
-    "workspace mounted at /home/t3/workspace": any(
-        m.get("mountPath") == "/home/t3/workspace" for m in container.get("volumeMounts", [])
-    ),
-    "no mount shadows /home/t3": not any(
+        # The volume is mounted at /home/t3 itself, which is the layout the image
+    # and any existing claim already use: state at /home/t3/.t3, checkouts at
+    # /home/t3/workspace, and a writable $HOME so the agent can create its own
+    # ~/.bub. Leaf subPath mounts would move that layout and strand the state
+    # already stored on an existing claim, so the exact mapping is asserted
+    # rather than "some mount under /home/t3 exists".
+    "volume mounted at /home/t3": any(
         m.get("mountPath") == "/home/t3" for m in container.get("volumeMounts", [])
     ),
-    "state and workspace use distinct subPaths": {
-        m.get("subPath") for m in container.get("volumeMounts", [])
-        if m.get("mountPath", "").startswith("/home/t3/")
-    } == {"state", "workspace"},
+    "no leaf remount under /home/t3": not any(
+        m.get("mountPath", "").startswith("/home/t3/")
+        for m in container.get("volumeMounts", [])
+    ),
+    "/home/t3 mount has no subPath": all(
+        not m.get("subPath")
+        for m in container.get("volumeMounts", [])
+        if m.get("mountPath") == "/home/t3"
+    ),
 }
 volumes = {v["name"]: v for v in pod.get("volumes", [])}
 home = volumes.get("home", {})
@@ -461,9 +462,16 @@ if [ -n "$IMAGE" ]; then
 # is alive, it still is after the probe, and the server answers the readiness
 # endpoint the deployment's probe uses with a 200 whose body is the unauthenticated
 # auth state. A log line proves nothing about that.
-"$container_tool" run --rm --network=none \
+# The volume is mounted at /home/t3 the way the rendered values do it: a
+# root-owned, group-writable volume root that the pod's fsGroup can write, not a
+# world-writable tmpfs. --group-add stands in for fsGroup, which is what grants
+# the nonroot process access to that root. A 1777 tmpfs here would hide the real
+# contract: the agent must be able to create its own $HOME state under the
+# mounted root, and a root-only mount would fail that.
+"$container_tool" run --rm -i --network=none \
     --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-    --tmpfs /home/t3:rw,mode=1777 --tmpfs /tmp:rw,mode=1777 \
+    --user 65532:65532 --group-add 0 \
+    --tmpfs /home/t3:rw,mode=2770 --tmpfs /tmp:rw,mode=1777 \
     --entrypoint /bin/bash "$IMAGE" -ec '
     set -euo pipefail
     # Fresh, empty state: the entrypoint must create state and workspace under
@@ -501,6 +509,36 @@ PY
     # The writable roots exist and belong to the run user.
     [ -d /home/t3/.t3 ] && [ -d /home/t3/workspace ]
     [ "$(id -u)" -eq 65532 ]
+
+    # $HOME itself must be writable, not only the two subdirectories. The agent
+    # T3 launches keeps its own state under ~/.bub, so a read-only $HOME breaks
+    # the ACP session even while the server is up and answering.
+    mkdir -p "$HOME/.bub/tapes" || { echo "$HOME is not writable" >&2; exit 1; }
+    # The block above deleted the image WORKDIR to prove the entrypoint
+    # recreates it; return to a real directory before starting the agent.
+    cd /home/t3/workspace
+
+    # Offline ACP handshake: the real initialize request, no model call and no
+    # network. A failure here means the runtime cannot start its agent at all.
+    # A FIFO, not a redirection from a regular file: the ACP server requires a
+    # real pipe or socket on stdin and exits if it is handed a plain file.
+    printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}" >/tmp/acp.in
+    mkfifo /tmp/acp.fifo
+    ( cat /tmp/acp.in >/tmp/acp.fifo ) &
+    # stdout stays a real pipe through `cat`: the ACP server inspects its own
+    # stdio transport, and a regular file on either end makes it exit.
+    if ! timeout 60 bub acp </tmp/acp.fifo 2>/tmp/acp.err | cat >/tmp/acp.json; then
+        echo "offline bub acp initialize failed" >&2
+        cat /tmp/acp.err >&2
+        exit 1
+    fi
+    [ -s /tmp/acp.json ] || { echo "offline bub acp returned nothing" >&2; cat /tmp/acp.err >&2; exit 1; }
+    python3 - <<PY
+import json
+reply = json.loads(open("/tmp/acp.json").readline())
+assert reply["id"] == 1, reply
+assert "protocolVersion" in reply["result"], reply
+PY
     echo "readiness ok"
 ' || die "the image did not serve its readiness endpoint under the deployment shape"
 

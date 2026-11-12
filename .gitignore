@@ -29,6 +29,10 @@ __pycache__/
 *.tfplan
 *.tfvars
 *.tfvars.json
+# The public route profile has no identity or credential inputs, so this one
+# exact path is reviewed and tracked. Everything else named *.tfvars.json stays
+# private; do not widen this to the directory or the pattern.
+!infra/tofu/cloudflare/profiles/production.routes.tfvars.json
 
 # Rendered chart output produced by bootstrap.sh render; never committed
 /manifests/

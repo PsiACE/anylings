@@ -531,19 +531,13 @@ triggers="$(yq -r '.on | keys | join(" ")' "$workflow")"
 # The job condition repeats the trust boundary, so a trigger edit alone does not
 # widen it.
 job_if="$(yq -r '.jobs.publish.if' "$workflow")"
-for fragment in "github.repository == 'PsiACE/anylings'" \
-    "github.event_name == 'push'" \
-    "github.ref == 'refs/heads/main'"
-do
-    case "$job_if" in
-        *"$fragment"*) ;;
-        *) die "the publisher condition lost: $fragment" ;;
-    esac
-done
+expected_if="github.repository=='PsiACE/anylings'&&github.event_name=='push'&&github.ref=='refs/heads/main'"
+[ "$(printf '%s' "$job_if" | tr -d '[:space:]')" = "$expected_if" ] \
+    || die "the publisher condition does not restrict all three trust boundaries"
 
 # package write is the one extra permission, and it is never granted workflow-wide.
-[ "$(yq -r '.permissions | length' "$workflow")" = 0 ] \
-    || die "the publisher grants permissions at workflow level"
+yq -o=json '.permissions' "$workflow" | jq -e 'type == "object" and length == 0' >/dev/null \
+    || die "the publisher must explicitly deny workflow-level permissions"
 [ "$(yq -r '.jobs.publish.permissions | keys | join(" ")' "$workflow")" = "contents packages" ] \
     || die "the publisher holds unexpected job permissions"
 [ "$(yq -r '.jobs.publish.permissions.packages' "$workflow")" = write ] \
@@ -558,14 +552,92 @@ done
 # The credential is the run's own token. A PAT, deploy key or sealed cloud
 # secret in this workflow would be a long-lived credential in CI.
 if grep -qE 'secrets\.[A-Za-z_]+' "$workflow"; then
-    unexpected="$(grep -oE 'secrets\.[A-Za-z_]+' "$workflow" | sort -u | grep -v 'secrets.GITHUB_TOKEN' || true)"
+    unexpected="$(grep -oE 'secrets\.[A-Za-z_]+' "$workflow" | sort -u | grep -vxF 'secrets.GITHUB_TOKEN' || true)"
     [ -z "$unexpected" ] || die "the publisher references a non-ephemeral secret: $unexpected"
 fi
-# The token is piped to login from the environment, never written to a file.
-grep -q 'password-stdin' "$workflow" || die "the publisher does not use password-stdin"
-if grep -qE 'echo .*GHCR_TOKEN|> *[^ ]*token' "$workflow"; then
-    die "the publisher writes its token somewhere"
-fi
+# Order is a contract, not a comment: check this build before either push.
+yq -o=json '.jobs.publish.steps' "$workflow" | jq -e '
+    map(.id) as $ids |
+    ($ids | index("build")) as $build | ($ids | index("check")) as $check |
+    ($ids | index("push")) as $push |
+    $build != null and $check != null and $push != null and
+    $build < $check and $check < $push and
+    .[$check].run == "bash tests/runtime/check-t3-code.sh --image \"${REPOSITORY}:${SOURCE_TAG}\""
+' >/dev/null || die "the publisher must check the built image before pushing"
+
+# Exercise the actual publish script without a network or registry. A synthetic
+# podman checks stdin/authfile use, records the digest and observes cleanup on
+# success, push failure and an invalid registry digest. Comments cannot satisfy
+# these assertions, and no real credential or Podman auth store is involved.
+publish_script="$(yq -r '.jobs.publish.steps[] | select(.id == "push") | .run' "$workflow")"
+publish_bin="$scratch/publisher-bin"
+mkdir "$publish_bin"
+cat >"$publish_bin/podman" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+command="$1"; shift
+authfile=""; digestfile=""; stdin_password=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --authfile) authfile="$2"; shift 2 ;;
+        --digestfile) digestfile="$2"; shift 2 ;;
+        --username) shift 2 ;;
+        --password-stdin) stdin_password=1; shift ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$command" >>"$STUB_LOG"
+case "$authfile" in
+    "$RUNNER_TEMP"/*) ;;
+    *) exit 97 ;;
+esac
+case "$command" in
+    login)
+        [ "$stdin_password" = 1 ] && [ "$(cat)" = "$GHCR_TOKEN" ] || exit 96
+        printf '%s' "$authfile" >"$STUB_AUTH_PATH"
+        printf '{"auths":{}}\n' >"$authfile"
+        ;;
+    push)
+        [ -f "$authfile" ]
+        [ "$STUB_PUSH_FAIL" = 0 ] || exit 125
+        if [ -n "$digestfile" ]; then printf '%s\n' "$STUB_DIGEST" >"$digestfile"; fi
+        ;;
+    logout) [ -f "$authfile" ] ;;
+    *) exit 98 ;;
+esac
+STUB
+chmod +x "$publish_bin/podman"
+for scenario in success push-failure invalid-digest; do
+    probe="$scratch/publisher-$scenario"
+    mkdir -p "$probe/home" "$probe/temp"
+    fail_push=0; fixture_digest="sha256:$(printf 'a%.0s' {1..64})"
+    [ "$scenario" != push-failure ] || fail_push=1
+    [ "$scenario" != invalid-digest ] || fixture_digest=sha256:not-a-digest
+    fixture_token=synthetic-publisher-stdin-token
+    if (
+        cd "$probe"
+        env -i PATH="$publish_bin:$PATH" HOME="$probe/home" RUNNER_TEMP="$probe/temp" \
+            REPOSITORY=ghcr.io/example/test/t3-code SOURCE_TAG=sha-synthetic VERSION_TAG=0.1.8 \
+            GHCR_TOKEN="$fixture_token" ACTOR=synthetic GITHUB_OUTPUT="$probe/output" \
+            STUB_LOG="$probe/calls" STUB_AUTH_PATH="$probe/auth-path" \
+            STUB_PUSH_FAIL="$fail_push" STUB_DIGEST="$fixture_digest" \
+            bash -euo pipefail -c "$publish_script" >"$probe/log" 2>&1
+    ); then result=0; else result=$?; fi
+    if [ "$scenario" = success ]; then
+        [ "$result" = 0 ] || die "the synthetic publisher failed"
+        grep -qxF "digest=$fixture_digest" "$probe/output" || die "the registry digest was not recorded"
+    elif [ "$scenario" = push-failure ]; then
+        [ "$result" = 125 ] || die "the publisher did not preserve the push failure"
+    else
+        [ "$result" != 0 ] || die "the publisher accepted an invalid registry digest"
+    fi
+    grep -qxF logout "$probe/calls" || die "the publisher did not log out after $scenario"
+    [ -s "$probe/auth-path" ] || die "the publisher did not create a private authfile"
+    [ ! -e "$(cat "$probe/auth-path")" ] || die "the publisher kept its authfile after $scenario"
+    if grep -rqF -- "$fixture_token" "$probe"; then
+        die "the publisher persisted the synthetic plaintext token after $scenario"
+    fi
+done
 
 # The image path is derived, not configured: no registry or owner is hardcoded
 # in the workflow, so a fork or rename cannot publish to somebody's namespace.

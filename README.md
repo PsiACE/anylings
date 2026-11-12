@@ -209,9 +209,9 @@ pod's own loopback needs a pairing token or a bearer token, minted with
 
 ### Operator inputs and prerequisites
 
-1. **Publish the image.** Build and push `images/t3-code/` to a registry of your
-   choice and set `agents.image_repository`. The template never guesses a
-   registry, and no image is committed or published by CI.
+1. **Publish the image.** Use the trusted-main publisher below, or build and
+   push `images/t3-code/` to a registry of your choice, then set
+   `agents.image_repository`. Rendering the template never publishes an image.
 2. **Persistent state.** `agents.storage_existing_claim` names a claim you
    created, mounted at `/home/t3`. Empty means `emptyDir`, which loses the
    database and every checkout when the pod is replaced. This template creates
@@ -253,8 +253,14 @@ to `main`. It is a separate workflow from the pull-request gate, so no
 `pull_request` event and no fork can reach a package write; the job also
 requires `github.repository == 'PsiACE/anylings'` and `refs/heads/main`, and
 holds only `contents: read` plus `packages: write`. The credential is the run's
-own `GITHUB_TOKEN`, piped to `podman login --password-stdin` and never written
-to a file. No PAT, deploy key or cloud secret is involved.
+own `GITHUB_TOKEN`, piped to `podman login --password-stdin`. Podman stores
+it in a private, step-owned authfile under `RUNNER_TEMP`; an exit trap logs out
+and removes that directory on both success and failure. No PAT, deploy key or
+cloud secret is involved. The permission is job-scoped, not image-scoped.
+
+The publisher currently builds **linux/amd64 only**. The Containerfile also has
+arm64 pins for an operator-built image, but this workflow does not publish a
+multi-architecture manifest; do not deploy its tags on arm64 nodes.
 
 It pushes two tags to a path derived from the repository, not configured in the
 workflow — `ghcr.io/<owner>/<repo>/t3-code` — and records the registry digest in

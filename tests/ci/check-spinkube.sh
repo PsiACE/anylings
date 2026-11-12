@@ -38,15 +38,21 @@ first_line() {
 # --------------------------------------------------------------- render cases --
 
 render_case() {
-  local name="$1" input="$2" out="$scratch/rendered-$1"
-  mkdir -p "$out" "$scratch/$name"
-  (
-    export ANYLINGS_CONFIG="$scratch/$name/cluster.toml"
-    export ANYLINGS_OUTPUT_DIR="$out"
-    cp "$input" "$ANYLINGS_CONFIG"
-    just init platform >/dev/null
-    just configure platform >/dev/null
-  )
+  local name="$1" input="$2" out="$scratch/rendered-$1" config="$scratch/$1/cluster.toml"
+  # `set -e` does not reach into a subshell whose failure value is then ignored,
+  # and this function's output is captured with `$(...)`: a failed `just
+  # configure platform` inside a subshell used to leave the caller holding a
+  # successful-looking directory path. Every step is checked instead, and the
+  # environment is passed per command so the caller's shell keeps no state from
+  # a case that failed.
+  mkdir -p "$out" "$scratch/$name" \
+    || die "could not create the render directories for the $name case"
+  cp "$input" "$config" \
+    || die "could not copy the $name input to $config"
+  ANYLINGS_CONFIG="$config" ANYLINGS_OUTPUT_DIR="$out" just init platform >/dev/null \
+    || die "initializing the $name input failed"
+  ANYLINGS_CONFIG="$config" ANYLINGS_OUTPUT_DIR="$out" just configure platform >/dev/null \
+    || die "configuring the $name input failed"
   printf '%s\n' "$out"
 }
 
@@ -361,4 +367,24 @@ check_rejected_input() {
 }
 
 check_rejected_input
+
+# ------------------------------------------------- propagated render failure --
+
+# The masked-failure regression: a render case whose preparation succeeds but
+# whose `just configure platform` fails. That failure has to end the check, not
+# print a directory and let the later assertions read a half-written tree. The
+# input is a real validation error (`enabled` is not a boolean), so this
+# exercises the same path an operator's typo would.
+check_render_failure_propagates() {
+  local bad="$scratch/failing-input.toml"
+  printf '[repository]\nurl = "git://git.example.test/platform.git"\n[spinkube]\nenabled = "sometimes"\n' \
+    >"$bad" || die "could not write the failing render input"
+  if ( render_case failing "$bad" ) >/dev/null 2>&1; then
+    die "a render case whose configure step failed still reported success"
+  fi
+  log "a failing render case fails the check instead of printing a directory"
+}
+
+check_render_failure_propagates
+
 log "spinkube contracts passed"

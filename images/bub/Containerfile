@@ -109,7 +109,7 @@ RUN chmod 0755 /usr/local/bin/bub-entrypoint
 # components, and a label naming only one of them would misdescribe the image.
 LABEL org.opencontainers.image.title="bub" \
       org.opencontainers.image.description="Bub ACP runtime with the T3 Code web server" \
-      org.opencontainers.image.source="https://github.com/bubbuild/bub"
+      org.opencontainers.image.source="https://github.com/PsiACE/anylings"
 
 USER 65532:65532
 WORKDIR /home/t3/workspace

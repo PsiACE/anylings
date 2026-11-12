@@ -744,13 +744,15 @@ derived_bub="$(sed -nE 's/^bub\[app\]==([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$REPO_RO
 derived_t3="$(sed -nE 's/^ARG T3_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$REPO_ROOT/images/bub/Containerfile")"
 [ -n "$derived_bub" ] && [ -n "$derived_t3" ] \
     || die "the image pins do not yield a Bub and a T3 Code version"
-# The fixture renders the default tag from the template; it must be the tag the
-# publisher would produce for these pins, or a deployment would name a tag that
-# is never published.
-[ "$(yq -r '.controllers."bub".containers.app.image.tag' \
-    "$scratch/rendered-claim/kubernetes/apps/agents/bub/values.yaml")" \
-    = "bub${derived_bub}-t3web${derived_t3}" ] \
-    || die "the rendered default tag does not match the pins in images/bub"
+# The empty-claim input omits image_tag, exercising the template's default.
+# Also check the explicit fixture pin: both must name a tag the publisher
+# produces, rather than only agreeing with each other.
+for rendered in "$empty_rendered" "$claim_rendered"; do
+    [ "$(yq -r '.controllers."bub".containers.app.image.tag' \
+        "$rendered/kubernetes/apps/agents/bub/values.yaml")" \
+        = "bub${derived_bub}-t3web${derived_t3}" ] \
+        || die "the rendered runtime tag does not match the pins in images/bub"
+done
 
 # The gate never publishes: its jobs stay offline and keep contents: read.
 if grep -q 'packages: write' "$REPO_ROOT/.github/workflows/ci.yaml"; then

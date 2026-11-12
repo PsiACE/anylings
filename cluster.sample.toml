@@ -132,12 +132,12 @@ enabled = false
 
 # =============================================================================
 #    Optional SpinKube support: run Spin (WebAssembly) HTTP functions in the
-#    cluster. Disabled by default. Enabling it publishes three applications into
+#    cluster. Disabled by default. Enabling it publishes two applications into
 #    the `spinkube` namespace: cert-manager (a prerequisite of the operator's
-#    webhook certificates), the Spin operator with its two CRDs, and one sample
-#    SpinApp plus the Spintainer executor that runs it. Everything is
-#    ClusterIP-only; no runtime class, node shim or privileged installer is
-#    involved because the executor runs Spin inside an ordinary container.
+#    webhook certificates) and the Spin operator with its two CRDs, its
+#    Spintainer executor and one sample SpinApp. Everything is ClusterIP-only;
+#    no runtime class, node shim or privileged installer is involved because the
+#    executor runs Spin inside an ordinary container.
 # =============================================================================
 [spinkube]
 

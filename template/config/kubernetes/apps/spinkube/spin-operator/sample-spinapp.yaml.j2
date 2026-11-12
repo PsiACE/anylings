@@ -1,8 +1,27 @@
 #% if spinkube.enabled %#
 ---
 # One sample function so enabling the feature produces a running app, not just a
-# controller. The image is the pinned public example the SpinKube docs use: a
-# Spin HTTP component with the /hello and /go-hello routes.
+# controller.
+#
+# The image must be a Spin registry application: an OCI artifact whose layers
+# are the component (`application/vnd.wasm.content.layer.v1+wasm`) and the
+# locked `spin.toml` (`application/vnd.fermyon.spin.application.v1+config`).
+# The Spintainer executor runs `spin up ... -f <this image>`, and Spin only
+# accepts that artifact shape. The containerd-shim-spin example image this file
+# used first (`.../containerd-shim-spin/examples/spin-rust-hello:v0.13.0`) is a
+# Docker/WASI rootfs image instead: its layers are a Docker config and a gzipped
+# rootfs, so the pinned runtime rejected it with `failed to decode locked app
+# ... missing field spin_lock_version` and served nothing.
+#
+# The reference below is the operator's own 0.6.1 end-to-end sample. It was run
+# here through the exact Spintainer command line this executor produces
+# (`spin up --listen 0.0.0.0:80 -f <image> --runtime-config-file
+# /runtime-config.toml` with `SPIN_HTTP_LISTEN_ADDR`/`SPIN_MAX_INSTANCE_MEMORY`)
+# inside ghcr.io/fermyon/spin:v2.7.0 over loopback and answered
+# `200` `Hello Fermyon!` at `/`. The digest pins that tested artifact; a moved
+# tag is therefore not silently accepted. Keep this pairing when touching either
+# the executor's spinImage or this reference: a Spin app artifact and the
+# runtime that decodes it are validated together, not separately.
 #
 # No RuntimeClass is set: with the Spintainer executor the operator builds a
 # normal Deployment from the executor's spinImage, so this workload needs no
@@ -20,17 +39,20 @@ metadata:
     # first pass.
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
-  image: ghcr.io/spinkube/containerd-shim-spin/examples/spin-rust-hello:v0.13.0
+  image: ghcr.io/spinframework/spin-operator/hello-world@sha256:972e27774e7e066a0939585b56e0b91da302424c11a163a1712209d2429dccba
   executor: spintainer
   # One replica: this is a smoke-test app. The Service the operator creates is
   # ClusterIP, so nothing here is reachable from outside the cluster.
   replicas: 1
-  # Bounded like every other workload in this template. The wasm module is small
-  # but the runtime still needs room for its own allocations.
+  # Bounded like every other workload in this template. The ceiling is measured,
+  # not guessed: the pinned runtime plus this app held a resident peak of about
+  # 112MiB while serving the recorded probe, so the previous 128Mi left almost
+  # no headroom and 256Mi keeps a full runtime from being one allocator step
+  # away from OOM.
   resources:
     limits:
       cpu: 250m
-      memory: 128Mi
+      memory: 256Mi
     requests:
       cpu: 25m
       memory: 64Mi

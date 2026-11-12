@@ -179,9 +179,13 @@ check_operator_manifests() {
     || die "the sample app does not reference the executor $executor_name"
   yq -e 'select(.kind == "SpinApp") | .metadata.namespace == "spinkube"' "$sample" >/dev/null \
     || die "the sample app is not in the executor's namespace"
+  # A digest, not a tag: the app artifact must be the exact one the pinned
+  # runtime was proven to decode and serve, and this check cannot repeat that
+  # runtime proof offline, so it must at least refuse a reference that can move
+  # under it. See the comment in the sample for the recorded run.
   yq -e 'select(.kind == "SpinApp")
-    | .spec.image | test(":v[0-9]+\\.[0-9]+\\.[0-9]+$")' "$sample" >/dev/null \
-    || die "the sample app image is not pinned to a version tag"
+    | .spec.image | test("@sha256:[0-9a-f]{64}$")' "$sample" >/dev/null \
+    || die "the sample app image is not pinned to a digest"
   yq -e 'select(.kind == "SpinApp") | .spec.resources.limits.memory' "$sample" >/dev/null \
     || die "the sample app has no memory limit"
 

@@ -138,6 +138,10 @@ phase_git() {
 phase_configure() {
   sed "s|^url = .*|url = \"$GIT_SYNC_URL\"|" \
     "$REPO_ROOT/tests/config/base.toml" >"$ANYLINGS_CONFIG"
+  # The connector is baseline, so the rendered platform always needs a token
+  # file. This is a synthetic value, never a credential.
+  mkdir -p "$STATE/.local"
+  printf 'synthetic-ci-tunnel-token\n' >"$STATE/.local/tunnel.token"
   just init platform
   just configure platform
   E2E_ARGOCD_NS="$(yq -r '.metadata.namespace' "$RENDERED/kubernetes/bootstrap.yaml")"
@@ -219,6 +223,10 @@ assert_apps() {
   [ "$(jq 'length' <<<"$expected")" -gt 0 ] || die "no workload config.json was published"
   # One API snapshot: no per-object requests or duplicate existence passes.
   # Include the expected apps so an empty or partially created list cannot pass.
+  # The Cloudflare Tunnel connector is baseline, but this runner has no
+  # Cloudflare account, so cloudflared never reaches the edge. The exception
+  # list names it: it must still be Synced at the pushed revision, and only the
+  # credential-free apps must be Healthy.
   until kc --namespace "$E2E_ARGOCD_NS" get applications -o json | jq -e \
     --arg rev "$E2E_REVISION" --argjson expected "$expected" \
     --arg excused "$CREDENTIAL_FREE_EXCEPTIONS" '

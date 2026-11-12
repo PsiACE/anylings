@@ -43,7 +43,7 @@ unset TF_DATA_DIR
 # Both supported render inputs, each in its own private directory, then the
 # repository's own confidentiality and Kubernetes schema checks. Nothing is
 # written to the checkout: no age identity, no rendered plaintext.
-for config in base cloudflare-tunnel; do
+for config in base repository-prefix; do
   log "platform render ($config)"
   inputs="$work/inputs-$config"
   mkdir -p "$inputs"
@@ -52,11 +52,10 @@ for config in base cloudflare-tunnel; do
   export ANYLINGS_OUTPUT_DIR="$work/rendered-$config"
   export ANYLINGS_BOOTSTRAP_MANIFESTS_DIR="$work/bootstrap-manifests-$config"
   cp "tests/config/$config.toml" "$ANYLINGS_CONFIG"
-  if [ "$config" = cloudflare-tunnel ]; then
-    # Same synthetic token the workflow writes; check-render.sh greps for it.
-    mkdir -p "$inputs/.local"
-    printf 'synthetic-ci-tunnel-token\n' >"$inputs/.local/tunnel.token"
-  fi
+  # The connector is baseline, so every case needs the token file; this is a
+  # synthetic value, never a credential, and check-render.sh greps for it.
+  mkdir -p "$inputs/.local"
+  printf 'synthetic-ci-tunnel-token\n' >"$inputs/.local/tunnel.token"
   just init platform
   just configure platform
   bash tests/ci/check-render.sh "$config"

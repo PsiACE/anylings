@@ -9,10 +9,13 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 umask 077
 
+# shellcheck source=tests/ci/fixture-input.sh
+. tests/ci/fixture-input.sh
+
 export ANYLINGS_CONFIG="$scratch/cluster.toml"
 export ANYLINGS_OUTPUT_DIR="$scratch/rendered"
 export SOPS_AGE_KEY_FILE="$scratch/age.key"
-cp tests/config/base.toml "$ANYLINGS_CONFIG"
+prepare_platform_input tests/config/base.toml "$scratch" >/dev/null
 
 just init platform >"$scratch/init.log" 2>&1
 just configure platform >"$scratch/configure.log" 2>&1
@@ -84,9 +87,7 @@ ANYLINGS_OUTPUT_DIR="$dir" just check platform >/dev/null 2>&1 \
 # A configured prefix must be present on every reference, so a value written
 # without it cannot silently point at another location.
 prefixed="$scratch/prefixed"
-mkdir -p "$prefixed/.local"
-printf 'synthetic\n' > "$prefixed/.local/tunnel.token"
-cp tests/config/cloudflare-tunnel.toml "$prefixed/cluster.toml"
+prepare_platform_input tests/config/repository-prefix.toml "$prefixed" >/dev/null
 if ! ANYLINGS_CONFIG="$prefixed/cluster.toml" ANYLINGS_OUTPUT_DIR="$prefixed/rendered" \
   SOPS_AGE_KEY_FILE="$scratch/age.key" just configure platform >/dev/null 2>&1; then
   echo "prefixed input did not render" >&2

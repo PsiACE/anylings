@@ -59,18 +59,12 @@
     "Ingress": {
       "additionalProperties": false,
       "properties": {
-        "mode": {
-          "default": "none",
-          "enum": ["none", "cloudflare-tunnel"],
-          "title": "Mode",
-          "type": "string"
-        },
         "tunnel_token_file": {
-          "default": "",
           "title": "Tunnel Token File",
           "type": "string"
         }
       },
+      "required": ["tunnel_token_file"],
       "title": "Ingress",
       "type": "object"
     },
@@ -158,11 +152,7 @@
       }
     },
     "ingress": {
-      "$ref": "#/$defs/Ingress",
-      "default": {
-        "mode": "none",
-        "tunnel_token_file": ""
-      }
+      "$ref": "#/$defs/Ingress"
     },
     "magpie": {
       "$ref": "#/$defs/Magpie",
@@ -195,7 +185,7 @@
       "default": null
     }
   },
-  "required": ["repository"],
+  "required": ["repository", "ingress"],
   "title": "cluster.toml",
   "type": "object"
 }

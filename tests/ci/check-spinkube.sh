@@ -27,6 +27,9 @@ chmod 700 "$scratch"
 
 export SOPS_AGE_KEY_FILE="$scratch/age.key"
 
+# shellcheck source=tests/ci/fixture-input.sh
+. tests/ci/fixture-input.sh
+
 # A here-string comparison, not `command | grep -q`: grep closing its input
 # early would send SIGPIPE and `pipefail` would report a passing match as a
 # failed pipeline.
@@ -38,17 +41,19 @@ first_line() {
 # --------------------------------------------------------------- render cases --
 
 render_case() {
-  local name="$1" input="$2" out="$scratch/rendered-$1" config="$scratch/$1/cluster.toml"
+  local name="$1" input="$2" out="$scratch/rendered-$1"
   # `set -e` does not reach into a subshell whose failure value is then ignored,
   # and this function's output is captured with `$(...)`: a failed `just
   # configure platform` inside a subshell used to leave the caller holding a
   # successful-looking directory path. Every step is checked instead, and the
   # environment is passed per command so the caller's shell keeps no state from
   # a case that failed.
-  mkdir -p "$out" "$scratch/$name" \
-    || die "could not create the render directories for the $name case"
-  cp "$input" "$config" \
-    || die "could not copy the $name input to $config"
+  # The helper copies the fixture beside a synthetic baseline tunnel token, so
+  # the required [ingress] input resolves without touching the checkout.
+  local config
+  mkdir -p "$out" || die "could not create the render directory for the $name case"
+  config="$(prepare_platform_input "$input" "$scratch/$name")" \
+    || die "could not prepare the $name input"
   ANYLINGS_CONFIG="$config" ANYLINGS_OUTPUT_DIR="$out" just init platform >/dev/null \
     || die "initializing the $name input failed"
   ANYLINGS_CONFIG="$config" ANYLINGS_OUTPUT_DIR="$out" just configure platform >/dev/null \
@@ -352,7 +357,7 @@ check_operator_chart
 check_rejected_input() {
   local config="$scratch/invalid.toml" case_name
   for case_name in 'enabled = "sometimes"' 'runtime_class = "wasmtime"' 'chart_version = "9.9.9"'; do
-    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[spinkube]\n%s\n' \
+    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[spinkube]\n%s\n' \
       "$case_name" >"$config"
     if ANYLINGS_CONFIG="$config" just check config >/dev/null 2>&1; then
       die "the config validator accepted [spinkube] $case_name"
@@ -360,7 +365,7 @@ check_rejected_input() {
   done
   # And the enabled flag itself must stay a boolean, so `[spinkube] enabled` with
   # no value (which TOML rejects) is not the only thing that fails.
-  printf '[repository]\nurl = "git://git.example.test/platform.git"\n[spinkube]\nenabled = true\n' \
+  printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[spinkube]\nenabled = true\n' \
     >"$config"
   ANYLINGS_CONFIG="$config" just check config >/dev/null \
     || die "the config validator rejected a valid [spinkube] section"
@@ -378,7 +383,7 @@ check_rejected_input
 # exercises the same path an operator's typo would.
 check_render_failure_propagates() {
   local bad="$scratch/failing-input.toml"
-  printf '[repository]\nurl = "git://git.example.test/platform.git"\n[spinkube]\nenabled = "sometimes"\n' \
+  printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[spinkube]\nenabled = "sometimes"\n' \
     >"$bad" || die "could not write the failing render input"
   if ( render_case failing "$bad" ) >/dev/null 2>&1; then
     die "a render case whose configure step failed still reported success"

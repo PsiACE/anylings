@@ -18,10 +18,14 @@ umask 077
 log() { printf '[gateway] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
+# shellcheck source=tests/ci/fixture-input.sh
+. tests/ci/fixture-input.sh
+
 age-keygen --output "$scratch/age.key" >/dev/null 2>&1
-# Fixture inputs live beside the copied config so its relative paths resolve.
+# Fixture inputs live beside the copied config so its relative paths resolve;
+# the helper also supplies the synthetic baseline tunnel token.
 mkdir -p "$scratch/input/secret-inputs"
-cp tests/config/gateway.toml "$scratch/input/cluster.toml"
+prepare_platform_input tests/config/gateway.toml "$scratch/input" >/dev/null
 printf '{"providers": [], "groups": [], "order": [], "groupOrder": [], "noAutoGroups": false}\n' \
   >"$scratch/input/secret-inputs/providers.json"
 printf '[{"id": "synthetic", "name": "fixture", "secret": "sk-magpie-key-synthetic-fixture"}]\n' \
@@ -78,7 +82,8 @@ fi
 
 # Defaults must stay inert: the base input publishes neither Secret.
 base="$scratch/base"
-if ! ANYLINGS_CONFIG="tests/config/base.toml" ANYLINGS_OUTPUT_DIR="$base" \
+prepare_platform_input tests/config/base.toml "$scratch/base-input" >/dev/null
+if ! ANYLINGS_CONFIG="$scratch/base-input/cluster.toml" ANYLINGS_OUTPUT_DIR="$base" \
   SOPS_AGE_KEY_FILE="$scratch/age.key" just template configure \
   >"$scratch/base.log" 2>&1; then
   cat "$scratch/base.log" >&2
@@ -93,7 +98,7 @@ done
 
 # A gateway key that the gateway itself never learned only yields 401s, so the
 # validator must refuse that half-configured input.
-printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "registry.example.test/anylings/bub"\ngateway_secret = "k"\n' \
+printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[agents]\nimage_repository = "registry.example.test/anylings/bub"\ngateway_secret = "k"\n' \
   >"$scratch/half.toml"
 if ANYLINGS_CONFIG="$scratch/half.toml" just check config >/dev/null 2>&1; then
   die "the validator accepted agents.gateway_secret without magpie.seed_dir"

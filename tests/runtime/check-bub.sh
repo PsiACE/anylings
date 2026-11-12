@@ -42,6 +42,16 @@ die() {
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
+# The platform baseline always publishes the Cloudflare Tunnel connector, so
+# every input names a token file. The helper copies a repository fixture beside
+# a synthetic token, keeping the checkout untouched and the value unsecret.
+# shellcheck source=tests/ci/fixture-input.sh
+. tests/ci/fixture-input.sh
+# Inline inputs written directly under $scratch name the same relative token
+# file, so one synthetic token covers every case here.
+mkdir -p "$scratch/.local"
+printf 'synthetic-ci-tunnel-token\n' >"$scratch/.local/tunnel.token"
+
 # ------------------------------------------------------- image definition --
 
 log "check the image pins and the entrypoint contract"
@@ -176,7 +186,8 @@ grep -q 'refusing to run as root' "$scratch/err" || die "the root refusal was no
 # blocking on a registry. The omitted case is the shared base input, so it stays
 # the same fixture the render job uses instead of a second copy of it.
 (
-    export ANYLINGS_CONFIG="$REPO_ROOT/tests/config/base.toml"
+    ANYLINGS_CONFIG="$(prepare_platform_input "$REPO_ROOT/tests/config/base.toml" "$scratch/input-without")"
+    export ANYLINGS_CONFIG
     export ANYLINGS_OUTPUT_DIR="$scratch/rendered-without"
     export SOPS_AGE_KEY_FILE="$scratch/age.key"
     just init platform >/dev/null
@@ -201,7 +212,8 @@ log "render the template and validate it as app-template input"
 # The claim-enabled case is the repository's own agents fixture, not a private
 # copy: a check against a different input could pass while the published
 # fixture renders something else.
-export ANYLINGS_CONFIG="$REPO_ROOT/tests/config/agents.toml"
+ANYLINGS_CONFIG="$(prepare_platform_input "$REPO_ROOT/tests/config/agents.toml" "$scratch/input-claim")"
+export ANYLINGS_CONFIG
 export ANYLINGS_OUTPUT_DIR="$scratch/rendered-claim"
 export SOPS_AGE_KEY_FILE="$scratch/age.key"
 just init platform >/dev/null
@@ -224,6 +236,9 @@ cat >"$scratch/empty-claim.toml" <<'TOML'
 [repository]
 url = "git://git.example.test/platform.git"
 
+[ingress]
+tunnel_token_file = ".local/tunnel.token"
+
 [agents]
 image_repository = "registry.example.test/anylings/bub"
 storage_existing_claim = ""
@@ -245,7 +260,7 @@ invalid_claims=(
     "$(printf 'a%.0s' {1..64})"  # single label beyond 63
 )
 for invalid in "${invalid_claims[@]}"; do
-    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "registry.example.test/anylings/bub"\nstorage_existing_claim = "%s"\n' \
+    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[agents]\nimage_repository = "registry.example.test/anylings/bub"\nstorage_existing_claim = "%s"\n' \
         "$invalid" >"$scratch/invalid.toml"
     if ANYLINGS_CONFIG="$scratch/invalid.toml" just check config >/dev/null 2>&1; then
         die "the config validator accepted the invalid claim name '${invalid:0:40}'"
@@ -771,6 +786,9 @@ cat >"$scratch/pinned.toml" <<TOML
 [repository]
 url = "git://git.example.test/platform.git"
 
+[ingress]
+tunnel_token_file = ".local/tunnel.token"
+
 [agents]
 image_repository = "ghcr.io/psiace/anylings/bub"
 image_tag = "sha-0123456789abcdef"
@@ -813,7 +831,7 @@ bad_digests=(
     "$(printf 'a%.0s' {1..64})"
 )
 for bad in "${bad_digests[@]}"; do
-    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "ghcr.io/psiace/anylings/bub"\nimage_digest = "%s"\n' \
+    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[agents]\nimage_repository = "ghcr.io/psiace/anylings/bub"\nimage_digest = "%s"\n' \
         "$bad" >"$scratch/bad-digest.toml"
     if ANYLINGS_CONFIG="$scratch/bad-digest.toml" just check config >/dev/null 2>&1; then
         die "the config validator accepted the invalid digest '${bad:0:24}...'"

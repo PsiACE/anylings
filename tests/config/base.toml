@@ -1,2 +1,7 @@
 [repository]
 url = "git://git.example.test/platform.git"
+
+# The Cloudflare Tunnel connector is part of the baseline, so every input
+# names a token file. CI writes a synthetic token here before rendering.
+[ingress]
+tunnel_token_file = ".local/tunnel.token"

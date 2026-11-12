@@ -81,8 +81,9 @@ jobs:
       - name: Check the gateway wiring re-renders
         run: bash tests/ci/check-gateway-wiring.sh
 
-  # Rendering checks use no cloud credentials. The tunnel case supplies only
-  # a synthetic file and verifies its encrypted Secret source with a repo prefix.
+  # Rendering checks use no cloud credentials. Every case supplies a synthetic
+  # tunnel token file, because the connector is part of the baseline; the
+  # repository-prefix case also exercises a Git subdirectory.
   render-platform:
     if: ${{ github.repository == 'PsiACE/anylings' }}
     name: platform render (${{ matrix.config }})
@@ -94,7 +95,7 @@ jobs:
       matrix:
         config:
           - base
-          - cloudflare-tunnel
+          - repository-prefix
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,10 +121,8 @@ jobs:
           export ANYLINGS_CONFIG="$inputs/cluster.toml"
           export SOPS_AGE_KEY_FILE="$inputs/age.key"
           cp "./tests/config/${{ matrix.config }}.toml" "$ANYLINGS_CONFIG"
-          if [ "${{ matrix.config }}" = cloudflare-tunnel ]; then
-            mkdir "$inputs/.local"
-            printf 'synthetic-ci-tunnel-token\n' > "$inputs/.local/tunnel.token"
-          fi
+          mkdir "$inputs/.local"
+          printf 'synthetic-ci-tunnel-token\n' > "$inputs/.local/tunnel.token"
           echo "ANYLINGS_CONFIG=$ANYLINGS_CONFIG" >> "$GITHUB_ENV"
           echo "SOPS_AGE_KEY_FILE=$SOPS_AGE_KEY_FILE" >> "$GITHUB_ENV"
           just init platform
@@ -132,7 +131,8 @@ jobs:
         run: just configure platform
 
       # The confidentiality, formatting and partial-encryption assertions live
-      # in one script so tests/ci/local-gate.sh cannot drift from this job.
+      # in one script so tests/ci/local-gate.sh cannot drift from this job. It
+      # also proves the tunnel Secret decrypts from the configured Git prefix.
       - name: Run render assertions
         run: bash tests/ci/check-render.sh "${{ matrix.config }}"
 
@@ -291,10 +291,11 @@ jobs:
             disposable fixtures around
             the shared platform implementation: an owned k0s cluster, local-path storage, an upstream read-only Git
             daemon, the rendered bootstrap, and the OpenTofu bootstrap Application and ApplicationSet-generated
-            children, then asserts Synced+Healthy at the pushed revision, a KSOPS-decrypted Secret, the magpie gateway
-            answering and refusing unkeyed remote callers, Git-driven ApplicationSet deletion/recreation, PVC data
-            restore and a repeat no-op. Its result, when present, is advisory evidence of runtime behavior, not proof of
-            cloud, CSI or ingress behavior.
+            children, then asserts Synced status at the pushed revision for every application and Healthy status for
+            the credential-free ones, a KSOPS-decrypted Secret, the magpie gateway answering and refusing unkeyed
+            remote callers, Git-driven ApplicationSet deletion/recreation, PVC data restore and a repeat no-op. Its
+            result, when present, is advisory evidence of runtime behavior, not proof of cloud, CSI or ingress
+            behavior.
             Ignore the Landing review job when assessing native check completion.
             Review affected user-visible behavior against repository guidance. Reuse these check results and
             relevant review history; investigate unresolved questions and publish useful findings or a brief

@@ -1,6 +1,12 @@
 [repository]
 url = "git://git.example.test/platform.git"
 
+# The Cloudflare Tunnel connector is part of the baseline, so every input names
+# its token file. CI writes a synthetic token beside this input before
+# rendering; the file is never a real credential.
+[ingress]
+tunnel_token_file = ".local/tunnel.token"
+
 # The opt-in shared gateway: the render seeds Magpie's own two stores and wires
 # the agent runtime to it. Both files hold synthetic values that exist only in
 # this fixture; CI writes them beside this config before rendering.

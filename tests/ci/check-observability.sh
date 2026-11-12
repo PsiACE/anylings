@@ -26,6 +26,9 @@ chmod 700 "$scratch"
 
 export SOPS_AGE_KEY_FILE="$scratch/age.key"
 
+# shellcheck source=tests/ci/fixture-input.sh
+. tests/ci/fixture-input.sh
+
 # Every check below compares against a captured string with a here-string rather
 # than a `command | grep -q` pipeline. `grep -q` closes its input as soon as it
 # matches, which sends SIGPIPE to the producing command, and `pipefail` would
@@ -40,13 +43,14 @@ first_line() {
 # Render one supported configuration input through the normal platform entry
 # points, into its own output directory.
 render_case() {
-  local name="$1" input="$2" out="$scratch/rendered-$1"
-  mkdir -p "$out"
+  local name="$1" input="$2" out="$scratch/rendered-$1" config
+  mkdir -p "$out" || die "could not create the $name output directory"
+  # The helper also writes the synthetic baseline tunnel token beside the copy.
+  config="$(prepare_platform_input "$input" "$scratch/$name")" \
+    || die "could not prepare the $name input"
   (
-    export ANYLINGS_CONFIG="$scratch/$name/cluster.toml"
+    export ANYLINGS_CONFIG="$config"
     export ANYLINGS_OUTPUT_DIR="$out"
-    mkdir -p "$scratch/$name"
-    cp "$input" "$ANYLINGS_CONFIG"
     just init platform >/dev/null
     just configure platform >/dev/null
   )

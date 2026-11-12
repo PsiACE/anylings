@@ -174,9 +174,32 @@ before publishing it.
 3. **Gateway keys.** Mint one per client with `magpie gateway-key add <name>`
    inside the pod and give it to that client as `Authorization: Bearer <key>`.
    Upstream generates the value, so it is never committed.
-4. **Reaching the gateway.** The Service is cluster-internal. Publishing it
+4. **A rendered seed, instead of hand edits.** Naming a directory that holds the
+   gateway's own two stores makes the render produce them:
+
+    ```toml
+    [magpie]
+    seed_dir = "secret-inputs"   # providers.json, caller-keys.json
+    ```
+
+    That renders the `magpie-seed` Secret, the KSOPS generator that decrypts it,
+    a `kustomization.yaml` carrying it, and `manifestPath` in the Application's
+    `config.json` — without which the Secret would be published but never
+    applied. An init container copies each file into `/config/magpie` **only when
+    absent**, so a restart never overwrites keys or providers the running gateway
+    has since changed. Leaving `seed_dir` empty renders none of it.
+
+    The same input is what lets an agent runtime reach the gateway without a
+    provider credential of its own: `agents.gateway_secret` names a file holding
+    one issued gateway key, and the render emits the `t3-code-magpie-gateway`
+    Secret plus a `secretKeyRef` for it. Setting one without the other is
+    rejected, because a key the gateway never learned only yields 401s.
+
+5. **Reaching the gateway.** The Service is cluster-internal. Publishing it
    beyond the cluster is an ingress decision made elsewhere, and any public route
-   must keep gateway-key authentication on.
+   must keep gateway-key authentication on. Upstream serves its management page
+   on a separate port (`3430`) which also forwards the gateway's client routes,
+   so one proxied hostname can serve both — but that port is not rendered here.
 
 The rehearsal covers rendering, reconciliation and gateway-key enforcement. It
 does not cover vendor access, durable storage or public exposure. The
@@ -379,10 +402,18 @@ the same base input.
 The optional application slices add focused checks rather than more shared
 render cases, because each needs its own pinned chart:
 `tests/ci/check-magpie-config-claim.sh` (the Magpie `/config` claim),
-`tests/ci/check-observability.sh` (the disabled-by-default slice) and
-`tests/runtime/check-t3-code.sh` (the agent runtime). Each renders its own
-`tests/config/` fixture through `just configure platform`, so `base` still
-covers a cluster with every optional slice omitted.
+`tests/ci/check-gateway-wiring.sh` (the rendered gateway Secrets and the
+runtime's gateway env), `tests/ci/check-observability.sh` (the
+disabled-by-default slice) and `tests/runtime/check-t3-code.sh` (the agent
+runtime). Each renders its own `tests/config/` fixture through
+`just configure platform`, so `base` still covers a cluster with every optional
+slice omitted.
+
+`tests/ci/check-gateway-wiring.sh` asserts the property those Secrets exist for:
+a re-render reproduces them, both Applications render their kustomize
+directory, the runtime reads its key from a `secretKeyRef`, the seed copies only
+when absent, and an input without a gateway publishes neither Secret nor a
+`manifestPath`. It fails if any of that is hand-edited back into the tree.
 
 `tests/runtime/check-t3-code.sh` covers both agent-runtime volume branches
 (`emptyDir` and an existing claim) and fails when the pinned chart cannot be

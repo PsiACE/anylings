@@ -6,6 +6,10 @@
   "chart": "app-template",
   "chartVersion": "5.3.0",
   "valuesFile": #{ repository_path('kubernetes/apps/agents/t3-code/values.yaml') | tojson }#,
+  #% if agents.gateway_secret %#
+  "manifestPath": #{ repository_path('kubernetes/apps/agents/t3-code') | tojson }#
+  #% else %#
   "manifestPath": ""
+  #% endif %#
 }
 #% endif %#

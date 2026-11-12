@@ -75,6 +75,12 @@ jobs:
       - name: Check the optional SpinKube slice
         run: bash tests/ci/check-spinkube.sh
 
+      # The shared-gateway Secrets and the runtime's gateway env used to be hand
+      # edits, so a re-render dropped them. This asserts that the render itself
+      # reproduces them, and that an input without a gateway publishes neither.
+      - name: Check the gateway wiring re-renders
+        run: bash tests/ci/check-gateway-wiring.sh
+
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.
   render-platform:

@@ -5,5 +5,9 @@
   "chart": "app-template",
   "chartVersion": "5.3.0",
   "valuesFile": #{ repository_path('kubernetes/apps/default/magpie/values.sops.yaml') | tojson }#,
+  #% if magpie.seed_dir %#
+  "manifestPath": #{ repository_path('kubernetes/apps/default/magpie') | tojson }#
+  #% else %#
   "manifestPath": ""
+  #% endif %#
 }

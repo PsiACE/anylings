@@ -1,0 +1,14 @@
+[repository]
+url = "git://git.example.test/platform.git"
+
+# The opt-in shared gateway: the render seeds Magpie's own two stores and wires
+# the agent runtime to it. Both files hold synthetic values that exist only in
+# this fixture; CI writes them beside this config before rendering.
+[magpie]
+seed_dir = "secret-inputs"
+
+[agents]
+image_repository = "registry.example.test/anylings/t3-code"
+image_tag = "0.1.8"
+storage_existing_claim = "t3-code-state"
+gateway_secret = "secret-inputs/magpie-gateway-key"

@@ -1,0 +1,56 @@
+#% if spinkube.enabled %#
+---
+# cert-manager is a hard prerequisite of the Spin operator: its chart templates
+# a self-signed Issuer and a Certificate, and annotates both admission webhook
+# configurations with cert-manager.io/inject-ca-from. Without a running
+# cert-manager the operator pod never mounts its webhook certificate.
+#
+# The CRDs are installed by this chart's own crds.enabled template, so no second
+# copy is vendored here: a vendored copy and a chart upgrade would drift apart.
+crds:
+  enabled: true
+  # No keep annotation. Removing this Application must remove the CRDs it
+  # installed, like every other Git-owned resource: an orphaned keep would be a
+  # second, silent retention mode for cluster-scoped objects. The certificates
+  # they describe are recreated by cert-manager, so nothing is lost.
+  keep: false
+
+# One replica per component: this slice installs a webhook prerequisite, not a
+# certificate authority for a fleet. Every component is bounded, so a stuck
+# rollout cannot consume an unbounded share of a small node.
+replicaCount: 1
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+webhook:
+  replicaCount: 1
+  # ClusterIP only; the chart default is already ClusterIP, stated here so a
+  # chart upgrade that widened it would show up in this file's review.
+  serviceType: ClusterIP
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+cainjector:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi
+# The post-install API check is a one-shot Job that reads the CRDs it just
+# installed; it is bounded and leaves nothing behind.
+startupapicheck:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+#% endif %#

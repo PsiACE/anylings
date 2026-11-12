@@ -121,6 +121,18 @@
       "required": ["url"],
       "title": "Repository",
       "type": "object"
+    },
+    "Spinkube": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "Spinkube",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -150,6 +162,12 @@
     },
     "observability": {
       "$ref": "#/$defs/Observability",
+      "default": {
+        "enabled": false
+      }
+    },
+    "spinkube": {
+      "$ref": "#/$defs/Spinkube",
       "default": {
         "enabled": false
       }

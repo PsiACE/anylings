@@ -64,6 +64,12 @@ jobs:
       - name: Check the optional observability slice
         run: bash tests/ci/check-observability.sh
 
+      # Same shape for the optional SpinKube slice: the pinned cert-manager and
+      # Spin operator charts plus the vendored CRDs are rendered from an enabled
+      # input, and the disabled input must publish nothing. Offline.
+      - name: Check the optional SpinKube slice
+        run: bash tests/ci/check-spinkube.sh
+
   # Rendering checks use no cloud credentials. The tunnel case supplies only
   # a synthetic file and verifies its encrypted Secret source with a repo prefix.
   render-platform:

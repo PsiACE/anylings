@@ -1,0 +1,38 @@
+#% if spinkube.enabled %#
+---
+# The Spin operator chart. Its CRDs are not part of the chart, so they are
+# vendored next to this file and installed by the same Application (Argo
+# applies CustomResourceDefinition before Deployment, so the controller starts
+# with its CRDs already present).
+#
+# The chart templates a self-signed Issuer and a Certificate, and annotates both
+# admission webhook configurations with cert-manager.io/inject-ca-from: the
+# cert-manager Application must be running, or this Deployment stays Pending on
+# its missing webhook-server-cert secret. Argo retries the automated sync until
+# that converges; nothing here needs a manual step.
+kubernetesClusterDomain: cluster.local
+
+controllerManager:
+  replicas: 1
+  manager:
+    image:
+      repository: ghcr.io/spinframework/spin-operator
+      # Left to the chart's appVersion (v0.6.1) on purpose: a tag that drifts
+      # from the chart version is not a supported combination.
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+    # No pod-level securityContext value exists in this chart version: its
+    # Deployment already hardcodes runAsNonRoot and drops every capability, and
+    # the seccomp profile stays the cluster default rather than being implied
+    # here by a value the chart would ignore.
+# Both Services stay ClusterIP: the webhook is reached in-cluster through
+# cert-manager's injected CA bundle, never from outside the cluster.
+metricsService:
+  type: ClusterIP
+webhookService:
+  type: ClusterIP
+#% endif %#

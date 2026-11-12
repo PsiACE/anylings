@@ -207,6 +207,15 @@ class Observability(Model):
     enabled: bool = False
 
 
+class Spinkube(Model):
+    # Off by default: the slice installs a cluster-scoped operator, a
+    # cert-manager instance and admission webhooks, so it never appears in a
+    # cluster that did not ask for it. Enabling it deploys cert-manager, the
+    # Spin operator with its CRDs, a Spintainer executor and one sample app,
+    # all in the `spinkube` namespace, reachable by ClusterIP only.
+    enabled: bool = False
+
+
 class Config(Model):
     model_config = ConfigDict(extra="forbid", title="cluster.toml")
 
@@ -215,6 +224,7 @@ class Config(Model):
     ingress: Ingress = Ingress()
     magpie: Magpie = Magpie()
     observability: Observability = Observability()
+    spinkube: Spinkube = Spinkube()
     # Optional: a cluster without an operator-supplied registry simply has no
     # agent runtime. Making it required would block every existing deployment
     # and the native rehearsal on a registry that does not exist there.

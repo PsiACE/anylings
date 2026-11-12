@@ -1,0 +1,17 @@
+#% if spinkube.enabled %#
+---
+# The operator's own resources: the CRDs its chart does not ship, the executor
+# that defines how a Spin app runs, and one sample app. The operator Deployment
+# comes from the pinned chart in the same Application, so one Application owns
+# the whole "run a Spin function" responsibility.
+#
+# Waves order the kinds Argo cannot infer: the CRDs must exist before the
+# executor and app, and the operator's webhook is configured by the chart.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: spinkube
+resources:
+  - ./crds.yaml
+  - ./executor.yaml
+  - ./sample-spinapp.yaml
+#% endif %#

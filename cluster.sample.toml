@@ -128,3 +128,19 @@ enabled = false
 # creates the claim, so its size and StorageClass stay an explicit choice.
 # OPTIONAL. Default: "" (ephemeral)
 # storage_existing_claim = ""
+
+
+# =============================================================================
+#    Optional SpinKube support: run Spin (WebAssembly) HTTP functions in the
+#    cluster. Disabled by default. Enabling it publishes three applications into
+#    the `spinkube` namespace: cert-manager (a prerequisite of the operator's
+#    webhook certificates), the Spin operator with its two CRDs, and one sample
+#    SpinApp plus the Spintainer executor that runs it. Everything is
+#    ClusterIP-only; no runtime class, node shim or privileged installer is
+#    involved because the executor runs Spin inside an ordinary container.
+# =============================================================================
+[spinkube]
+
+# OPTIONAL. Default: false
+# enabled = true
+enabled = false

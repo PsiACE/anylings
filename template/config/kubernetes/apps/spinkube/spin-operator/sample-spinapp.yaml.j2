@@ -1,0 +1,41 @@
+#% if spinkube.enabled %#
+---
+# One sample function so enabling the feature produces a running app, not just a
+# controller. The image is the pinned public example the SpinKube docs use: a
+# Spin HTTP component with the /hello and /go-hello routes.
+#
+# No RuntimeClass is set: with the Spintainer executor the operator builds a
+# normal Deployment from the executor's spinImage, so this workload needs no
+# shim on the node.
+apiVersion: core.spinkube.dev/v1alpha1
+kind: SpinApp
+metadata:
+  name: hello
+  namespace: spinkube
+  annotations:
+    # After the CRDs (wave -1) and the executor (wave 1).
+    argocd.argoproj.io/sync-wave: "2"
+    # Same reason as the executor: the SpinApp kind is installed by this
+    # Application's own crds.yaml, so the dry run has to tolerate it in the
+    # first pass.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  image: ghcr.io/spinkube/containerd-shim-spin/examples/spin-rust-hello:v0.13.0
+  executor: spintainer
+  # One replica: this is a smoke-test app. The Service the operator creates is
+  # ClusterIP, so nothing here is reachable from outside the cluster.
+  replicas: 1
+  # Bounded like every other workload in this template. The wasm module is small
+  # but the runtime still needs room for its own allocations.
+  resources:
+    limits:
+      cpu: 250m
+      memory: 128Mi
+    requests:
+      cpu: 25m
+      memory: 64Mi
+  # An invocation memory ceiling the operator passes to Spin, so a runaway
+  # instance cannot grow past the container limit.
+  invocationLimits:
+    memory: 64Mi
+#% endif %#

@@ -1,0 +1,7 @@
+[repository]
+url = "git://git.example.test/platform.git"
+
+# Optional SpinKube slice: cert-manager prerequisite, operator with CRDs, and a
+# Spintainer executor plus one sample SpinApp, all in `spinkube`.
+[spinkube]
+enabled = true

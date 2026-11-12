@@ -35,7 +35,7 @@ render() {
     cat "$log" >&2
     die "rendering failed for $fixture"
   fi
-  [ -f "$out/kubernetes/apps/default/magpie/values.sops.yaml" ] \
+  [ -f "$out/kubernetes/apps/gateways/magpie/values.sops.yaml" ] \
     || die "magpie values were not rendered for $fixture"
 }
 
@@ -43,15 +43,15 @@ render() {
 # this check follows the pinned chart instead of restating it.
 template() {
   local rendered="$1" config chart_repo chart chart_version chart_file
-  config="$rendered/kubernetes/apps/default/magpie/config.json"
+  config="$rendered/kubernetes/apps/gateways/magpie/config.json"
   chart_repo="$(jq -r '.chartRepo' "$config")"
   chart="$(jq -r '.chart' "$config")"
   chart_version="$(jq -r '.chartVersion' "$config")"
   chart_file="$scratch/${chart}-${chart_version}.tgz"
   [ -f "$chart_file" ] \
     || helm pull "oci://${chart_repo}/${chart}" --version "$chart_version" -d "$scratch" >/dev/null
-  helm template magpie "$chart_file" --namespace default \
-    --values "$rendered/kubernetes/apps/default/magpie/values.sops.yaml"
+  helm template magpie "$chart_file" --namespace gateways \
+    --values "$rendered/kubernetes/apps/gateways/magpie/values.sops.yaml"
 }
 
 age-keygen --output "$scratch/age.key" >/dev/null 2>&1

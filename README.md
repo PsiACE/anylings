@@ -123,7 +123,7 @@ write bootstrap/projects/app configs, which control deployment and deletion.
 ## Magpie
 
 [Magpie](https://github.com/yetone/magpie) is the first real workload:
-`kubernetes/apps/default/magpie/` in the rendered tree. It runs the upstream
+`kubernetes/apps/gateways/magpie/` in the rendered tree. It runs the upstream
 container image rather than a local rebuild.
 
 - Image `ghcr.io/yetone/magpie:0.1.3078`, pinned to its multi-arch index digest.
@@ -154,8 +154,8 @@ before publishing it.
     config_claim = "magpie-config"
     ```
 
-    That names an **existing** `PersistentVolumeClaim` in the application's own
-    namespace (`default`). Prerequisites, all outside this repository:
+    That names an **existing** `PersistentVolumeClaim` in the gateway's own
+    namespace (`gateways`). Prerequisites, all outside this repository:
 
     - Create the claim before syncing the Application, with the StorageClass and
       size you want. The platform mounts it and never creates it.
@@ -183,7 +183,7 @@ before publishing it.
 
     ```toml
     [magpie]
-    seed_dir = "secret-inputs"   # providers.json, caller-keys.json
+    seed_dir = "secret-inputs" # providers.json, caller-keys.json
     ```
 
     That renders the `magpie-seed` Secret, the KSOPS generator that decrypts it,
@@ -195,7 +195,7 @@ before publishing it.
 
     The same input is what lets an agent runtime reach the gateway without a
     provider credential of its own: `agents.gateway_secret` names a file holding
-    one issued gateway key, and the render emits the `t3-code-magpie-gateway`
+    one issued gateway key, and the render emits the `bub-magpie-gateway`
     Secret plus a `secretKeyRef` for it. Setting one without the other is
     rejected, because a key the gateway never learned only yields 401s.
 
@@ -211,23 +211,28 @@ existing-claim rendering is covered; a pod replacement or re-mount on real CSI
 storage is not tested, and moving data onto a claim does not by itself show that
 a replaced volume keeps it.
 
-## Agent runtime
+## Bub agent runtime
 
-`kubernetes/apps/agents/t3-code/` in the rendered tree runs the [T3 Code](https://github.com/pingdotgg/t3code)
-web server, with the [Bub](https://github.com/bubbuild/bub) ACP executable on its
-`PATH` as the provider T3 can launch. It is **opt-in**: without an `[agents]`
-section in `cluster.toml` nothing is rendered, so a cluster with no published
-runtime image stays deployable.
+`kubernetes/apps/agents/bub/` in the rendered tree runs the [Bub](https://github.com/bubbuild/bub)
+ACP executable, together with the [T3 Code](https://github.com/pingdotgg/t3code)
+web server that launches it as a provider. One image carries both, because the
+browser surface and the agent are one runtime; the image tag names both
+components. It is **opt-in**: without an `[agents]` section in `cluster.toml`
+nothing is rendered, so a cluster with no published runtime image stays
+deployable.
 
-The image is built here from `images/t3-code/Containerfile` rather than pulled:
+The image is built here from `images/bub/Containerfile` rather than pulled:
 
+- Bub `0.6.1` from PyPI, installed with its `app` extra and hash-verified from
+  `images/bub/requirements.txt`, plus `bub-acp-server` for `bub acp`.
 - T3 Code `0.1.8`, the upstream self-contained release binary, verified against
   that release's published `SHA256SUMS` during the build and pinned for both
   `linux/amd64` and `linux/arm64`.
-- Bub `0.6.1` from PyPI, installed with its `app` extra and hash-verified from
-  `images/t3-code/requirements.txt`.
-- Runs as uid/gid `65532` with a read-only root filesystem; T3's database and
+- Runs as uid/gid `65532` with a read-only root filesystem; the database and
   project checkouts live under the writable `/home/t3`, and `/tmp` is scratch.
+  `/home/t3`, `T3CODE_HOME` and the `T3CODE_*` variables stay as upstream and
+  the existing claim define them: they are the web server's contract, not a
+  platform name.
 
 The server is reachable only through a cluster-internal `ClusterIP` Service on
 port `3773`. Its own authentication is never disabled: a caller that is not the
@@ -237,7 +242,7 @@ pod's own loopback needs a pairing token or a bearer token, minted with
 ### Operator inputs and prerequisites
 
 1. **Publish the image.** Use the trusted-main publisher below, or build and
-   push `images/t3-code/` to a registry of your choice, then set
+   push `images/bub/` to a registry of your choice, then set
    `agents.image_repository`. Rendering the template never publishes an image.
 2. **Persistent state.** `agents.storage_existing_claim` names a claim you
    created, mounted at `/home/t3`. Empty means `emptyDir`, which loses the
@@ -261,7 +266,7 @@ integration rather than a fake adapter.
 
 ### Checking the runtime
 
-`bash tests/runtime/check-t3-code.sh` checks the image definition and the
+`bash tests/runtime/check-bub.sh` checks the image definition and the
 entrypoint against a synthetic `HOME`, renders both volume branches from
 `tests/config/agents.toml` and an explicit-empty variant, and validates each
 through the pinned `app-template` chart. It fails if that chart cannot be
@@ -290,13 +295,18 @@ arm64 pins for an operator-built image, but this workflow does not publish a
 multi-architecture manifest; do not deploy its tags on arm64 nodes.
 
 It pushes two tags to a path derived from the repository, not configured in the
-workflow — `ghcr.io/<owner>/<repo>/t3-code` — and records the registry digest in
+workflow — `ghcr.io/<owner>/<repo>/bub` — and records the registry digest in
 the run summary:
 
-| tag            | meaning                                                      |
-| -------------- | ------------------------------------------------------------ |
-| `sha-<commit>` | the commit this image was built from; immutable in practice  |
-| `<T3_VERSION>` | the T3 Code release from the Containerfile, a moving pointer |
+| tag                           | meaning                                                     |
+| ----------------------------- | ----------------------------------------------------------- |
+| `sha-<commit>`                | the commit this image was built from; immutable in practice |
+| `bub<version>-t3web<version>` | both component pins from `images/bub/`, a moving pointer    |
+
+The moving tag names both components. A tag equal to one component's release
+would describe a combined image by its web shell or by its CLI alone, so the
+publisher reads both pins and combines them; `tests/runtime/check-bub.sh`
+asserts the derived tag matches the rendered default.
 
 The image is checked with the same script as the gate before it is pushed, so a
 build that cannot start never becomes a published tag. The workflow runs only on
@@ -409,7 +419,7 @@ render cases, because each needs its own pinned chart:
 `tests/ci/check-magpie-config-claim.sh` (the Magpie `/config` claim),
 `tests/ci/check-gateway-wiring.sh` (the rendered gateway Secrets and the
 runtime's gateway env), `tests/ci/check-observability.sh` (the
-disabled-by-default slice) and `tests/runtime/check-t3-code.sh` (the agent
+disabled-by-default slice) and `tests/runtime/check-bub.sh` (the agent
 runtime). Each renders its own `tests/config/` fixture through
 `just configure platform`, so `base` still covers a cluster with every optional
 slice omitted.
@@ -420,7 +430,7 @@ directory, the runtime reads its key from a `secretKeyRef`, the seed copies only
 when absent, and an input without a gateway publishes neither Secret nor a
 `manifestPath`. It fails if any of that is hand-edited back into the tree.
 
-`tests/runtime/check-t3-code.sh` covers both agent-runtime volume branches
+`tests/runtime/check-bub.sh` covers both agent-runtime volume branches
 (`emptyDir` and an existing claim) and fails when the pinned chart cannot be
 pulled; it never reports a chart check it did not run. With `--image <ref>` it
 also checks a built image, and that is what the CI `agent runtime` job does

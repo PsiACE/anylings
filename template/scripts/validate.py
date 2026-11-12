@@ -38,6 +38,9 @@ NAMESPACE_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
 # Magpie and the agent runtime both reference an existing claim, so both use
 # this one rule rather than a second approximation of it.
 PVC_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+# The default image tag. Both component versions are part of the identity of a
+# combined image, so the tag names both rather than either alone.
+DEFAULT_IMAGE_TAG = "bub0.6.1-t3web0.1.8"
 # A container image repository without a tag or digest: the tag is separate so
 # the rendered values never carry two sources for the same version.
 IMAGE_REPOSITORY_PATTERN = r"^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$"
@@ -111,11 +114,15 @@ class Ingress(Model):
 
 
 class Agents(Model):
-    # The T3 Code runtime image is built from this repository but published to
+    # The Bub agent runtime image is built from this repository but published to
     # a registry this template must not guess: an operator names it, so no
     # private registry or vendor path is baked into the rendered tree.
     image_repository: str = Field(pattern=IMAGE_REPOSITORY_PATTERN)
-    image_tag: str = Field(default="0.1.8", pattern=IMAGE_TAG_PATTERN)
+    # The image carries two independently versioned components (Bub and the T3
+    # Code web server), so the publisher tags it `bub<version>-t3web<version>`.
+    # The default must therefore name both; a bare T3 release here would label
+    # the runtime with the version of its browser shell.
+    image_tag: str = Field(default=DEFAULT_IMAGE_TAG, pattern=IMAGE_TAG_PATTERN)
     # An immutable pin. A tag can be moved; the registry digest the publisher
     # records cannot, so a deployment that must not drift sets this. Empty
     # leaves the tag as the only reference.
@@ -143,7 +150,8 @@ class Agents(Model):
 
     # Empty keeps the default ephemeral emptyDir /home/t3; a name opts into an
     # existing claim the operator created. The platform never creates a claim
-    # or picks a StorageClass.    #
+    # or picks a StorageClass.
+    #
     # No Field `pattern` here: it runs before field validators and would reject
     # the documented empty value, while an omitted key defaulted to the same ""
     # and passed. The validator below owns both cases.
@@ -152,7 +160,7 @@ class Agents(Model):
         json_schema_extra={"pattern": EMPTY_OR_PVC_NAME_PATTERN},
     )
     # File holding the gateway key the runtime presents to Magpie. Naming it
-    # makes the render emit the `t3-code-magpie-gateway` Secret, its KSOPS
+    # makes the render emit the `bub-magpie-gateway` Secret, its KSOPS
     # generator and a `secretKeyRef`; leaving it empty renders none of them,
     # so an instance without a shared gateway keeps no dead secret.
     gateway_secret: str = ""

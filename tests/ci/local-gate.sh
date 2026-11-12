@@ -79,9 +79,9 @@ bash tests/ci/check-spinkube.sh
 # The image itself is exercised only when one is available (--image), so this
 # stays a static check and never builds an image behind the caller's back.
 if [ -n "${ANYLINGS_RUNTIME_IMAGE:-}" ]; then
-  bash tests/runtime/check-t3-code.sh --image "$ANYLINGS_RUNTIME_IMAGE"
+  bash tests/runtime/check-bub.sh --image "$ANYLINGS_RUNTIME_IMAGE"
 else
-  bash tests/runtime/check-t3-code.sh
+  bash tests/runtime/check-bub.sh
 fi
 
 log "workflow lint"

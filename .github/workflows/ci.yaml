@@ -142,7 +142,7 @@ jobs:
       - name: Run reset recipe
         run: just --yes reset platform
 
-  # The runtime image and its GitOps template are checked without a registry
+  # The Bub runtime image and its GitOps template are checked without a registry
   # push, cluster or cloud credential. The image itself is built and exercised
   # here, so the packaged toolchain is verified rather than assumed.
   agent-runtime:
@@ -174,15 +174,15 @@ jobs:
         run: |
           podman build \
             --platform linux/amd64 \
-            --tag localhost/anylings/t3-code:ci \
-            --file images/t3-code/Containerfile \
-            images/t3-code
+            --tag localhost/anylings/bub:ci \
+            --file images/bub/Containerfile \
+            images/bub
 
       # Static template checks plus the built image: both executables report
       # their pinned versions, the process is nonroot, and a fresh state root
       # is created and served. Nothing is pushed or deployed.
       - name: Check the runtime image and template
-        run: bash tests/runtime/check-t3-code.sh --image localhost/anylings/t3-code:ci
+        run: bash tests/runtime/check-bub.sh --image localhost/anylings/bub:ci
 
   # Static checks for every OpenTofu root. No cloud credentials are involved:
   # init runs without a backend and validate only inspects the configuration.

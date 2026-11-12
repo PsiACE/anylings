@@ -24,7 +24,7 @@ just configure platform >"$scratch/configure.log" 2>&1
 just check platform >"$scratch/check.log" 2>&1 \
   || { cat "$scratch/check.log" >&2; echo "accepted input failed the reference check" >&2; exit 1; }
 
-base_app="kubernetes/apps/default/magpie/config.json"
+base_app="kubernetes/apps/gateways/magpie/config.json"
 
 # Reject a reference the promoted tree cannot resolve. `expect` names the
 # diagnostic so a different failure cannot pass for the intended one.
@@ -52,11 +52,11 @@ reject parent_escape valuesFile ../outside.yaml "outside the published tree"
 reject parent_escape_dir manifestPath ../outside-dir "outside the published tree"
 reject escaped_segment valuesFile "kubernetes/../../outside.yaml" "parent segment"
 reject absolute_path valuesFile "/etc/hostname" "absolute path"
-reject outside_subtree valuesFile "apps/default/magpie/values.sops.yaml" "outside the published tree"
+reject outside_subtree valuesFile "apps/gateways/magpie/values.sops.yaml" "outside the published tree"
 reject current_segment valuesFile "kubernetes/./$base_app" "current segment"
 reject empty_segment valuesFile "kubernetes//$base_app" "empty segment"
-reject missing_file valuesFile "kubernetes/apps/default/magpie/absent.yaml" "missing valuesFile"
-reject missing_dir manifestPath "kubernetes/apps/default/absent" "missing manifestPath"
+reject missing_file valuesFile "kubernetes/apps/gateways/magpie/absent.yaml" "missing valuesFile"
+reject missing_dir manifestPath "kubernetes/apps/gateways/absent" "missing manifestPath"
 
 # A symlink inside the tree that resolves to an outside file passes an
 # existence test but would publish a broken reference.
@@ -64,8 +64,8 @@ printf 'synthetic\n' > "$scratch/outside-values.yaml"
 case_dir=$((case_dir + 1))
 dir="$scratch/case-$case_dir"
 cp -R "$scratch/rendered" "$dir"
-rm -f "$dir/kubernetes/apps/default/magpie/values.sops.yaml"
-ln -s "$scratch/outside-values.yaml" "$dir/kubernetes/apps/default/magpie/values.sops.yaml"
+rm -f "$dir/kubernetes/apps/gateways/magpie/values.sops.yaml"
+ln -s "$scratch/outside-values.yaml" "$dir/kubernetes/apps/gateways/magpie/values.sops.yaml"
 if ANYLINGS_OUTPUT_DIR="$dir" just check platform >"$scratch/symlink.log" 2>&1; then
   echo "accepted a valuesFile symlink that resolves outside the tree" >&2
   exit 1
@@ -78,9 +78,9 @@ grep -qF "resolves outside the published tree" "$scratch/symlink.log" \
 case_dir=$((case_dir + 1))
 dir="$scratch/case-$case_dir"
 cp -R "$scratch/rendered" "$dir"
-mv "$dir/kubernetes/apps/default/magpie/values.sops.yaml" \
-  "$dir/kubernetes/apps/default/magpie/values-real.sops.yaml"
-ln -s values-real.sops.yaml "$dir/kubernetes/apps/default/magpie/values.sops.yaml"
+mv "$dir/kubernetes/apps/gateways/magpie/values.sops.yaml" \
+  "$dir/kubernetes/apps/gateways/magpie/values-real.sops.yaml"
+ln -s values-real.sops.yaml "$dir/kubernetes/apps/gateways/magpie/values.sops.yaml"
 ANYLINGS_OUTPUT_DIR="$dir" just check platform >/dev/null 2>&1 \
   || { echo "rejected a symlink that stays inside the published tree" >&2; exit 1; }
 

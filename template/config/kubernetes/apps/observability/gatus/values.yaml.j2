@@ -103,7 +103,7 @@ configMaps:
           # caller, so a 401 is the healthy answer here.
           - name: magpie-gateway
             group: platform
-            url: "http://magpie.default.svc.cluster.local:3425/v1/models"
+            url: "http://magpie.gateways.svc.cluster.local:3425/v1/models"
             interval: 60s
             conditions:
               - "[STATUS] == 401"

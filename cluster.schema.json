@@ -10,7 +10,7 @@
           "type": "string"
         },
         "image_tag": {
-          "default": "0.1.8",
+          "default": "bub0.6.1-t3web0.1.8",
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$",
           "title": "Image Tag",
           "type": "string"

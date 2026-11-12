@@ -41,26 +41,26 @@ if ! ANYLINGS_CONFIG="$scratch/input/cluster.toml" ANYLINGS_OUTPUT_DIR="$gateway
 fi
 
 root="$gateway/kubernetes/apps"
-for f in default/magpie/seed.sops.yaml default/magpie/secret-generator.yaml \
-  default/magpie/kustomization.yaml agents/t3-code/secret.sops.yaml \
-  agents/t3-code/secret-generator.yaml agents/t3-code/kustomization.yaml; do
+for f in gateways/magpie/seed.sops.yaml gateways/magpie/secret-generator.yaml \
+  gateways/magpie/kustomization.yaml agents/bub/secret.sops.yaml \
+  agents/bub/secret-generator.yaml agents/bub/kustomization.yaml; do
   [ -f "$root/$f" ] || die "the gateway input did not render $f"
 done
 
 # Both Applications must render their kustomize directory, or the Secrets above
 # are published but never applied.
-for app in default/magpie agents/t3-code; do
+for app in gateways/magpie agents/bub; do
   [ "$(jq -r '.manifestPath' "$root/$app/config.json")" = "kubernetes/apps/$app" ] \
     || die "$app does not set manifestPath, so its Secrets would never be rendered"
 done
 
 # The runtime authenticates with a secretKeyRef; a literal value here would be a
 # committed credential.
-values="$root/agents/t3-code/values.yaml"
-[ "$(yq '.controllers.["t3-code"].containers.app.env["BUB_MAGPIE_API_KEY"]
+values="$root/agents/bub/values.yaml"
+[ "$(yq '.controllers.["bub"].containers.app.env["BUB_MAGPIE_API_KEY"]
   .valueFrom.secretKeyRef.key' "$values")" = gateway-key ] \
   || die "the runtime does not read its gateway key from a secretKeyRef"
-[ "$(yq '.controllers.["t3-code"].containers.app.env["BUB_MODEL"]' "$values")" = "magpie:group/deepseek-flash" ] \
+[ "$(yq '.controllers.["bub"].containers.app.env["BUB_MODEL"]' "$values")" = "magpie:group/deepseek-flash" ] \
   || die "the runtime no longer selects the accepted model group"
 if grep -q 'sk-magpie-key-synthetic-fixture' "$values"; then
   die "the runtime values contain the gateway key in plaintext"
@@ -70,7 +70,7 @@ fi
 # overwrite stores the running gateway has since changed.
 if ! SOPS_AGE_KEY_FILE="$scratch/age.key" \
   sops --config "$gateway/.sops.yaml" --decrypt \
-    "$root/default/magpie/values.sops.yaml" \
+    "$root/gateways/magpie/values.sops.yaml" \
   | grep -q 'if \[ ! -e /config/magpie/\$f \]'; then
   die "the seed init container would overwrite an existing /config/magpie store"
 fi
@@ -89,16 +89,16 @@ if ! ANYLINGS_CONFIG="$scratch/base-input/cluster.toml" ANYLINGS_OUTPUT_DIR="$ba
   cat "$scratch/base.log" >&2
   die "rendering failed for the default input"
 fi
-for f in default/magpie/seed.sops.yaml agents/t3-code/secret.sops.yaml; do
+for f in gateways/magpie/seed.sops.yaml agents/bub/secret.sops.yaml; do
   [ ! -e "$base/kubernetes/apps/$f" ] \
     || die "the default input renders $f without a configured gateway"
 done
-[ "$(jq -r '.manifestPath' "$base/kubernetes/apps/default/magpie/config.json")" = "" ] \
+[ "$(jq -r '.manifestPath' "$base/kubernetes/apps/gateways/magpie/config.json")" = "" ] \
   || die "the default input sets manifestPath without a rendered manifest"
 
 # A gateway key that the gateway itself never learned only yields 401s, so the
 # validator must refuse that half-configured input.
-printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[agents]\nimage_repository = "registry.example.test/anylings/t3-code"\ngateway_secret = "k"\n' \
+printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[agents]\nimage_repository = "registry.example.test/anylings/bub"\ngateway_secret = "k"\n' \
   >"$scratch/half.toml"
 if ANYLINGS_CONFIG="$scratch/half.toml" just check config >/dev/null 2>&1; then
   die "the validator accepted agents.gateway_secret without magpie.seed_dir"

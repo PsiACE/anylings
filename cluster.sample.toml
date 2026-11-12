@@ -68,8 +68,8 @@ tunnel_token_file = ".local/cloudflare-tunnel.token"
 # =============================================================================
 [magpie]
 
-# Existing PersistentVolumeClaim to mount at /config, in the application's own
-# namespace ("default"). The platform mounts it and never creates it, so
+# Existing PersistentVolumeClaim to mount at /config, in the gateway's own
+# namespace ("gateways"). The platform mounts it and never creates it, so
 # removing the app from Git cannot delete its data; you own the claim, its
 # StorageClass and its backups. The claim must be writable by gid 65532.
 # OPTIONAL. Default: "" (an ephemeral emptyDir; providers, gateway keys and
@@ -101,24 +101,25 @@ seed_dir = ""
 enabled = false
 
 # =============================================================================
-#    The T3 Code agent runtime. Optional: without this section no agent runtime
-#    is rendered, which keeps a cluster that has no published runtime image
-#    deployable. The image is built from `images/t3-code` in this repository and
+#    The Bub agent runtime. Optional: without this section no agent runtime is
+#    rendered, which keeps a cluster that has no published runtime image
+#    deployable. The image is built from `images/bub` in this repository and
 #    pushed to a registry this template cannot guess, so the operator names it.
 #    Provider credentials, model choice and any public route are instance
 #    decisions made after deployment; none of them are committed here.
 # =============================================================================
 # [agents]
 
-# Container image repository of the T3 Code runtime image, without a tag.
+# Container image repository of the Bub runtime image, without a tag.
 # REQUIRED when this section is present.
-# Example: "registry.example.test/anylings/t3-code"
-# image_repository = "registry.example.test/anylings/t3-code"
+# Example: "registry.example.test/anylings/bub"
+# image_repository = "registry.example.test/anylings/bub"
 
-# OPTIONAL. Default: "0.1.8". The T3 Code release the image carries. Keep this
-# in step with the Containerfile's T3_VERSION, and prefer a release at least
-# three days old.
-# image_tag = "0.1.8"
+# OPTIONAL. Default: "bub0.6.1-t3web0.1.8". The image carries two independently
+# versioned components, Bub and the T3 Code web server it launches, so the
+# publisher tags one image with both. Keep this in step with the pins in
+# `images/bub/` rather than with either component alone.
+# image_tag = "bub0.6.1-t3web0.1.8"
 
 # OPTIONAL. Default: "" (the tag alone is the reference). A registry digest,
 # `sha256:` and 64 hex characters, as recorded by the runtime image workflow
@@ -136,7 +137,7 @@ enabled = false
 # storage_existing_claim = ""
 
 # File holding the gateway key this runtime presents to Magpie, resolved
-# relative to this file. Naming it renders the `t3-code-magpie-gateway` Secret
+# relative to this file. Naming it renders the `bub-magpie-gateway` Secret
 # and the `BUB_MAGPIE_API_KEY` secretKeyRef, and points the runtime at the
 # in-cluster gateway. It must be the same value Magpie recorded in its own
 # `caller-keys.json`. REQUIRES `magpie.seed_dir`: a key the gateway never

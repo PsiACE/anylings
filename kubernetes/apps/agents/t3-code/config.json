@@ -1,9 +1,0 @@
-{
-  "appName": "t3-code",
-  "namespace": "agents",
-  "chartRepo": "ghcr.io/bjw-s-labs/helm",
-  "chart": "app-template",
-  "chartVersion": "5.3.0",
-  "valuesFile": "kubernetes/apps/agents/t3-code/values.yaml",
-  "manifestPath": "kubernetes/apps/agents/t3-code"
-}

@@ -1,25 +1,26 @@
-# Helm values for the T3 Code agent runtime, rendered into the published Git
-# tree and consumed by the shared app-template ApplicationSet entry.
+# Helm values for the Bub agent runtime, rendered into the published Git tree
+# and consumed by the shared app-template ApplicationSet entry.
 #
-# The workload is the platform image built from `images/t3-code`: the T3 Code
-# web server on its upstream release binary, with the Bub ACP executable on
-# PATH as the provider T3 can launch. Nothing here selects a model or a vendor:
-# provider sign-in and model choice happen inside the instance at runtime.
+# The workload is the combined platform image built from `images/bub`: the Bub
+# CLI and its ACP server, plus the T3 Code web server on its upstream release
+# binary as the browser-facing surface. The image tag names both, so neither is
+# implied by the other. Nothing here selects a model or a vendor: provider
+# sign-in and model choice happen inside the instance at runtime.
 controllers:
-  t3-code:
-    # T3 keeps one SQLite database and one set of provider session state, so a
-    # second replica would corrupt it. Scaling out is a separate decision that
-    # needs external state first.
-    replicas: 0
+  bub:
+    # The combined runtime keeps one SQLite database and one set of provider
+    # session state, so a second replica would corrupt it. Scaling out is a
+    # separate decision that needs external state first.
+    replicas: 1
     strategy: Recreate
     containers:
       app:
         image:
-          repository: ghcr.io/psiace/anylings/t3-code
-          tag: "sha-07858708b95b5be78ce9411e50e922402ada0484"
+          repository: ghcr.io/psiace/anylings/bub
+          tag: "sha-bd7688bf22abce36ed01de99514a6cf5b80811ba"
           # Pinned to the digest the publisher recorded, so a moved tag cannot
           # change what this cluster runs.
-          digest: "sha256:55fdee011d401471f96832dc4fec549ca45048961acaf9b3b81de0edd359e4bf"
+          digest: "sha256:53d22fe7f8ae9f1709d36dc886598b6b5cb4218ad247da82e97735cf8afd29f5"
         # The runtime creates WORKDIR as root before the entrypoint starts.
         # Use the existing tmp volume so it cannot pre-create a root-owned
         # workspace inside the writable home volume; the entrypoint creates it.
@@ -29,14 +30,18 @@ controllers:
           # below covers both. The bind address and port are repeated here
           # because the Service publishes this exact port, and a change to one
           # without the other would silently break the route.
+          #
+          # These stay T3CODE_*: they are the T3 web server's own contract and
+          # the image's `t3` binary reads them. Renaming them here would only
+          # break startup; the platform-facing name of this workload is Bub.
           T3CODE_HOST: 0.0.0.0
           T3CODE_PORT: "3773"
           BUB_MODEL: magpie:group/deepseek-flash
-          BUB_MAGPIE_API_BASE: http://magpie.default.svc.cluster.local:3425/v1
+          BUB_MAGPIE_API_BASE: http://magpie.gateways.svc.cluster.local:3425/v1
           BUB_MAGPIE_API_KEY:
             valueFrom:
               secretKeyRef:
-                name: t3-code-magpie-gateway
+                name: bub-magpie-gateway
                 key: gateway-key
           BUB_COMPLETION_ARGS: '{"reasoning_effort":"high"}'
         ports:
@@ -98,10 +103,12 @@ defaultPodOptions:
 persistence:
   # One writable root carries T3's database, the project checkouts it references
   # and the agent's own $HOME state (Bub keeps its tapes under ~/.bub), so it is
-  # mounted at /home/t3 itself. Mounting leaf directories instead would move the
-  # volume's internal layout (`<volume>/.t3`, `<volume>/workspace`) and strand the
-  # state already stored on an existing claim, and it would leave $HOME read-only
-  # so the agent could not create its own state directory.
+  # mounted at /home/t3 itself. That path is the image's home and the layout of
+  # the existing claim, so it stays even though the workload is called Bub.
+  # Mounting leaf directories instead would move the volume's internal layout
+  # (`<volume>/.t3`, `<volume>/workspace`) and strand the state already stored on
+  # an existing claim, and it would leave $HOME read-only so the agent could not
+  # create its own state directory.
   #
   # A fresh volume root belongs to root, so the pod sets fsGroup below and the
   # image's entrypoint creates its own subdirectories once it can write there.
@@ -116,9 +123,10 @@ persistence:
       - path: /tmp
 service:
   app:
-    # Cluster-internal only: T3's HTTP/WebSocket API and the provider sessions
-    # it runs never leave the cluster network by default. Publishing it is a
-    # separate ingress decision that must keep T3's own authentication on.
+    # Cluster-internal only: the runtime's HTTP/WebSocket API and the provider
+    # sessions it runs never leave the cluster network by default. Publishing it
+    # is a separate ingress decision that must keep the web server's own
+    # authentication on.
     type: ClusterIP
     ports:
       http:

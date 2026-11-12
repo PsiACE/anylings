@@ -149,8 +149,7 @@ class Agents(Model):
 
     # Empty keeps the default ephemeral emptyDir /home/t3; a name opts into an
     # existing claim the operator created. The platform never creates a claim
-    # or picks a StorageClass.
-    #
+    # or picks a StorageClass.    #
     # No Field `pattern` here: it runs before field validators and would reject
     # the documented empty value, while an omitted key defaulted to the same ""
     # and passed. The validator below owns both cases.
@@ -158,6 +157,11 @@ class Agents(Model):
         default="",
         json_schema_extra={"pattern": EMPTY_OR_PVC_NAME_PATTERN},
     )
+    # File holding the gateway key the runtime presents to Magpie. Naming it
+    # makes the render emit the `t3-code-magpie-gateway` Secret, its KSOPS
+    # generator and a `secretKeyRef`; leaving it empty renders none of them,
+    # so an instance without a shared gateway keeps no dead secret.
+    gateway_secret: str = ""
 
     @field_validator("storage_existing_claim")
     @classmethod
@@ -185,6 +189,12 @@ class Magpie(Model):
     # into an existing claim in the application's own namespace; the platform
     # never creates that claim, so removing the app cannot delete its data.
     config_claim: str = ""
+    # Directory holding `providers.json` and `caller-keys.json`, the gateway's
+    # own two stores. Naming it makes the render emit the `magpie-seed` Secret
+    # and the init container that copies those files into `/config/magpie`
+    # only when absent. Empty renders neither, so an instance that configures
+    # its providers at runtime keeps the ephemeral-volume default.
+    seed_dir: str = ""
 
     @field_validator("config_claim")
     @classmethod
@@ -197,6 +207,17 @@ class Magpie(Model):
                 "(lowercase DNS subdomain, at most 253 characters)"
             )
         return value
+
+    @field_validator("seed_dir")
+    @classmethod
+    def check_seed_dir(cls, value: str) -> str:
+        # The render reads exactly two files from here and encrypts their
+        # contents; an empty path would make the resolution silently read the
+        # config directory instead.
+        if not value:
+            return value
+        if not value.strip():
+            raise ValueError("seed_dir must be empty or a directory path")
         return value
 
 
@@ -229,6 +250,18 @@ class Config(Model):
     # agent runtime. Making it required would block every existing deployment
     # and the native rehearsal on a registry that does not exist there.
     agents: Agents | None = None
+
+    @model_validator(mode="after")
+    def check_gateway_wiring(self) -> Self:
+        # A gateway key the gateway never learned only produces 401s, and the
+        # agent runtime is then unusable in a way that looks like an outage.
+        # Both halves are seeded from one snapshot, so require them together.
+        if self.agents and self.agents.gateway_secret and not self.magpie.seed_dir:
+            raise ValueError(
+                "agents.gateway_secret requires magpie.seed_dir: the gateway key "
+                "must be one Magpie's caller-keys.json already records"
+            )
+        return self
 
 
 def format_errors(error: ValidationError) -> str:

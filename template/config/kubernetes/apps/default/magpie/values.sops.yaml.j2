@@ -55,6 +55,23 @@ controllers:
             # Placeholder sizing, not an upstream figure: raising it is a
             # deployment decision, for example when plugins run in the image.
             memory: 1Gi
+#% if magpie.seed_dir %#
+    initContainers:
+      seed:
+        image:
+          repository: ghcr.io/yetone/magpie
+          tag: "0.1.3078"
+          digest: "sha256:5ee98578b060c36aad54167a68447375329c6470d7b000e945739910e3f2707a"
+        command:
+          - /bin/sh
+          - -ec
+        args:
+          - for f in providers.json caller-keys.json; do if [ ! -e /config/magpie/$f ]; then mkdir -p /config/magpie; cp /seed/$f /config/magpie/$f; chmod 600 /config/magpie/$f; fi; done; chown -R 65532:65532 /config/magpie 2>/dev/null || true
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+#% endif %#
 defaultPodOptions:
   securityContext:
     # The image's own nonroot account.
@@ -86,6 +103,19 @@ persistence:
     type: emptyDir
     globalMounts:
       - path: /tmp
+#% if magpie.seed_dir %#
+  # Read-only seed input. The init container copies out of it; the app container
+  # never sees it, so no provider file is exposed to the gateway process.
+  seed:
+    type: secret
+    name: magpie-seed
+    defaultMode: 0400
+    advancedMounts:
+      magpie:
+        seed:
+          - path: /seed
+            readOnly: true
+#% endif %#
 service:
   app:
     ports:

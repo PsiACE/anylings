@@ -80,6 +80,15 @@ tunnel_token_file = ""
 # Example: "magpie-config"
 config_claim = ""
 
+# Directory holding the gateway's own two stores, `providers.json` and
+# `caller-keys.json`. Naming it renders the `magpie-seed` Secret, the KSOPS
+# generator that decrypts it, and an init container that copies each file into
+# /config/magpie only when absent, so a restart never overwrites keys the
+# running gateway has since changed. Resolved relative to this file.
+# OPTIONAL. Default: "" (nothing is seeded; configure providers at runtime)
+# Example: "secret-inputs"
+seed_dir = ""
+
 
 # =============================================================================
 #    Optional self-hosted observability. Disabled by default; enabling it
@@ -128,6 +137,15 @@ enabled = false
 # creates the claim, so its size and StorageClass stay an explicit choice.
 # OPTIONAL. Default: "" (ephemeral)
 # storage_existing_claim = ""
+
+# File holding the gateway key this runtime presents to Magpie, resolved
+# relative to this file. Naming it renders the `t3-code-magpie-gateway` Secret
+# and the `BUB_MAGPIE_API_KEY` secretKeyRef, and points the runtime at the
+# in-cluster gateway. It must be the same value Magpie recorded in its own
+# `caller-keys.json`. REQUIRES `magpie.seed_dir`: a key the gateway never
+# learned would only produce 401s.
+# OPTIONAL. Default: "" (no gateway wiring)
+# gateway_secret = ""
 
 
 # =============================================================================

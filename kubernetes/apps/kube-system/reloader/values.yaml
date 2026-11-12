@@ -1,0 +1,5 @@
+---
+fullnameOverride: reloader
+reloader:
+  readOnlyRootFileSystem: true
+  # No PodMonitor: the test cluster has no Prometheus operator.

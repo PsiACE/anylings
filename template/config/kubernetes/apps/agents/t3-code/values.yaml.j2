@@ -34,6 +34,16 @@ controllers:
           # without the other would silently break the route.
           T3CODE_HOST: 0.0.0.0
           T3CODE_PORT: "3773"
+#% if agents.gateway_secret %#
+          BUB_MODEL: magpie:group/deepseek-flash
+          BUB_MAGPIE_API_BASE: http://magpie.default.svc.cluster.local:3425/v1
+          BUB_MAGPIE_API_KEY:
+            valueFrom:
+              secretKeyRef:
+                name: t3-code-magpie-gateway
+                key: gateway-key
+          BUB_COMPLETION_ARGS: '{"reasoning_effort":"high"}'
+#% endif %#
         ports:
           - name: http
             containerPort: 3773

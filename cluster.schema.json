@@ -26,6 +26,11 @@
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "title": "Storage Existing Claim",
           "type": "string"
+        },
+        "gateway_secret": {
+          "default": "",
+          "title": "Gateway Secret",
+          "type": "string"
         }
       },
       "required": ["image_repository"],
@@ -75,6 +80,11 @@
         "config_claim": {
           "default": "",
           "title": "Config Claim",
+          "type": "string"
+        },
+        "seed_dir": {
+          "default": "",
+          "title": "Seed Dir",
           "type": "string"
         }
       },
@@ -157,7 +167,8 @@
     "magpie": {
       "$ref": "#/$defs/Magpie",
       "default": {
-        "config_claim": ""
+        "config_claim": "",
+        "seed_dir": ""
       }
     },
     "observability": {

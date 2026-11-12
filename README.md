@@ -209,9 +209,9 @@ pod's own loopback needs a pairing token or a bearer token, minted with
 
 ### Operator inputs and prerequisites
 
-1. **Publish the image.** Build and push `images/t3-code/` to a registry of your
-   choice and set `agents.image_repository`. The template never guesses a
-   registry, and no image is committed or published by CI.
+1. **Publish the image.** Use the trusted-main publisher below, or build and
+   push `images/t3-code/` to a registry of your choice, then set
+   `agents.image_repository`. Rendering the template never publishes an image.
 2. **Persistent state.** `agents.storage_existing_claim` names a claim you
    created, mounted at `/home/t3`. Empty means `emptyDir`, which loses the
    database and every checkout when the pod is replaced. This template creates
@@ -245,6 +245,46 @@ their pinned versions, `bub acp --help` must work, and the server must answer
 `/api/auth/session` with a 200 under the deployment's shape (nonroot,
 read-only root filesystem, no-network, only `/home/t3` and `/tmp` writable).
 The check makes no registry push and no cluster or cloud call.
+
+### Publishing the image
+
+`.github/workflows/runtime-image.yaml` publishes the image after a normal merge
+to `main`. It is a separate workflow from the pull-request gate, so no
+`pull_request` event and no fork can reach a package write; the job also
+requires `github.repository == 'PsiACE/anylings'` and `refs/heads/main`, and
+holds only `contents: read` plus `packages: write`. The credential is the run's
+own `GITHUB_TOKEN`, piped to `podman login --password-stdin`. Podman stores
+it in a private, step-owned authfile under `RUNNER_TEMP`; an exit trap logs out
+and removes that directory on both success and failure. No PAT, deploy key or
+cloud secret is involved. The permission is job-scoped, not image-scoped.
+
+The publisher currently builds **linux/amd64 only**. The Containerfile also has
+arm64 pins for an operator-built image, but this workflow does not publish a
+multi-architecture manifest; do not deploy its tags on arm64 nodes.
+
+It pushes two tags to a path derived from the repository, not configured in the
+workflow — `ghcr.io/<owner>/<repo>/t3-code` — and records the registry digest in
+the run summary:
+
+| tag            | meaning                                                      |
+| -------------- | ------------------------------------------------------------ |
+| `sha-<commit>` | the commit this image was built from; immutable in practice  |
+| `<T3_VERSION>` | the T3 Code release from the Containerfile, a moving pointer |
+
+The image is checked with the same script as the gate before it is pushed, so a
+build that cannot start never becomes a published tag. The workflow runs only on
+`push` to `main`; it is not dispatched by hand and no publication happens from a
+pull request.
+
+**Known gap — registry visibility.** A package created by `GITHUB_TOKEN` starts
+private. Anonymous pulls are not proven to work, and this repository does not
+create image pull secrets: until a maintainer makes the package public in its
+registry settings, a cluster needs one, and `ImagePullBackOff` is the expected
+symptom rather than a bug in the values file.
+
+To deploy a specific build, set `[agents] image_digest` to the recorded value.
+The tag and digest are combined into `repository:tag@digest`, so a moved tag
+cannot change what the cluster runs; leaving it empty deploys the tag alone.
 
 ## Observability
 

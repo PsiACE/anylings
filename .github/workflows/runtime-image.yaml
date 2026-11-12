@@ -1,0 +1,161 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: "runtime image"
+
+# Publishes the agent runtime image to the registry this repository names, after
+# a normal merge to main. It is the only place that may write a package, and it
+# is deliberately not part of the pull-request gate.
+#
+# Why its own workflow rather than a job in ci.yaml: no pull-request event can
+# start it, a fork cannot reach it, and a skipped publish job can never report
+# success under a gate check name. The gate therefore keeps describing exactly
+# the checks it ran.
+on:
+  push:
+    branches:
+      - main
+
+# One publish per commit. A newer push supersedes an older one rather than
+# racing it.
+concurrency:
+  group: runtime-image-${{ github.repository_id }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  publish:
+    # Trust guard, stated as data: only the canonical repository, only a push,
+    # only its default branch. A fork cannot satisfy the repository check.
+    if: >-
+      github.repository == 'PsiACE/anylings' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    name: publish t3-code
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      # Package write is job-scoped, not restricted to one image by this YAML.
+      # Contents stay read-only: this job cannot push commits or change workflows.
+      contents: read
+      packages: write # Required to push the runtime image; not image-scoped.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.2
+          experimental: true
+          install_args: --locked
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      # The path follows repository identity. The independent job condition
+      # above still restricts publication to the canonical repository.
+      - name: Derive the image reference
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Lowercase, because a registry reference must be while a GitHub owner
+          # may not be.
+          image="ghcr.io/${REPOSITORY,,}/t3-code"
+          # The release tag the Containerfile already carries, read from it so
+          # this workflow does not become a second place to pin T3 Code.
+          version_tag="$(sed -nE 's/^ARG T3_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' images/t3-code/Containerfile)"
+          test -n "$version_tag"
+          {
+            echo "repository=$image"
+            echo "source_tag=sha-${SHA}"
+            echo "version_tag=$version_tag"
+          } >>"$GITHUB_OUTPUT"
+          printf 'publishing %s:%s (T3 Code %s)\n' "$image" "sha-${SHA}" "$version_tag"
+
+      - name: Build the runtime image
+        id: build
+        env:
+          REPOSITORY: ${{ steps.image.outputs.repository }}
+          SOURCE_TAG: ${{ steps.image.outputs.source_tag }}
+          VERSION_TAG: ${{ steps.image.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+          podman build \
+            --platform linux/amd64 \
+            --tag "${REPOSITORY}:${SOURCE_TAG}" \
+            --tag "${REPOSITORY}:${VERSION_TAG}" \
+            --file images/t3-code/Containerfile \
+            images/t3-code
+
+      # The same checker the gate runs, against the image about to be published,
+      # so a broken build cannot become a published tag. It needs no network
+      # beyond what the build already used.
+      - name: Check the image before publishing
+        id: check
+        env:
+          REPOSITORY: ${{ steps.image.outputs.repository }}
+          SOURCE_TAG: ${{ steps.image.outputs.source_tag }}
+        run: bash tests/runtime/check-t3-code.sh --image "${REPOSITORY}:${SOURCE_TAG}"
+
+      # Podman stores registry credentials in a private step-owned authfile.
+      # Clean it on success or failure, rather than relying on runner teardown.
+      - name: Publish to the repository registry
+        id: push
+        env:
+          REPOSITORY: ${{ steps.image.outputs.repository }}
+          SOURCE_TAG: ${{ steps.image.outputs.source_tag }}
+          VERSION_TAG: ${{ steps.image.outputs.version_tag }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          umask 077
+          auth_dir="$(mktemp -d "$RUNNER_TEMP/registry-auth.XXXXXX")"
+          auth_file="$auth_dir/auth.json"
+          cleanup() {
+            podman logout --authfile "$auth_file" ghcr.io >/dev/null 2>&1 || true
+            rm -rf -- "$auth_dir"
+          }
+          trap cleanup EXIT
+          digest_file="$RUNNER_TEMP/source.digest"
+          printf '%s' "$GHCR_TOKEN" \
+            | podman login --authfile "$auth_file" ghcr.io --username "$ACTOR" --password-stdin
+          # --digestfile records what the registry stored, which is not
+          # necessarily the local image's digest: a push may re-compress layers.
+          podman push --authfile "$auth_file" --digestfile "$digest_file" "${REPOSITORY}:${SOURCE_TAG}"
+          podman push --authfile "$auth_file" "${REPOSITORY}:${VERSION_TAG}"
+          digest="$(cat "$digest_file")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "::error::the registry returned an invalid digest" >&2; exit 1; }
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+
+      # Record what was published, digest included, so a deployment pins a value
+      # that exists rather than one guessed from a tag.
+      - name: Record the published digest
+        env:
+          REPOSITORY: ${{ steps.image.outputs.repository }}
+          SOURCE_TAG: ${{ steps.image.outputs.source_tag }}
+          VERSION_TAG: ${{ steps.image.outputs.version_tag }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published runtime image"
+            echo
+            echo '| field | value |'
+            echo '| --- | --- |'
+            echo "| source | \`${REPOSITORY}:${SOURCE_TAG}\` |"
+            echo "| version tag | \`${REPOSITORY}:${VERSION_TAG}\` |"
+            echo "| digest | \`${DIGEST}\` |"
+            echo
+            echo "Pin \`[agents] image_digest\` to the digest above to deploy exactly this build."
+            echo
+            echo 'The package is created private by default. Anonymous pulls are'
+            echo 'not proven to work until a maintainer makes the package public in'
+            echo 'its registry settings; a cluster needs an image pull secret until then.'
+          } | tee "$GITHUB_STEP_SUMMARY"

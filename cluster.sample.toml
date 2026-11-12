@@ -114,6 +114,14 @@ enabled = false
 # three days old.
 # image_tag = "0.1.8"
 
+# OPTIONAL. Default: "" (the tag alone is the reference). A registry digest,
+# `sha256:` and 64 hex characters, as recorded by the runtime image workflow
+# after it publishes. A tag can be moved; a digest cannot, so a deployment that
+# must not drift pins this. The digest is for `image_repository` and must be
+# pushed there: it is not interchangeable with a differently named registry.
+# Example: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# image_digest = ""
+
 # Name of an existing PersistentVolumeClaim to mount at /home/t3, which holds
 # T3's database and the project checkouts it references. Empty means an
 # emptyDir: state is then lost when the pod is replaced. This template never

@@ -18,6 +18,11 @@ controllers:
         image:
           repository: #{ agents.image_repository }#
           tag: #{ agents.image_tag | tojson }#
+#% if agents.image_digest %#
+          # Pinned to the digest the publisher recorded, so a moved tag cannot
+          # change what this cluster runs.
+          digest: #{ agents.image_digest | tojson }#
+#% endif %#
         env:
           # State and workspace paths come from the image; the one mount point
           # below covers both. The bind address and port are repeated here

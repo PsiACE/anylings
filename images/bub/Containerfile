@@ -1,9 +1,15 @@
 # syntax=docker/dockerfile:1
 #
-# The T3 Code web server, running on the upstream release binary, together with
-# the Bub ACP executable that T3 can start as a provider. One image, one
-# nonroot uid, no credentials: everything instance-specific (workspace, state,
-# provider sign-ins) is a mount or a runtime input.
+# The Bub agent runtime image: the Bub ACP executable, together with the T3 Code
+# web server that runs on its upstream release binary and launches Bub as a
+# provider. One image, one nonroot uid, no credentials: everything
+# instance-specific (workspace, state, provider sign-ins) is a mount or a
+# runtime input.
+#
+# Two components, two independent versions. The image is published under a tag
+# that names both (`bub<version>-t3web<version>`), so neither version can be
+# read as the other's; `tests/runtime/check-bub.sh` derives that tag from the
+# pins below and the requirements lock.
 #
 # Both executables come from their upstream distribution channels:
 #   - T3 Code publishes a self-contained linux binary archive per architecture
@@ -96,13 +102,14 @@ RUN set -eux; \
     mkdir -p /home/t3/.t3 /home/t3/workspace; \
     chown --recursive 65532:65532 /home/t3
 
-COPY entrypoint.sh /usr/local/bin/t3-entrypoint
-RUN chmod 0755 /usr/local/bin/t3-entrypoint
+COPY entrypoint.sh /usr/local/bin/bub-entrypoint
+RUN chmod 0755 /usr/local/bin/bub-entrypoint
 
-LABEL org.opencontainers.image.title="t3-code" \
-      org.opencontainers.image.description="T3 Code web server with the Bub ACP executable" \
-      org.opencontainers.image.source="https://github.com/pingdotgg/t3code" \
-      org.opencontainers.image.version="${T3_VERSION}"
+# No single `version` label: the image carries two independently versioned
+# components, and a label naming only one of them would misdescribe the image.
+LABEL org.opencontainers.image.title="bub" \
+      org.opencontainers.image.description="Bub ACP runtime with the T3 Code web server" \
+      org.opencontainers.image.source="https://github.com/bubbuild/bub"
 
 USER 65532:65532
 WORKDIR /home/t3/workspace
@@ -112,4 +119,4 @@ WORKDIR /home/t3/workspace
 EXPOSE 3773
 
 # exec in the entrypoint, so this process receives the pod's signals directly.
-ENTRYPOINT ["/usr/local/bin/t3-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/bub-entrypoint"]

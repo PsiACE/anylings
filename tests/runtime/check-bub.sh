@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Focused checks for the T3 Code runtime image and its GitOps template.
+# Focused checks for the Bub runtime image and its GitOps template.
 #
 # Everything here is static: no registry push, no cluster, no cloud call. Two
 # things are proven for real: the entrypoint's startup contract (by running it
@@ -20,20 +20,20 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --image)
             [ "$#" -ge 2 ] || {
-                echo "usage: bash tests/runtime/check-t3-code.sh [--image <ref>]" >&2
+                echo "usage: bash tests/runtime/check-bub.sh [--image <ref>]" >&2
                 exit 2
             }
             IMAGE="$2"
             shift 2
             ;;
         *)
-            echo "usage: bash tests/runtime/check-t3-code.sh [--image <ref>]" >&2
+            echo "usage: bash tests/runtime/check-bub.sh [--image <ref>]" >&2
             exit 2
             ;;
     esac
 done
 
-log() { printf '[t3-code-check] %s\n' "$*" >&2; }
+log() { printf '[bub-check] %s\n' "$*" >&2; }
 die() {
     log "error: $*"
     exit 1
@@ -46,9 +46,9 @@ trap 'rm -rf "$scratch"' EXIT
 
 log "check the image pins and the entrypoint contract"
 
-containerfile="images/t3-code/Containerfile"
-entrypoint="images/t3-code/entrypoint.sh"
-requirements="images/t3-code/requirements.txt"
+containerfile="images/bub/Containerfile"
+entrypoint="images/bub/entrypoint.sh"
+requirements="images/bub/requirements.txt"
 for file in "$containerfile" "$entrypoint" "$requirements"; do
     [ -f "$file" ] || die "missing $file"
 done
@@ -73,7 +73,7 @@ grep -q 'sha256sum --check' "$containerfile" || die "the release archive is not 
 # Bub is installed from its PyPI distribution with the extra that provides the
 # command line; requirements.in states that intent and requirements.txt is the
 # resolved lock whose hashes the install verifies.
-grep -qE '^bub\[app\]==[0-9]+\.[0-9]+\.[0-9]+$' "$REPO_ROOT/images/t3-code/requirements.in" \
+grep -qE '^bub\[app\]==[0-9]+\.[0-9]+\.[0-9]+$' "$REPO_ROOT/images/bub/requirements.in" \
     || die "bub[app] is not pinned in requirements.in"
 grep -qE '^bub==[0-9]+\.[0-9]+\.[0-9]+ ' "$requirements" \
     || die "the resolved bub wheel pin with hashes is missing"
@@ -164,7 +164,7 @@ if env -i PATH="$stub_bin:/usr/bin:/bin" HOME="$scratch/home" bash -c '
     # Simulate the root refusal without needing root: the branch checks id -u.
     id() { echo 0; }
     export -f id
-    bash images/t3-code/entrypoint.sh' 2>"$scratch/err"; then
+    bash images/bub/entrypoint.sh' 2>"$scratch/err"; then
     die "the entrypoint started as root"
 fi
 grep -q 'refusing to run as root' "$scratch/err" || die "the root refusal was not reported"
@@ -182,9 +182,9 @@ grep -q 'refusing to run as root' "$scratch/err" || die "the root refusal was no
     just init platform >/dev/null
     just configure platform >/dev/null
 )
-[ ! -e "$scratch/rendered-without/kubernetes/apps/agents/t3-code/config.json" ] \
+[ ! -e "$scratch/rendered-without/kubernetes/apps/agents/bub/config.json" ] \
     || die "an unconfigured agent runtime was rendered anyway"
-[ -f "$scratch/rendered-without/kubernetes/apps/default/magpie/config.json" ] \
+[ -f "$scratch/rendered-without/kubernetes/apps/gateways/magpie/config.json" ] \
     || die "omitting the agent runtime also dropped an existing workload"
 # The AppProject is the other place the runtime appears. Leaving its namespace
 # permitted when nothing deploys there would widen the project for no reason.
@@ -192,9 +192,9 @@ if yq -e '.spec.destinations[] | select(.namespace == "agents")' \
     "$scratch/rendered-without/kubernetes/projects/kubernetes.yaml" >/dev/null; then
     die "the AppProject still permits the agents namespace with no agent runtime"
 fi
-yq -e '.spec.destinations[] | select(.namespace == "default")' \
+yq -e '.spec.destinations[] | select(.namespace == "gateways")' \
     "$scratch/rendered-without/kubernetes/projects/kubernetes.yaml" >/dev/null \
-    || die "the AppProject lost an existing destination"
+    || die "the AppProject lost the gateway destination"
 
 log "render the template and validate it as app-template input"
 
@@ -207,8 +207,8 @@ export SOPS_AGE_KEY_FILE="$scratch/age.key"
 just init platform >/dev/null
 just configure platform >/dev/null
 
-values="$ANYLINGS_OUTPUT_DIR/kubernetes/apps/agents/t3-code/values.yaml"
-config="$ANYLINGS_OUTPUT_DIR/kubernetes/apps/agents/t3-code/config.json"
+values="$ANYLINGS_OUTPUT_DIR/kubernetes/apps/agents/bub/values.yaml"
+config="$ANYLINGS_OUTPUT_DIR/kubernetes/apps/agents/bub/config.json"
 [ -f "$values" ] || die "the runtime values were not rendered"
 [ -f "$config" ] || die "the runtime app config was not rendered"
 
@@ -225,7 +225,7 @@ cat >"$scratch/empty-claim.toml" <<'TOML'
 url = "git://git.example.test/platform.git"
 
 [agents]
-image_repository = "registry.example.test/anylings/t3-code"
+image_repository = "registry.example.test/anylings/bub"
 storage_existing_claim = ""
 TOML
 (
@@ -245,7 +245,7 @@ invalid_claims=(
     "$(printf 'a%.0s' {1..64})"  # single label beyond 63
 )
 for invalid in "${invalid_claims[@]}"; do
-    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "registry.example.test/anylings/t3-code"\nstorage_existing_claim = "%s"\n' \
+    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "registry.example.test/anylings/bub"\nstorage_existing_claim = "%s"\n' \
         "$invalid" >"$scratch/invalid.toml"
     if ANYLINGS_CONFIG="$scratch/invalid.toml" just check config >/dev/null 2>&1; then
         die "the config validator accepted the invalid claim name '${invalid:0:40}'"
@@ -254,7 +254,7 @@ done
 
 # The published config must name the runtime and its own namespace, and must
 # not carry a manifest path: this workload ships values only.
-jq -e '.appName == "t3-code" and .namespace == "agents"' "$config" >/dev/null \
+jq -e '.appName == "bub" and .namespace == "agents"' "$config" >/dev/null \
     || die "the rendered app config does not describe the runtime"
 jq -e '.manifestPath == "" and .valuesFile != ""' "$config" >/dev/null \
     || die "the rendered app config carries an unexpected manifest source"
@@ -271,7 +271,7 @@ yq -e '.service.app.type == "ClusterIP"' "$values" >/dev/null \
     || die "the runtime Service is not cluster-internal"
 yq -e '.defaultPodOptions.securityContext.runAsNonRoot == true' "$values" >/dev/null \
     || die "the runtime pod does not require a nonroot account"
-yq -e '.controllers."t3-code".containers.app.securityContext.readOnlyRootFilesystem == true' "$values" >/dev/null \
+yq -e '.controllers."bub".containers.app.securityContext.readOnlyRootFilesystem == true' "$values" >/dev/null \
     || die "the runtime container does not use a read-only root filesystem"
 yq -e '.persistence.home.type == "persistentVolumeClaim"' "$values" >/dev/null \
     || die "the configured existing claim was not applied"
@@ -306,8 +306,8 @@ chart_file="$scratch/chart/${CHART}-${CHART_VERSION}.tgz"
 # rendered tree.
 render_values() {
     local rendered="$1" out="$2"
-    helm template t3-code "$chart_file" --namespace agents \
-        --values "$rendered/kubernetes/apps/agents/t3-code/values.yaml" >"$out"
+    helm template bub "$chart_file" --namespace agents \
+        --values "$rendered/kubernetes/apps/agents/bub/values.yaml" >"$out"
 }
 
 # The same assertions run for both branches, so a claim reference and an
@@ -392,7 +392,7 @@ PY
 render_values "$claim_rendered" "$scratch/manifests-claim.yaml" \
     || die "the pinned chart rejected the claim values"
 claim_name="$(yq -r '.persistence.home.existingClaim // ""' \
-    "$claim_rendered/kubernetes/apps/agents/t3-code/values.yaml")"
+    "$claim_rendered/kubernetes/apps/agents/bub/values.yaml")"
 [ -n "$claim_name" ] || die "the claim fixture rendered no existingClaim"
 check_workload "$scratch/manifests-claim.yaml" claim "$claim_name" \
     || die "the claim branch lost a required property"
@@ -431,7 +431,7 @@ if [ -n "$IMAGE" ]; then
     # script that only prints a version would not start an ACP session, so
     # `bub acp --help` is part of the contract.
     pinned_bub="$(grep -oE '^bub\[app\]==[0-9]+\.[0-9]+\.[0-9]+$' \
-        "$REPO_ROOT/images/t3-code/requirements.in" | cut -d= -f3)"
+        "$REPO_ROOT/images/bub/requirements.in" | cut -d= -f3)"
     [ -n "$pinned_bub" ] || die "requirements.in does not pin bub[app]"
     toolchain="$("$container_tool" run --rm --network=none --entrypoint /bin/sh "$IMAGE" -c '
         set -e
@@ -451,13 +451,14 @@ if [ -n "$IMAGE" ]; then
         || die "the image's bub has no ACP subcommand"
     grep -qE '^Python 3\.' <<<"$toolchain" || die "the image has no usable Python"
 
-    # The version the image actually carries must be the one the template
-    # deploys, so the rendered tag cannot drift from the built binary.
+    # The image carries two components, so the deployed tag must name both of
+    # the versions the image actually reports. Comparing against one of them
+    # alone is what let a T3 release tag stand in for the runtime's identity.
     image_t3="$("$container_tool" run --rm --network=none --entrypoint /bin/sh "$IMAGE" \
         -c 't3 --version' | awk '{print $2}' | tr -d 'v')"
-    deployed_t3="$(yq -r '.controllers."t3-code".containers.app.image.tag' "$values")"
-    [ "$image_t3" = "$deployed_t3" ] \
-        || die "image carries T3 $image_t3 but the template deploys $deployed_t3"
+    deployed_tag="$(yq -r '.controllers."bub".containers.app.image.tag' "$values")"
+    [ "$deployed_tag" = "bub${image_bub}-t3web${image_t3}" ] \
+        || die "the template deploys $deployed_tag but the image is Bub $image_bub with T3 $image_t3"
 
     # Reproduce the bad startup order without deleting the directory the
     # runtime creates as root. A green runtime check must reject this shape.
@@ -467,7 +468,7 @@ if [ -n "$IMAGE" ]; then
         --tmpfs "/home/t3:$home_tmpfs" --tmpfs /tmp:rw,mode=1777 \
         --workdir /home/t3/workspace --entrypoint /bin/bash "$IMAGE" -ec '
         [ -d /home/t3/workspace ] && [ ! -w /home/t3/workspace ]
-        if /usr/local/bin/t3-entrypoint >/tmp/out 2>/tmp/err; then
+        if /usr/local/bin/bub-entrypoint >/tmp/out 2>/tmp/err; then
             echo "the root-owned workspace unexpectedly started" >&2
             exit 1
         fi
@@ -502,7 +503,7 @@ if [ -n "$IMAGE" ]; then
     # Use the rendered workingDir, not the image default. Do not delete any
     # directory: doing so would hide the runtime-created root-owned WORKDIR.
     [ ! -e /home/t3/.t3 ] && [ ! -e /home/t3/workspace ]
-    /usr/local/bin/t3-entrypoint >/tmp/out 2>/tmp/err &
+    /usr/local/bin/bub-entrypoint >/tmp/out 2>/tmp/err &
     pid=$!
     cleanup() { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
     trap cleanup EXIT
@@ -583,7 +584,7 @@ echo "stub helm: pull unavailable" >&2
 exit 1
 STUB
 chmod +x "$stub_dir/helm"
-if PATH="$stub_dir:$PATH" T3_CHECK_NESTED=1 bash "$REPO_ROOT/tests/runtime/check-t3-code.sh" \
+if PATH="$stub_dir:$PATH" T3_CHECK_NESTED=1 bash "$REPO_ROOT/tests/runtime/check-bub.sh" \
     >/dev/null 2>&1; then
     die "the check passed while the pinned chart could not be pulled"
 fi
@@ -639,7 +640,7 @@ yq -o=json '.jobs.publish.steps' "$workflow" | jq -e '
     ($ids | index("push")) as $push |
     $build != null and $check != null and $push != null and
     $build < $check and $check < $push and
-    .[$check].run == "bash tests/runtime/check-t3-code.sh --image \"${REPOSITORY}:${SOURCE_TAG}\""
+    .[$check].run == "bash tests/runtime/check-bub.sh --image \"${REPOSITORY}:${SOURCE_TAG}\""
 ' >/dev/null || die "the publisher must check the built image before pushing"
 
 # Exercise the actual publish script without a network or registry. A synthetic
@@ -694,7 +695,8 @@ for scenario in success push-failure invalid-digest; do
     if (
         cd "$probe"
         env -i PATH="$publish_bin:$PATH" HOME="$probe/home" RUNNER_TEMP="$probe/temp" \
-            REPOSITORY=ghcr.io/example/test/t3-code SOURCE_TAG=sha-synthetic VERSION_TAG=0.1.8 \
+            REPOSITORY=ghcr.io/example/test/bub SOURCE_TAG=sha-synthetic \
+            VERSION_TAG=bub0.6.1-t3web0.1.8 \
             GHCR_TOKEN="$fixture_token" ACTOR=synthetic GITHUB_OUTPUT="$probe/output" \
             STUB_LOG="$probe/calls" STUB_AUTH_PATH="$probe/auth-path" \
             STUB_PUSH_FAIL="$fail_push" STUB_DIGEST="$fixture_digest" \
@@ -718,11 +720,37 @@ done
 
 # The image path is derived, not configured: no registry or owner is hardcoded
 # in the workflow, so a fork or rename cannot publish to somebody's namespace.
-grep -q 'ghcr.io/${REPOSITORY,,}/t3-code' "$workflow" \
+grep -q 'ghcr.io/${REPOSITORY,,}/bub' "$workflow" \
     || die "the published image path is not derived from the repository"
 if grep -qE 'ghcr\.io/[A-Za-z0-9._-]+/' "$workflow"; then
     die "the publisher hardcodes an image namespace"
 fi
+# The moving tag names both components. A tag equal to one component's release
+# is the mislabelling this asserts against: it would describe the image by its
+# web shell, or by the CLI, while claiming to be the whole runtime.
+version_tag_script="$(yq -r '.jobs.publish.steps[] | select(.id == "image") | .run' "$workflow")"
+grep -q 'version_tag="bub${bub_version}-t3web${t3_version}"' <<<"$version_tag_script" \
+    || die "the publisher does not tag the image with both component versions"
+grep -q 'images/bub/requirements.in' <<<"$version_tag_script" \
+    || die "the publisher does not read the Bub version from images/bub"
+grep -q 'images/bub/Containerfile' <<<"$version_tag_script" \
+    || die "the publisher does not read the T3 Code version from images/bub"
+if grep -qE 'version_tag="\$\{t3_version\}"|version_tag="\$\{bub_version\}"' <<<"$version_tag_script"; then
+    die "the publisher tags the combined image with a single component version"
+fi
+# Derive the two versions the same way the workflow does and render one tag, so
+# the fixture asserts the arithmetic rather than only the workflow text.
+derived_bub="$(sed -nE 's/^bub\[app\]==([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$REPO_ROOT/images/bub/requirements.in")"
+derived_t3="$(sed -nE 's/^ARG T3_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$REPO_ROOT/images/bub/Containerfile")"
+[ -n "$derived_bub" ] && [ -n "$derived_t3" ] \
+    || die "the image pins do not yield a Bub and a T3 Code version"
+# The fixture renders the default tag from the template; it must be the tag the
+# publisher would produce for these pins, or a deployment would name a tag that
+# is never published.
+[ "$(yq -r '.controllers."bub".containers.app.image.tag' \
+    "$scratch/rendered-claim/kubernetes/apps/agents/bub/values.yaml")" \
+    = "bub${derived_bub}-t3web${derived_t3}" ] \
+    || die "the rendered default tag does not match the pins in images/bub"
 
 # The gate never publishes: its jobs stay offline and keep contents: read.
 if grep -q 'packages: write' "$REPO_ROOT/.github/workflows/ci.yaml"; then
@@ -742,7 +770,7 @@ cat >"$scratch/pinned.toml" <<TOML
 url = "git://git.example.test/platform.git"
 
 [agents]
-image_repository = "ghcr.io/psiace/anylings/t3-code"
+image_repository = "ghcr.io/psiace/anylings/bub"
 image_tag = "sha-0123456789abcdef"
 image_digest = "$digest"
 TOML
@@ -753,11 +781,11 @@ TOML
     just init platform >/dev/null
     just configure platform >/dev/null
 )
-pinned_values="$scratch/rendered-pinned/kubernetes/apps/agents/t3-code/values.yaml"
-[ "$(yq -r '.controllers."t3-code".containers.app.image.digest' "$pinned_values")" = "$digest" ] \
+pinned_values="$scratch/rendered-pinned/kubernetes/apps/agents/bub/values.yaml"
+[ "$(yq -r '.controllers."bub".containers.app.image.digest' "$pinned_values")" = "$digest" ] \
     || die "a configured digest was not rendered"
 # The chart must combine tag and digest, or the pin would silently do nothing.
-helm template t3-code "$chart_file" --namespace agents --values "$pinned_values" \
+helm template bub "$chart_file" --namespace agents --values "$pinned_values" \
     >"$scratch/pinned-manifests.yaml"
 pinned_image="$(yq -r 'select(.kind == "Deployment")
   | .spec.template.spec.containers[0].image' "$scratch/pinned-manifests.yaml")"
@@ -767,7 +795,7 @@ case "$pinned_image" in
 esac
 
 # The tag-only path must not render a stale or empty digest key at all.
-yq -e '.controllers."t3-code".containers.app.image | has("digest") | not' "$values" >/dev/null \
+yq -e '.controllers."bub".containers.app.image | has("digest") | not' "$values" >/dev/null \
     || die "the tag-only values carry a digest key"
 yq -r 'select(.kind == "Deployment")
   | .spec.template.spec.containers[0].image' "$scratch/manifests-claim.yaml" \
@@ -783,7 +811,7 @@ bad_digests=(
     "$(printf 'a%.0s' {1..64})"
 )
 for bad in "${bad_digests[@]}"; do
-    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "ghcr.io/psiace/anylings/t3-code"\nimage_digest = "%s"\n' \
+    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "ghcr.io/psiace/anylings/bub"\nimage_digest = "%s"\n' \
         "$bad" >"$scratch/bad-digest.toml"
     if ANYLINGS_CONFIG="$scratch/bad-digest.toml" just check config >/dev/null 2>&1; then
         die "the config validator accepted the invalid digest '${bad:0:24}...'"

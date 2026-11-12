@@ -512,4 +512,133 @@ if PATH="$stub_dir:$PATH" T3_CHECK_NESTED=1 bash "$REPO_ROOT/tests/runtime/check
 fi
 fi
 
+# ---------------------------------------------------------- image publishing --
+
+# Publishing is a separate concern from building, and the difference is who can
+# trigger it. These assertions are about the workflow as data: no pull-request
+# event, no fork, and no long-lived credential can reach a push.
+log "check the publisher is limited to trusted main pushes"
+workflow="$REPO_ROOT/.github/workflows/runtime-image.yaml"
+[ -f "$workflow" ] || die "the runtime image workflow is missing"
+
+# Only a push to main starts it. A `pull_request` or `pull_request_target`
+# trigger would let a fork's code reach a package write.
+triggers="$(yq -r '.on | keys | join(" ")' "$workflow")"
+[ "$triggers" = push ] || die "the publisher has unexpected triggers: $triggers"
+[ "$(yq -r '.on.push.branches | join(" ")' "$workflow")" = main ] \
+    || die "the publisher does not run on main pushes only"
+
+# The job condition repeats the trust boundary, so a trigger edit alone does not
+# widen it.
+job_if="$(yq -r '.jobs.publish.if' "$workflow")"
+for fragment in "github.repository == 'PsiACE/anylings'" \
+    "github.event_name == 'push'" \
+    "github.ref == 'refs/heads/main'"
+do
+    case "$job_if" in
+        *"$fragment"*) ;;
+        *) die "the publisher condition lost: $fragment" ;;
+    esac
+done
+
+# package write is the one extra permission, and it is never granted workflow-wide.
+[ "$(yq -r '.permissions | length' "$workflow")" = 0 ] \
+    || die "the publisher grants permissions at workflow level"
+[ "$(yq -r '.jobs.publish.permissions | keys | join(" ")' "$workflow")" = "contents packages" ] \
+    || die "the publisher holds unexpected job permissions"
+[ "$(yq -r '.jobs.publish.permissions.packages' "$workflow")" = write ] \
+    || die "the publisher cannot write a package"
+[ "$(yq -r '.jobs.publish.permissions.contents' "$workflow")" = read ] \
+    || die "the publisher does not keep contents read-only"
+
+# One job: no publishable step hides in a second, differently-conditioned job.
+[ "$(yq -r '.jobs | keys | length' "$workflow")" = 1 ] \
+    || die "the publisher holds more than one job"
+
+# The credential is the run's own token. A PAT, deploy key or sealed cloud
+# secret in this workflow would be a long-lived credential in CI.
+if grep -qE 'secrets\.[A-Za-z_]+' "$workflow"; then
+    unexpected="$(grep -oE 'secrets\.[A-Za-z_]+' "$workflow" | sort -u | grep -v 'secrets.GITHUB_TOKEN' || true)"
+    [ -z "$unexpected" ] || die "the publisher references a non-ephemeral secret: $unexpected"
+fi
+# The token is piped to login from the environment, never written to a file.
+grep -q 'password-stdin' "$workflow" || die "the publisher does not use password-stdin"
+if grep -qE 'echo .*GHCR_TOKEN|> *[^ ]*token' "$workflow"; then
+    die "the publisher writes its token somewhere"
+fi
+
+# The image path is derived, not configured: no registry or owner is hardcoded
+# in the workflow, so a fork or rename cannot publish to somebody's namespace.
+grep -q 'ghcr.io/${REPOSITORY,,}/t3-code' "$workflow" \
+    || die "the published image path is not derived from the repository"
+if grep -qE 'ghcr\.io/[A-Za-z0-9._-]+/' "$workflow"; then
+    die "the publisher hardcodes an image namespace"
+fi
+
+# The gate never publishes: its jobs stay offline and keep contents: read.
+if grep -q 'packages: write' "$REPO_ROOT/.github/workflows/ci.yaml"; then
+    die "the pull-request gate can write packages"
+fi
+if yq -e '.jobs[] | select(.uses != null)' "$REPO_ROOT/.github/workflows/ci.yaml" >/dev/null 2>&1; then
+    die "the gate delegates to another workflow"
+fi
+
+# ------------------------------------------------------------ digest pinning --
+
+# A deployment may pin an immutable digest instead of trusting a moving tag.
+log "check the digest pin renders and the tag-only path does not"
+digest="sha256:$(printf 'a%.0s' {1..64})"
+cat >"$scratch/pinned.toml" <<TOML
+[repository]
+url = "git://git.example.test/platform.git"
+
+[agents]
+image_repository = "ghcr.io/psiace/anylings/t3-code"
+image_tag = "sha-0123456789abcdef"
+image_digest = "$digest"
+TOML
+(
+    export ANYLINGS_CONFIG="$scratch/pinned.toml"
+    export ANYLINGS_OUTPUT_DIR="$scratch/rendered-pinned"
+    export SOPS_AGE_KEY_FILE="$scratch/age.key"
+    just init platform >/dev/null
+    just configure platform >/dev/null
+)
+pinned_values="$scratch/rendered-pinned/kubernetes/apps/agents/t3-code/values.yaml"
+[ "$(yq -r '.controllers."t3-code".containers.app.image.digest' "$pinned_values")" = "$digest" ] \
+    || die "a configured digest was not rendered"
+# The chart must combine tag and digest, or the pin would silently do nothing.
+helm template t3-code "$chart_file" --namespace agents --values "$pinned_values" \
+    >"$scratch/pinned-manifests.yaml"
+pinned_image="$(yq -r 'select(.kind == "Deployment")
+  | .spec.template.spec.containers[0].image' "$scratch/pinned-manifests.yaml")"
+case "$pinned_image" in
+    *:sha-0123456789abcdef@"$digest") ;;
+    *) die "the pinned image is not tag@digest: $pinned_image" ;;
+esac
+
+# The tag-only path must not render a stale or empty digest key at all.
+yq -e '.controllers."t3-code".containers.app.image | has("digest") | not' "$values" >/dev/null \
+    || die "the tag-only values carry a digest key"
+yq -r 'select(.kind == "Deployment")
+  | .spec.template.spec.containers[0].image' "$scratch/manifests-claim.yaml" \
+    | grep -qv '@' || die "the tag-only image is pinned to a digest anyway"
+
+# Invalid digests are rejected by the config validator, including a truncated
+# value and a non-sha256 algorithm.
+bad_digests=(
+    "sha256:abc"
+    "sha256:$(printf 'a%.0s' {1..63})"
+    "sha256:$(printf 'A%.0s' {1..64})"
+    "md5:$(printf 'a%.0s' {1..64})"
+    "$(printf 'a%.0s' {1..64})"
+)
+for bad in "${bad_digests[@]}"; do
+    printf '[repository]\nurl = "git://git.example.test/platform.git"\n[agents]\nimage_repository = "ghcr.io/psiace/anylings/t3-code"\nimage_digest = "%s"\n' \
+        "$bad" >"$scratch/bad-digest.toml"
+    if ANYLINGS_CONFIG="$scratch/bad-digest.toml" just check config >/dev/null 2>&1; then
+        die "the config validator accepted the invalid digest '${bad:0:24}...'"
+    fi
+done
+
 log "all checks passed"

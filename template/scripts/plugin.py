@@ -22,8 +22,9 @@ DEFAULT_CONFIG = 'cluster.toml'
 # the optional-feature flag that owns them. These files are copied verbatim
 # rather than rendered, so they cannot gate themselves with a Jinja block the
 # way a `.j2` template does; excluding the path is the only way to keep a
-# disabled feature from publishing them. The digest of each file is asserted by
-# tests/ci/check-spinkube.sh, which is what keeps a verbatim copy honest.
+# disabled feature from publishing them. tests/ci/check-spinkube.sh checks the
+# CRD structure and sync-wave annotations, not the upstream digest. Re-verify
+# upstream provenance manually on upgrade, as documented in the vendored header.
 VENDORED_MANIFESTS = {
     'kubernetes/apps/spinkube/spin-operator/crds.yaml': 'spinkube',
 }

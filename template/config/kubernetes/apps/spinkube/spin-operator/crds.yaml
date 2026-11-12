@@ -2,8 +2,11 @@
 # directory: https://github.com/spinframework/spin-operator/releases/download/v0.6.1/spin-operator.crds.yaml
 # Upstream sha256: 146fbc3ea2cd9089999c25e38e0aa6779485e788fdd7a2c775287df4360edfc9 (163404 bytes).
 # It defines exactly two namespaced v1alpha1 CRDs: spinapps.core.spinkube.dev and
-# spinappexecutors.core.spinkube.dev. Only formatting differs from that asset, so the
-# rendered tree matches the repository's formatter; re-verify the digest on upgrade.
+# spinappexecutors.core.spinkube.dev. Local changes are formatting and an added
+# argocd.argoproj.io/sync-wave: "-1" annotation on each CRD.
+# CI checks structure and these annotations, not the upstream digest. On upgrade,
+# manually verify the release asset's digest and compare its parsed content with
+# this file, accounting for the two annotations and formatting.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition

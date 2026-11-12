@@ -142,8 +142,9 @@ check_operator_manifests() {
   local kinds count name scope version wave
 
   [ -f "$crds" ] || die "the vendored CRDs were not published"
-  # The release asset's own identity: two CRDs, both namespaced v1alpha1. A
-  # vendored copy is only honest while it matches what upstream shipped.
+  # Structural contract: two namespaced v1alpha1 CRDs and local sync-wave -1
+  # annotations. Upstream digest/content verification remains manual on upgrade;
+  # these checks do not establish byte-for-byte release-asset provenance.
   count="$(yq -N 'select(.kind != null) | select(.kind == "CustomResourceDefinition") | .metadata.name' "$crds" | wc -l)"
   [ "$count" -eq 2 ] || die "the vendored CRD file defines $count CRDs, not 2"
   for name in spinapps.core.spinkube.dev spinappexecutors.core.spinkube.dev; do

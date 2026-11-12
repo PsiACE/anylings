@@ -343,9 +343,23 @@ checks = {
     "nonroot enforced": pod["securityContext"].get("runAsNonRoot") is True,
     "fsGroup for the mounted claim": pod["securityContext"].get("fsGroup") == 65532,
     "resource limits": "limits" in container.get("resources", {}),
-    "writable /home/t3 mount": any(
+        # State and workspace must be mounted as the image's own leaf directories.
+    # A mount at /home/t3 replaces the directory tree the image creates and
+    # chowns, so the entrypoint's writability check fails at startup even though
+    # the pod schedules and Argo reports Synced.
+    "state mounted at /home/t3/.t3": any(
+        m.get("mountPath") == "/home/t3/.t3" for m in container.get("volumeMounts", [])
+    ),
+    "workspace mounted at /home/t3/workspace": any(
+        m.get("mountPath") == "/home/t3/workspace" for m in container.get("volumeMounts", [])
+    ),
+    "no mount shadows /home/t3": not any(
         m.get("mountPath") == "/home/t3" for m in container.get("volumeMounts", [])
     ),
+    "state and workspace use distinct subPaths": {
+        m.get("subPath") for m in container.get("volumeMounts", [])
+        if m.get("mountPath", "").startswith("/home/t3/")
+    } == {"state", "workspace"},
 }
 volumes = {v["name"]: v for v in pod.get("volumes", [])}
 home = volumes.get("home", {})

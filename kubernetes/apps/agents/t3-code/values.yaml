@@ -10,7 +10,7 @@ controllers:
     # T3 keeps one SQLite database and one set of provider session state, so a
     # second replica would corrupt it. Scaling out is a separate decision that
     # needs external state first.
-    replicas: 1
+    replicas: 0
     strategy: Recreate
     containers:
       app:

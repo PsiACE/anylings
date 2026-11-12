@@ -87,6 +87,7 @@ controllers:
           capabilities:
             drop:
               - ENC[AES256_GCM,data:cVgQ,iv:EoTO07JKF2OSS7tdEFx8HrKoH48C/Ylrt2xyMnHgoQs=,tag:Tt3JWBLCCaS/vwMpXozaBQ==,type:str]
+    replicas: ENC[AES256_GCM,data:BQ==,iv:tCjbI1Pd6Y88e5tBBbAtFbrLCoAzJAmRYBj9U+TUfDY=,tag:ism3LdTgFq7jSysOIhV2+w==,type:float]
 defaultPodOptions:
   securityContext:
     #ENC[AES256_GCM,data:Ksy2ixAvUU9ZPrCzeA9SvN1qTjP3+EFLx3LPAiuy2NAB,iv:qoINtVQJ9rV2c/5TGEe63ePzmz2txw6dx7/g2X/eXsY=,tag:tox8+B2t8VYViEfe2B5tow==,type:comment]
@@ -140,8 +141,8 @@ sops:
         lfynihBr/O+iVWwCGaw+Ke7WmMtpeZesjA4maiw3wpO4stNQFjsb0A==
         -----END AGE ENCRYPTED FILE-----
       recipient: age1q62et5fl6renrke2803s4sdxenhln5khdc8um8xr5gnvyaqae96smekueg
-  lastmodified: "2026-11-12T10:54:48Z"
-  mac: ENC[AES256_GCM,data:gHrlu8/8znskfLiiWVim4b8BsGdjCZN/zSu8CG3Y+CiM51cKeNPBRAwGAzRlLssxLlOUUKM5nowYmy/8P9ZYlpVwY7eSWUVK+GL4aNmAAid3IUFHjJJOm4yDjhWYgJdpXt4MQnUOSlBr+8U5nrOYX7/FjuASvFlylmDr3skJrXA=,iv:O95p6tuXIig+ha6Niic4qUw7WtsiZ/QCYxOxgZfedro=,tag:EkGKQQtOduS2GmewU73Z9Q==,type:str]
+  lastmodified: "2026-11-12T18:09:48Z"
+  mac: ENC[AES256_GCM,data:4D8Y1X20IdZX5fFrfaEnZ6MfkvgLArYSblzHllKTEoX3qYQR9dHnEs9NzTmM2XN059fpPyhiitCjBAeZcuEzAR657cJjuTJnYdiGKURxp+WzpyNXJpYG35u6p51dzR5mPreLIO1vlopz4se2ZVQtwsx/qfzoLBWEwd0ZCDebMIQ=,iv:TL0v8zw3VSS2IXiXD2ksVFmy7bA5e90cEC2rJeQfSzI=,tag:dHT46lquC8SZ+ubDFRrHqg==,type:str]
   mac_only_encrypted: true
   unencrypted_suffix: _unencrypted
   version: 3.13.3

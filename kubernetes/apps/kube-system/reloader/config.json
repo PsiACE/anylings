@@ -1,0 +1,9 @@
+{
+  "appName": "reloader",
+  "namespace": "kube-system",
+  "chartRepo": "ghcr.io/stakater/charts",
+  "chart": "reloader",
+  "chartVersion": "2.2.19",
+  "valuesFile": "kubernetes/apps/kube-system/reloader/values.yaml",
+  "manifestPath": ""
+}

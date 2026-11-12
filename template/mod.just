@@ -193,3 +193,59 @@ assert-encrypted:
 [private]
 validate-kubernetes:
     bash "{{ template_resources }}/kubeconform.sh" "{{ output_dir }}/kubernetes"
+
+# Argo CD resolves these paths against the published Git tree, which is only
+# the `kubernetes/` subtree of the render. A reference that leaves that subtree,
+# or that only exists outside it, cannot reconcile even though the file is
+# present on this machine.
+[private]
+validate-references:
+    prefix="$(just template config-json | jq -r '.repository.path')"
+    prefix="${prefix%/}"
+    published="{{ output_dir }}/kubernetes"
+    [ -d "$published" ] || just log fatal "rendered kubernetes tree is missing" path "$published"
+    published="$(realpath -e -- "$published")"
+    while IFS= read -r -d '' config; do
+        for key in valuesFile manifestPath; do
+            ref="$(jq -r --arg k "$key" '.[$k] // ""' "$config")"
+            [ -n "$ref" ] || continue
+            case "$ref" in
+                /*) just log fatal "unusable $key: absolute path" app "$config" path "$ref" ;;
+            esac
+            case "$ref" in
+                *\\*) just log fatal "unusable $key: backslash" app "$config" path "$ref" ;;
+            esac
+            if [ -n "$prefix" ]; then
+                case "$ref" in
+                    "$prefix"/*) rel="${ref#"$prefix/"}" ;;
+                    *) just log fatal "unusable $key: missing the repository.path prefix" app "$config" path "$ref" expected_prefix "$prefix" ;;
+                esac
+            else
+                rel="$ref"
+            fi
+            case "$rel/" in
+                kubernetes/*) ;;
+                *) just log fatal "unusable $key: outside the published tree" app "$config" path "$ref" ;;
+            esac
+            case "/$rel/" in
+                */../*) just log fatal "unusable $key: parent segment" app "$config" path "$ref" ;;
+                */./*) just log fatal "unusable $key: current segment" app "$config" path "$ref" ;;
+                *//*) just log fatal "unusable $key: empty segment" app "$config" path "$ref" ;;
+            esac
+            target="{{ output_dir }}/$rel"
+            if [ "$key" = manifestPath ]; then
+                [ -d "$target" ] || just log fatal "missing $key" app "$config" path "$rel"
+            else
+                [ -f "$target" ] || just log fatal "missing $key" app "$config" path "$rel"
+            fi
+            # A symlink can satisfy the containment test above while resolving
+            # elsewhere, so check the real target, not the name.
+            real="$(realpath -e -- "$target")" \
+                || just log fatal "unresolvable $key" app "$config" path "$rel"
+            case "$real/" in
+                "$published/"*) ;;
+                *) just log fatal "unusable $key: resolves outside the published tree" app "$config" path "$rel" resolved "$real" ;;
+            esac
+        done
+    done < <(find "$published/apps" -mindepth 3 -maxdepth 3 -type f -name config.json -print0)
+    just log info "application references resolve inside the published tree"

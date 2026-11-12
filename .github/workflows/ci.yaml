@@ -52,6 +52,11 @@ jobs:
       - name: Check k0s recovery without live kubeconfig
         run: bash tests/ci/check-k0s-reset.sh
 
+      # A reference the published tree cannot resolve would only fail later,
+      # during reconciliation, so it is rejected at render time.
+      - name: Check published application references
+        run: bash tests/ci/check-references.sh
+
       # The workflows themselves are a checked artifact: this asserts that the
       # gate stays offline and that the heavy rehearsal cannot report success by
       # being skipped. Offline, no runner and no GitHub API.

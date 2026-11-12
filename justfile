@@ -38,6 +38,7 @@ check domain:
         config) uv run --quiet --locked --no-dev "{{ justfile_dir() }}/template/scripts/validate.py" "{{ config_file }}" ;;
         platform)
             just template assert-encrypted
+            just template validate-references
             just template validate-kubernetes
             ;;
         *) echo 'usage: just check config|platform' >&2; exit 2 ;;

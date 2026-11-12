@@ -256,9 +256,9 @@ assert_sops_secret() {
 # imperative kubectl delete or a private-controller-state assertion.
 assert_gitops_removal() {
   log "remove and restore magpie through its Git application config"
-  local relative="kubernetes/apps/default/magpie/config.json"
+  local relative="kubernetes/apps/gateways/magpie/config.json"
   local saved="$STATE/magpie-config.json" resources=()
-  mapfile -t resources < <(kc --namespace default get deployments,services \
+  mapfile -t resources < <(kc --namespace gateways get deployments,services \
     -l app.kubernetes.io/name=magpie -o name)
   [ "${#resources[@]}" -gt 0 ] || die "magpie has no deployed resources"
   cp "$GITWORK/$relative" "$saved"
@@ -267,7 +267,7 @@ assert_gitops_removal() {
     commit --quiet --message "remove magpie application config"
   git -C "$GITWORK" push --quiet "$GIT_PUSH_URL" main
   kc --namespace "$E2E_ARGOCD_NS" wait --for=delete application/magpie --timeout=900s
-  kc --namespace default wait --for=delete "${resources[@]}" --timeout=300s
+  kc --namespace gateways wait --for=delete "${resources[@]}" --timeout=300s
 
   mv "$saved" "$GITWORK/$relative"
   git -C "$GITWORK" add "$relative"
@@ -291,22 +291,22 @@ assert_gitops_removal() {
 assert_magpie_gateway_auth() {
   log "assert the magpie gateway refuses unkeyed and serves keyed cross-pod callers"
   local svc unkeyed keyed
-  svc="$(kc --namespace default get service \
+  svc="$(kc --namespace gateways get service \
     -l app.kubernetes.io/name=magpie -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [ -n "$svc" ] || die "expected magpie Service is missing"
   clean_client() {
-    kc --namespace default delete pod e2e-gateway-client \
+    kc --namespace gateways delete pod e2e-gateway-client \
       --ignore-not-found --wait=true --timeout=120s >/dev/null
   }
   # Same pinned image the rehearsal already uses for its storage probe.
   clean_client
-  kc apply --namespace default --filename - >/dev/null <<EOF
+  kc apply --namespace gateways --filename - >/dev/null <<EOF
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: e2e-gateway-client
-  namespace: default
+  namespace: gateways
   labels:
     anylings.dev/owner: e2e
 spec:
@@ -316,7 +316,7 @@ spec:
       image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
       command: ["sleep", "3600"]
 EOF
-  kc --namespace default wait pod/e2e-gateway-client --for=condition=Ready --timeout=180s >/dev/null
+  kc --namespace gateways wait pod/e2e-gateway-client --for=condition=Ready --timeout=180s >/dev/null
 
   # Raw HTTP through nc, not wget: busybox wget discards a 4xx body, and the
   # body is where the refusal is stated.
@@ -337,7 +337,7 @@ EOF
   }
   request() {
     request_bytes "${1-}" \
-      | kc --namespace default exec -i e2e-gateway-client -- nc -w 10 "$svc" 3425
+      | kc --namespace gateways exec -i e2e-gateway-client -- nc -w 10 "$svc" 3425
   }
 
   # Byte-level guard, so a malformed request cannot silently turn this into an
@@ -367,7 +367,7 @@ EOF
 
   # Keyed: mint an ephemeral key inside the pod. The value is synthetic and is
   # never printed, so no credential reaches the log.
-  kc --namespace default exec "$(kc --namespace default get pod \
+  kc --namespace gateways exec "$(kc --namespace gateways get pod \
     -l app.kubernetes.io/name=magpie -o jsonpath='{.items[0].metadata.name}')" -- \
     /magpie gateway-key add e2e-cross-pod --key "$E2E_GATEWAY_KEY" >/dev/null \
     || die "could not mint the ephemeral gateway key inside the magpie pod"

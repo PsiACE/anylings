@@ -8,7 +8,7 @@ url = "git://git.example.test/platform.git"
 seed_dir = "secret-inputs"
 
 [agents]
-image_repository = "registry.example.test/anylings/t3-code"
-image_tag = "0.1.8"
-storage_existing_claim = "t3-code-state"
+image_repository = "registry.example.test/anylings/bub"
+image_tag = "bub0.6.1-t3web0.1.8"
+storage_existing_claim = "bub-home"
 gateway_secret = "secret-inputs/magpie-gateway-key"

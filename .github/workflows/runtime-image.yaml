@@ -2,9 +2,9 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: "runtime image"
 
-# Publishes the agent runtime image to the registry this repository names, after
-# a normal merge to main. It is the only place that may write a package, and it
-# is deliberately not part of the pull-request gate.
+# Publishes the Bub agent runtime image to the registry this repository names,
+# after a normal merge to main. It is the only place that may write a package,
+# and it is deliberately not part of the pull-request gate.
 #
 # Why its own workflow rather than a job in ci.yaml: no pull-request event can
 # start it, a fork cannot reach it, and a skipped publish job can never report
@@ -31,7 +31,7 @@ jobs:
       github.repository == 'PsiACE/anylings' &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main'
-    name: publish t3-code
+    name: publish bub
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -65,17 +65,25 @@ jobs:
           set -euo pipefail
           # Lowercase, because a registry reference must be while a GitHub owner
           # may not be.
-          image="ghcr.io/${REPOSITORY,,}/t3-code"
-          # The release tag the Containerfile already carries, read from it so
-          # this workflow does not become a second place to pin T3 Code.
-          version_tag="$(sed -nE 's/^ARG T3_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' images/t3-code/Containerfile)"
-          test -n "$version_tag"
+          image="ghcr.io/${REPOSITORY,,}/bub"
+          # The image carries two independently versioned components. Both are
+          # read from the files that already pin them, so this workflow is not a
+          # second place to set either version.
+          bub_version="$(sed -nE 's/^bub\[app\]==([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' images/bub/requirements.in)"
+          t3_version="$(sed -nE 's/^ARG T3_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' images/bub/Containerfile)"
+          test -n "$bub_version"
+          test -n "$t3_version"
+          # The moving tag names both components. A bare T3 version would
+          # describe the browser shell as if it were the runtime, and a bare Bub
+          # version would hide which web surface ships with it.
+          version_tag="bub${bub_version}-t3web${t3_version}"
           {
             echo "repository=$image"
             echo "source_tag=sha-${SHA}"
             echo "version_tag=$version_tag"
           } >>"$GITHUB_OUTPUT"
-          printf 'publishing %s:%s (T3 Code %s)\n' "$image" "sha-${SHA}" "$version_tag"
+          printf 'publishing %s:%s (Bub %s with T3 Code %s)\n' \
+            "$image" "sha-${SHA}" "$bub_version" "$t3_version"
 
       - name: Build the runtime image
         id: build
@@ -89,8 +97,8 @@ jobs:
             --platform linux/amd64 \
             --tag "${REPOSITORY}:${SOURCE_TAG}" \
             --tag "${REPOSITORY}:${VERSION_TAG}" \
-            --file images/t3-code/Containerfile \
-            images/t3-code
+            --file images/bub/Containerfile \
+            images/bub
 
       # The same checker the gate runs, against the image about to be published,
       # so a broken build cannot become a published tag. It needs no network
@@ -100,7 +108,7 @@ jobs:
         env:
           REPOSITORY: ${{ steps.image.outputs.repository }}
           SOURCE_TAG: ${{ steps.image.outputs.source_tag }}
-        run: bash tests/runtime/check-t3-code.sh --image "${REPOSITORY}:${SOURCE_TAG}"
+        run: bash tests/runtime/check-bub.sh --image "${REPOSITORY}:${SOURCE_TAG}"
 
       # Podman stores registry credentials in a private step-owned authfile.
       # Clean it on success or failure, rather than relying on runner teardown.

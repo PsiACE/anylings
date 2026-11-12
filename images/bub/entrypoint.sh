@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Start the T3 Code web server, with the Bub ACP executable available to it.
+# Start the Bub runtime's web surface: the T3 Code web server, with the Bub ACP
+# executable available to it as the provider it launches.
 #
 # Every input here is generic: a state directory, a workspace directory and a
 # bind address. Which clients reach the server, and which provider T3 launches,
 # are instance decisions and are not encoded in the image.
+#
+# The T3CODE_* variables below are the upstream web server's own contract, not a
+# leftover name: `t3` reads them and the existing claim's layout depends on
+# T3CODE_HOME. They stay as upstream defines them.
 set -euo pipefail
 
-log() { printf '[t3-code] %s\n' "$*" >&2; }
+log() { printf '[bub] %s\n' "$*" >&2; }
 die() {
     log "error: $*"
     exit 1
@@ -55,7 +60,7 @@ args=(
 [ "$bootstrap_project" = true ] && args+=(--auto-bootstrap-project-from-cwd)
 [ -n "${T3CODE_LOG_LEVEL:-}" ] && args+=(--log-level "$T3CODE_LOG_LEVEL")
 
-log "T3 Code $(t3 --version 2>/dev/null | head -1) with $(bub --version 2>/dev/null | head -1)"
+log "Bub $(bub --version 2>/dev/null | head -1) with T3 Code $(t3 --version 2>/dev/null | head -1)"
 log "state ${T3CODE_HOME}, workspace ${T3CODE_PROJECT_ROOT}, bind ${T3CODE_HOST}:${T3CODE_PORT}"
 
 # The workspace root is the positional cwd, so T3 starts with the project the

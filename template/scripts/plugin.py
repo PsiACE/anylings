@@ -18,6 +18,17 @@ import validate
 # isolated directory.
 DEFAULT_CONFIG = 'cluster.toml'
 
+# Vendored manifests, keyed by their path inside the template inputs, mapped to
+# the optional-feature flag that owns them. These files are copied verbatim
+# rather than rendered, so they cannot gate themselves with a Jinja block the
+# way a `.j2` template does; excluding the path is the only way to keep a
+# disabled feature from publishing them. tests/ci/check-spinkube.sh checks the
+# CRD structure and sync-wave annotations, not the upstream digest. Re-verify
+# upstream provenance manually on upgrade, as documented in the vendored header.
+VENDORED_MANIFESTS = {
+    'kubernetes/apps/spinkube/spin-operator/crds.yaml': 'spinkube',
+}
+
 
 def _env_path(name: str, default: str) -> Path:
     return Path(os.environ.get(name) or default).expanduser()
@@ -113,6 +124,21 @@ class Plugin(makejinja.plugin.Plugin):
             repository_path,
             tunnel_token,
         ]
+
+    def path_filters(self) -> makejinja.plugin.PathFilters:
+        def vendored_manifest_owned(input_path: Path) -> bool:
+            """Keep a vendored manifest only while its feature is enabled."""
+            # The keys are the paths as they appear under the template inputs,
+            # and the plugin is not given that root, so compare the tail of the
+            # absolute path. The key set is fixed and fully qualified, so a
+            # suffix cannot collide with another tracked file.
+            path = input_path.as_posix()
+            for relative, section in VENDORED_MANIFESTS.items():
+                if path.endswith('/' + relative):
+                    return bool(self._load()[section]['enabled'])
+            return True
+
+        return [vendored_manifest_owned]
 
 
 # SSH host keys as published by each provider. Must cover every host in

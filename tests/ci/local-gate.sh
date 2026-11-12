@@ -69,6 +69,9 @@ bash tests/ci/check-observability.sh
 # Renders the Magpie /config claim contract: emptyDir by default, a referenced
 # claim when configured, and no app-owned PersistentVolumeClaim either way.
 bash tests/ci/check-magpie-config-claim.sh
+# Renders the pinned SpinKube charts and the vendored CRDs from an enabled
+# input; the disabled input must publish nothing. Offline.
+bash tests/ci/check-spinkube.sh
 # The agent runtime template and entrypoint, rendered through the pinned chart.
 # The image itself is exercised only when one is available (--image), so this
 # stays a static check and never builds an image behind the caller's back.

@@ -1,0 +1,11 @@
+#% if spinkube.enabled %#
+{
+  "appName": "spin-operator",
+  "namespace": "spinkube",
+  "chartRepo": "ghcr.io/spinframework/charts",
+  "chart": "spin-operator",
+  "chartVersion": "0.6.1",
+  "valuesFile": #{ repository_path('kubernetes/apps/spinkube/spin-operator/values.yaml') | tojson }#,
+  "manifestPath": #{ repository_path('kubernetes/apps/spinkube/spin-operator') | tojson }#
+}
+#% endif %#

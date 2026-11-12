@@ -1,0 +1,36 @@
+#% if spinkube.enabled %#
+---
+# How a Spin app runs. The Spintainer executor runs the app inside a normal
+# container using the `spin` binary as the entrypoint, so no RuntimeClass, no
+# node-level shim and no privileged installer are involved.
+#
+# The executor is namespace-scoped and the operator looks it up in the SpinApp's
+# own namespace, so this lives in `spinkube` next to the sample app rather than
+# in a shared control-plane namespace.
+apiVersion: core.spinkube.dev/v1alpha1
+kind: SpinAppExecutor
+metadata:
+  name: spintainer
+  namespace: spinkube
+  annotations:
+    # After the operator Deployment (wave 0) so the validating webhook exists.
+    argocd.argoproj.io/sync-wave: "1"
+    # This kind's CRD is installed by the same Application, but Argo diffs and
+    # dry-runs every manifest before the CRD is established on the first sync.
+    # Without this option that dry-run fails with "no matches for kind" and the
+    # whole sync error out instead of converging on the next attempt.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  createDeployment: true
+  deploymentConfig:
+    # Generates the `spin-ca` bundle the in-pod `spin up` needs to run with a
+    # local certificate authority instead of failing on TLS setup.
+    installDefaultCACerts: true
+    # An image whose entrypoint is the spin binary. Tag, not digest: this is the
+    # version the operator's own 0.6.1 samples use (Spin 3 component flags are
+    # not supported by this Spintainer release). The manifest digest served for
+    # that tag on 2026-11-12 was
+    # sha256:b9a84eb47b224327bdf9c3ec9d519a816bc2e7d08eff88701d5416f9d24bfcd8,
+    # recorded here so a moved tag is detectable.
+    spinImage: ghcr.io/fermyon/spin:v2.7.0
+#% endif %#

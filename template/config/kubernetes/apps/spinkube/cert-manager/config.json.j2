@@ -1,0 +1,11 @@
+#% if spinkube.enabled %#
+{
+  "appName": "cert-manager",
+  "namespace": "spinkube",
+  "chartRepo": "quay.io/jetstack/charts",
+  "chart": "cert-manager",
+  "chartVersion": "v1.20.0",
+  "valuesFile": #{ repository_path('kubernetes/apps/spinkube/cert-manager/values.yaml') | tojson }#,
+  "manifestPath": ""
+}
+#% endif %#

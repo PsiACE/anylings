@@ -342,9 +342,25 @@ checks = {
     "nonroot pod": pod["securityContext"].get("runAsUser") == 65532,
     "nonroot enforced": pod["securityContext"].get("runAsNonRoot") is True,
     "fsGroup for the mounted claim": pod["securityContext"].get("fsGroup") == 65532,
+    "startup working directory outside the home volume": container.get("workingDir") == "/tmp",
     "resource limits": "limits" in container.get("resources", {}),
-    "writable /home/t3 mount": any(
+    # The volume is mounted at /home/t3 itself, which is the layout the image
+    # and any existing claim already use: state at /home/t3/.t3, checkouts at
+    # /home/t3/workspace, and a writable $HOME so the agent can create its own
+    # ~/.bub. Leaf subPath mounts would move that layout and strand the state
+    # already stored on an existing claim, so the exact mapping is asserted
+    # rather than "some mount under /home/t3 exists".
+    "volume mounted at /home/t3": any(
         m.get("mountPath") == "/home/t3" for m in container.get("volumeMounts", [])
+    ),
+    "no leaf remount under /home/t3": not any(
+        m.get("mountPath", "").startswith("/home/t3/")
+        for m in container.get("volumeMounts", [])
+    ),
+    "/home/t3 mount has no subPath": all(
+        not m.get("subPath")
+        for m in container.get("volumeMounts", [])
+        if m.get("mountPath") == "/home/t3"
     ),
 }
 volumes = {v["name"]: v for v in pod.get("volumes", [])}
@@ -403,6 +419,12 @@ if [ -n "$IMAGE" ]; then
         fi
     done
     [ -n "$container_tool" ] || die "--image needs podman or docker"
+    home_tmpfs="rw,mode=2770"
+    # Podman copies the image tree into tmpfs by default. A fresh claim does
+    # not, and copying its pre-chowned workspace would hide the startup bug.
+    if [ "$container_tool" = podman ]; then
+        home_tmpfs+=",notmpcopyup"
+    fi
 
     # Both executables, as the image's own user, with no network. Bub must be
     # the pinned release and must actually be the ACP-capable CLI: a console
@@ -437,6 +459,24 @@ if [ -n "$IMAGE" ]; then
     [ "$image_t3" = "$deployed_t3" ] \
         || die "image carries T3 $image_t3 but the template deploys $deployed_t3"
 
+    # Reproduce the bad startup order without deleting the directory the
+    # runtime creates as root. A green runtime check must reject this shape.
+    "$container_tool" run --rm --network=none \
+        --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+        --user 65532:65532 --group-add 0 \
+        --tmpfs "/home/t3:$home_tmpfs" --tmpfs /tmp:rw,mode=1777 \
+        --workdir /home/t3/workspace --entrypoint /bin/bash "$IMAGE" -ec '
+        [ -d /home/t3/workspace ] && [ ! -w /home/t3/workspace ]
+        if /usr/local/bin/t3-entrypoint >/tmp/out 2>/tmp/err; then
+            echo "the root-owned workspace unexpectedly started" >&2
+            exit 1
+        fi
+        grep -q "required directory is not writable: /home/t3/workspace" /tmp/err
+    ' || die "the image check did not reproduce the root-owned WORKDIR failure"
+
+    startup_workdir="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[0].workingDir' \
+        "$scratch/manifests-claim.yaml")"
+
 # The startup contract, exercised the way the deployment runs it: read-only root
 # filesystem, all capabilities dropped, no-new-privileges, and only /home/t3 and
 # /tmp writable. --network=none means nothing leaves the machine.
@@ -447,14 +487,21 @@ if [ -n "$IMAGE" ]; then
 # is alive, it still is after the probe, and the server answers the readiness
 # endpoint the deployment's probe uses with a 200 whose body is the unauthenticated
 # auth state. A log line proves nothing about that.
-"$container_tool" run --rm --network=none \
+# The volume is mounted at /home/t3 the way the rendered values do it: a
+# root-owned, group-writable volume root that the pod's fsGroup can write, not a
+# world-writable tmpfs. --group-add stands in for fsGroup, which is what grants
+# the nonroot process access to that root. A 1777 tmpfs here would hide the real
+# contract: the agent must be able to create its own $HOME state under the
+# mounted root, and a root-only mount would fail that.
+"$container_tool" run --rm -i --network=none \
     --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-    --tmpfs /home/t3:rw,mode=1777 --tmpfs /tmp:rw,mode=1777 \
-    --entrypoint /bin/bash "$IMAGE" -ec '
+    --user 65532:65532 --group-add 0 \
+    --tmpfs "/home/t3:$home_tmpfs" --tmpfs /tmp:rw,mode=1777 \
+    --workdir "$startup_workdir" --entrypoint /bin/bash "$IMAGE" -ec '
     set -euo pipefail
-    # Fresh, empty state: the entrypoint must create state and workspace under
-    # the mounted root rather than requiring them to be pre-populated.
-    rm -rf /home/t3/.t3 /home/t3/workspace
+    # Use the rendered workingDir, not the image default. Do not delete any
+    # directory: doing so would hide the runtime-created root-owned WORKDIR.
+    [ ! -e /home/t3/.t3 ] && [ ! -e /home/t3/workspace ]
     /usr/local/bin/t3-entrypoint >/tmp/out 2>/tmp/err &
     pid=$!
     cleanup() { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
@@ -487,6 +534,36 @@ PY
     # The writable roots exist and belong to the run user.
     [ -d /home/t3/.t3 ] && [ -d /home/t3/workspace ]
     [ "$(id -u)" -eq 65532 ]
+
+    # $HOME itself must be writable, not only the two subdirectories. The agent
+    # T3 launches keeps its own state under ~/.bub, so a read-only $HOME breaks
+    # the ACP session even while the server is up and answering.
+    mkdir -p "$HOME/.bub/tapes" || { echo "$HOME is not writable" >&2; exit 1; }
+    # The entrypoint has created the workspace as the nonroot run user; use
+    # that same directory for the provider T3 launches.
+    cd /home/t3/workspace
+
+    # Offline ACP handshake: the real initialize request, no model call and no
+    # network. A failure here means the runtime cannot start its agent at all.
+    # A FIFO, not a redirection from a regular file: the ACP server requires a
+    # real pipe or socket on stdin and exits if it is handed a plain file.
+    printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}" >/tmp/acp.in
+    mkfifo /tmp/acp.fifo
+    ( cat /tmp/acp.in >/tmp/acp.fifo ) &
+    # stdout stays a real pipe through `cat`: the ACP server inspects its own
+    # stdio transport, and a regular file on either end makes it exit.
+    if ! timeout 60 bub acp </tmp/acp.fifo 2>/tmp/acp.err | cat >/tmp/acp.json; then
+        echo "offline bub acp initialize failed" >&2
+        cat /tmp/acp.err >&2
+        exit 1
+    fi
+    [ -s /tmp/acp.json ] || { echo "offline bub acp returned nothing" >&2; cat /tmp/acp.err >&2; exit 1; }
+    python3 - <<PY
+import json
+reply = json.loads(open("/tmp/acp.json").readline())
+assert reply["id"] == 1, reply
+assert "protocolVersion" in reply["result"], reply
+PY
     echo "readiness ok"
 ' || die "the image did not serve its readiness endpoint under the deployment shape"
 

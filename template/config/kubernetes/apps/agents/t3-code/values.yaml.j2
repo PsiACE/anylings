@@ -23,6 +23,10 @@ controllers:
           # change what this cluster runs.
           digest: #{ agents.image_digest | tojson }#
 #% endif %#
+        # The runtime creates WORKDIR as root before the entrypoint starts.
+        # Use the existing tmp volume so it cannot pre-create a root-owned
+        # workspace inside the writable home volume; the entrypoint creates it.
+        workingDir: /tmp
         env:
           # State and workspace paths come from the image; the one mount point
           # below covers both. The bind address and port are repeated here
@@ -87,8 +91,15 @@ defaultPodOptions:
     seccompProfile:
       type: RuntimeDefault
 persistence:
-  # One writable root carries T3's database and the project checkouts it
-  # references, so they cannot be split across differently-mounted paths.
+  # One writable root carries T3's database, the project checkouts it references
+  # and the agent's own $HOME state (Bub keeps its tapes under ~/.bub), so it is
+  # mounted at /home/t3 itself. Mounting leaf directories instead would move the
+  # volume's internal layout (`<volume>/.t3`, `<volume>/workspace`) and strand the
+  # state already stored on an existing claim, and it would leave $HOME read-only
+  # so the agent could not create its own state directory.
+  #
+  # A fresh volume root belongs to root, so the pod sets fsGroup below and the
+  # image's entrypoint creates its own subdirectories once it can write there.
 #% if agents.storage_existing_claim %#
   home:
     type: persistentVolumeClaim

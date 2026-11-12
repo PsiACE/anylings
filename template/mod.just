@@ -193,3 +193,30 @@ assert-encrypted:
 [private]
 validate-kubernetes:
     bash "{{ template_resources }}/kubeconform.sh" "{{ output_dir }}/kubernetes"
+
+# Argo CD resolves these paths against the published tree, so a reference the
+# render does not contain cannot reconcile. The paths are repository-relative,
+# so the configured prefix is stripped before resolving them in the render.
+[private]
+validate-references:
+    prefix="$(just template config-json | jq -r '.repository.path')"
+    prefix="${prefix%/}"
+    fail=0
+    while IFS= read -r -d '' config; do
+        for key in valuesFile manifestPath; do
+            ref="$(jq -r --arg k "$key" '.[$k] // ""' "$config")"
+            [ -n "$ref" ] || continue
+            case "$ref" in
+                "$prefix"/*) rel="${ref#"$prefix/"}" ;;
+                *) rel="$ref" ;;
+            esac
+            target="{{ output_dir }}/$rel"
+            if [ "$key" = manifestPath ]; then
+                [ -d "$target" ] || { just log fatal "missing $key" app "$config" path "$rel"; fail=1; }
+            else
+                [ -f "$target" ] || { just log fatal "missing $key" app "$config" path "$rel"; fail=1; }
+            fi
+        done
+    done < <(find "{{ output_dir }}/kubernetes/apps" -mindepth 3 -maxdepth 3 -type f -name config.json -print0)
+    [ "$fail" = 0 ] || exit 1
+    just log info "application references resolve inside the rendered tree"

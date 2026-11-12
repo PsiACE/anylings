@@ -304,14 +304,14 @@ pending rather than inferring it from these metrics.
 
 Other action-first commands:
 
-| Command                     | Purpose                                                               |
-| --------------------------- | --------------------------------------------------------------------- |
-| `just check config`         | Validate input configuration                                          |
-| `just check platform`       | Validate existing output, including complete encryption; no rewriting |
-| `just render platform`      | Configure and render private first-install inspection manifests       |
-| `just schema config`        | Regenerate the editor schema                                          |
-| `just reset platform`       | Remove owned generated output, not cluster resources                  |
-| `just destroy k0s` / `doks` | Explicit infrastructure teardown, subject to lifecycle protection     |
+| Command                     | Purpose                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------- |
+| `just check config`         | Validate input configuration                                                     |
+| `just check platform`       | Validate existing output: encryption, resolvable application paths; no rewriting |
+| `just render platform`      | Configure and render private first-install inspection manifests                  |
+| `just schema config`        | Regenerate the editor schema                                                     |
+| `just reset platform`       | Remove owned generated output, not cluster resources                             |
+| `just destroy k0s` / `doks` | Explicit infrastructure teardown, subject to lifecycle protection                |
 
 ## Source and publication boundaries
 

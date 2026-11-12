@@ -342,8 +342,9 @@ checks = {
     "nonroot pod": pod["securityContext"].get("runAsUser") == 65532,
     "nonroot enforced": pod["securityContext"].get("runAsNonRoot") is True,
     "fsGroup for the mounted claim": pod["securityContext"].get("fsGroup") == 65532,
+    "startup working directory outside the home volume": container.get("workingDir") == "/tmp",
     "resource limits": "limits" in container.get("resources", {}),
-        # The volume is mounted at /home/t3 itself, which is the layout the image
+    # The volume is mounted at /home/t3 itself, which is the layout the image
     # and any existing claim already use: state at /home/t3/.t3, checkouts at
     # /home/t3/workspace, and a writable $HOME so the agent can create its own
     # ~/.bub. Leaf subPath mounts would move that layout and strand the state
@@ -418,6 +419,12 @@ if [ -n "$IMAGE" ]; then
         fi
     done
     [ -n "$container_tool" ] || die "--image needs podman or docker"
+    home_tmpfs="rw,mode=2770"
+    # Podman copies the image tree into tmpfs by default. A fresh claim does
+    # not, and copying its pre-chowned workspace would hide the startup bug.
+    if [ "$container_tool" = podman ]; then
+        home_tmpfs+=",notmpcopyup"
+    fi
 
     # Both executables, as the image's own user, with no network. Bub must be
     # the pinned release and must actually be the ACP-capable CLI: a console
@@ -452,6 +459,24 @@ if [ -n "$IMAGE" ]; then
     [ "$image_t3" = "$deployed_t3" ] \
         || die "image carries T3 $image_t3 but the template deploys $deployed_t3"
 
+    # Reproduce the bad startup order without deleting the directory the
+    # runtime creates as root. A green runtime check must reject this shape.
+    "$container_tool" run --rm --network=none \
+        --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+        --user 65532:65532 --group-add 0 \
+        --tmpfs "/home/t3:$home_tmpfs" --tmpfs /tmp:rw,mode=1777 \
+        --workdir /home/t3/workspace --entrypoint /bin/bash "$IMAGE" -ec '
+        [ -d /home/t3/workspace ] && [ ! -w /home/t3/workspace ]
+        if /usr/local/bin/t3-entrypoint >/tmp/out 2>/tmp/err; then
+            echo "the root-owned workspace unexpectedly started" >&2
+            exit 1
+        fi
+        grep -q "required directory is not writable: /home/t3/workspace" /tmp/err
+    ' || die "the image check did not reproduce the root-owned WORKDIR failure"
+
+    startup_workdir="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[0].workingDir' \
+        "$scratch/manifests-claim.yaml")"
+
 # The startup contract, exercised the way the deployment runs it: read-only root
 # filesystem, all capabilities dropped, no-new-privileges, and only /home/t3 and
 # /tmp writable. --network=none means nothing leaves the machine.
@@ -471,12 +496,12 @@ if [ -n "$IMAGE" ]; then
 "$container_tool" run --rm -i --network=none \
     --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --user 65532:65532 --group-add 0 \
-    --tmpfs /home/t3:rw,mode=2770 --tmpfs /tmp:rw,mode=1777 \
-    --entrypoint /bin/bash "$IMAGE" -ec '
+    --tmpfs "/home/t3:$home_tmpfs" --tmpfs /tmp:rw,mode=1777 \
+    --workdir "$startup_workdir" --entrypoint /bin/bash "$IMAGE" -ec '
     set -euo pipefail
-    # Fresh, empty state: the entrypoint must create state and workspace under
-    # the mounted root rather than requiring them to be pre-populated.
-    rm -rf /home/t3/.t3 /home/t3/workspace
+    # Use the rendered workingDir, not the image default. Do not delete any
+    # directory: doing so would hide the runtime-created root-owned WORKDIR.
+    [ ! -e /home/t3/.t3 ] && [ ! -e /home/t3/workspace ]
     /usr/local/bin/t3-entrypoint >/tmp/out 2>/tmp/err &
     pid=$!
     cleanup() { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
@@ -514,8 +539,8 @@ PY
     # T3 launches keeps its own state under ~/.bub, so a read-only $HOME breaks
     # the ACP session even while the server is up and answering.
     mkdir -p "$HOME/.bub/tapes" || { echo "$HOME is not writable" >&2; exit 1; }
-    # The block above deleted the image WORKDIR to prove the entrypoint
-    # recreates it; return to a real directory before starting the agent.
+    # The entrypoint has created the workspace as the nonroot run user; use
+    # that same directory for the provider T3 launches.
     cd /home/t3/workspace
 
     # Offline ACP handshake: the real initialize request, no model call and no

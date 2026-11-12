@@ -1,11 +1,47 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "Agents": {
+      "additionalProperties": false,
+      "properties": {
+        "image_repository": {
+          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$",
+          "title": "Image Repository",
+          "type": "string"
+        },
+        "image_tag": {
+          "default": "0.1.8",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$",
+          "title": "Image Tag",
+          "type": "string"
+        },
+        "image_digest": {
+          "default": "",
+          "pattern": "^$|sha256:[0-9a-f]{64}",
+          "title": "Image Digest",
+          "type": "string"
+        },
+        "storage_existing_claim": {
+          "default": "",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "title": "Storage Existing Claim",
+          "type": "string"
+        },
+        "gateway_secret": {
+          "default": "",
+          "title": "Gateway Secret",
+          "type": "string"
+        }
+      },
+      "required": ["image_repository"],
+      "title": "Agents",
+      "type": "object"
+    },
     "Argocd": {
       "additionalProperties": false,
       "properties": {
         "chart_version": {
-          "default": "10.10.2",
+          "default": "10.14.0",
           "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+$",
           "title": "Chart Version",
           "type": "string"
@@ -30,6 +66,35 @@
       },
       "required": ["tunnel_token_file"],
       "title": "Ingress",
+      "type": "object"
+    },
+    "Magpie": {
+      "additionalProperties": false,
+      "properties": {
+        "config_claim": {
+          "default": "",
+          "title": "Config Claim",
+          "type": "string"
+        },
+        "seed_dir": {
+          "default": "",
+          "title": "Seed Dir",
+          "type": "string"
+        }
+      },
+      "title": "Magpie",
+      "type": "object"
+    },
+    "Observability": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "Observability",
       "type": "object"
     },
     "Repository": {
@@ -60,6 +125,18 @@
       "required": ["url"],
       "title": "Repository",
       "type": "object"
+    },
+    "Spinkube": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "Spinkube",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -70,12 +147,42 @@
     "argocd": {
       "$ref": "#/$defs/Argocd",
       "default": {
-        "chart_version": "10.10.2",
+        "chart_version": "10.14.0",
         "namespace": "argo-system"
       }
     },
     "ingress": {
       "$ref": "#/$defs/Ingress"
+    },
+    "magpie": {
+      "$ref": "#/$defs/Magpie",
+      "default": {
+        "config_claim": "",
+        "seed_dir": ""
+      }
+    },
+    "observability": {
+      "$ref": "#/$defs/Observability",
+      "default": {
+        "enabled": false
+      }
+    },
+    "spinkube": {
+      "$ref": "#/$defs/Spinkube",
+      "default": {
+        "enabled": false
+      }
+    },
+    "agents": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Agents"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": ["repository", "ingress"],

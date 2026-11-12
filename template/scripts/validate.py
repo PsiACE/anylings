@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Self
 
 import json
+import re
 import sys
 import tomllib
 
@@ -33,6 +34,19 @@ REPO_URL_PATTERN = r"^(https?://|git://|ssh://git@)[^/]+/.+$"
 CHART_VERSION_PATTERN = r"^v?[0-9]+\.[0-9]+\.[0-9]+$"
 # A namespace is a DNS label: dots are not allowed.
 NAMESPACE_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+# A PersistentVolumeClaim name is a DNS subdomain (RFC 1123), like a Service.
+# Magpie and the agent runtime both reference an existing claim, so both use
+# this one rule rather than a second approximation of it.
+PVC_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+# A container image repository without a tag or digest: the tag is separate so
+# the rendered values never carry two sources for the same version.
+IMAGE_REPOSITORY_PATTERN = r"^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$"
+IMAGE_TAG_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"
+# Editor hint only: the empty string means "use an emptyDir". Runtime
+# validation stays in the validators, where empty is allowed.
+EMPTY_OR_PVC_NAME_PATTERN = r"^$|" + PVC_NAME_RE.pattern
+# Editor hint for an optional registry digest: empty, or sha256 and 64 hex.
+EMPTY_OR_DIGEST_PATTERN = r"^$|sha256:[0-9a-f]{64}"
 
 
 class Model(BaseModel):
@@ -77,7 +91,7 @@ class Repository(Model):
 class Argocd(Model):
     # The single source for the chart version: bootstrap.sh and the
     # self-managed Application both read it, so they cannot drift.
-    chart_version: str = Field(default="10.10.2", pattern=CHART_VERSION_PATTERN)
+    chart_version: str = Field(default="10.14.0", pattern=CHART_VERSION_PATTERN)
     namespace: str = Field(default="argo-system", pattern=NAMESPACE_PATTERN)
 
 
@@ -96,6 +110,127 @@ class Ingress(Model):
         return value
 
 
+class Agents(Model):
+    # The T3 Code runtime image is built from this repository but published to
+    # a registry this template must not guess: an operator names it, so no
+    # private registry or vendor path is baked into the rendered tree.
+    image_repository: str = Field(pattern=IMAGE_REPOSITORY_PATTERN)
+    image_tag: str = Field(default="0.1.8", pattern=IMAGE_TAG_PATTERN)
+    # An immutable pin. A tag can be moved; the registry digest the publisher
+    # records cannot, so a deployment that must not drift sets this. Empty
+    # leaves the tag as the only reference.
+    #
+    # No Field `pattern` here, for the same reason as the claim below: it would
+    # run before the validator and reject the documented empty default.
+    image_digest: str = Field(
+        default="",
+        json_schema_extra={"pattern": EMPTY_OR_DIGEST_PATTERN},
+    )
+
+    @field_validator("image_digest")
+    @classmethod
+    def check_image_digest(cls, value: str) -> str:
+        if not value:
+            return value
+        # A registry digest is `sha256:` and 64 lowercase hex characters. An
+        # algorithm that is not sha256 is not something this template pins.
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise ValueError(
+                f"{value!r} is not a registry digest "
+                "(expected sha256: followed by 64 lowercase hex characters)"
+            )
+        return value
+
+    # Empty keeps the default ephemeral emptyDir /home/t3; a name opts into an
+    # existing claim the operator created. The platform never creates a claim
+    # or picks a StorageClass.    #
+    # No Field `pattern` here: it runs before field validators and would reject
+    # the documented empty value, while an omitted key defaulted to the same ""
+    # and passed. The validator below owns both cases.
+    storage_existing_claim: str = Field(
+        default="",
+        json_schema_extra={"pattern": EMPTY_OR_PVC_NAME_PATTERN},
+    )
+    # File holding the gateway key the runtime presents to Magpie. Naming it
+    # makes the render emit the `t3-code-magpie-gateway` Secret, its KSOPS
+    # generator and a `secretKeyRef`; leaving it empty renders none of them,
+    # so an instance without a shared gateway keeps no dead secret.
+    gateway_secret: str = ""
+
+    @field_validator("storage_existing_claim")
+    @classmethod
+    def check_storage_claim(cls, value: str) -> str:
+        if not value:
+            return value
+        # A claim name is a DNS subdomain: 253 characters overall and at most
+        # 63 per dot-separated label. A bare regex match would accept a single
+        # over-long label, which the API server then rejects at sync time.
+        if (
+            len(value) > 253
+            or not PVC_NAME_RE.fullmatch(value)
+            or any(len(label) > 63 for label in value.split("."))
+        ):
+            raise ValueError(
+                f"{value!r} is not a valid PersistentVolumeClaim name "
+                "(lowercase DNS subdomain, at most 253 characters, "
+                "each label at most 63)"
+            )
+        return value
+
+
+class Magpie(Model):
+    # Empty keeps the default ephemeral emptyDir /config volume. A name opts
+    # into an existing claim in the application's own namespace; the platform
+    # never creates that claim, so removing the app cannot delete its data.
+    config_claim: str = ""
+    # Directory holding `providers.json` and `caller-keys.json`, the gateway's
+    # own two stores. Naming it makes the render emit the `magpie-seed` Secret
+    # and the init container that copies those files into `/config/magpie`
+    # only when absent. Empty renders neither, so an instance that configures
+    # its providers at runtime keeps the ephemeral-volume default.
+    seed_dir: str = ""
+
+    @field_validator("config_claim")
+    @classmethod
+    def check_config_claim(cls, value: str) -> str:
+        if not value:
+            return value
+        if len(value) > 253 or not PVC_NAME_RE.fullmatch(value):
+            raise ValueError(
+                f"{value!r} is not a valid PersistentVolumeClaim name "
+                "(lowercase DNS subdomain, at most 253 characters)"
+            )
+        return value
+
+    @field_validator("seed_dir")
+    @classmethod
+    def check_seed_dir(cls, value: str) -> str:
+        # The render reads exactly two files from here and encrypts their
+        # contents; an empty path would make the resolution silently read the
+        # config directory instead.
+        if not value:
+            return value
+        if not value.strip():
+            raise ValueError("seed_dir must be empty or a directory path")
+        return value
+
+
+class Observability(Model):
+    # Off by default: the slice needs ClusterIP-only access and its own
+    # monitoring decision, so it never appears in a cluster that did not ask
+    # for it. Enabling it deploys VictoriaMetrics single-node and Gatus.
+    enabled: bool = False
+
+
+class Spinkube(Model):
+    # Off by default: the slice installs a cluster-scoped operator, a
+    # cert-manager instance and admission webhooks, so it never appears in a
+    # cluster that did not ask for it. Enabling it deploys cert-manager, the
+    # Spin operator with its CRDs, a Spintainer executor and one sample app,
+    # all in the `spinkube` namespace, reachable by ClusterIP only.
+    enabled: bool = False
+
+
 class Config(Model):
     model_config = ConfigDict(extra="forbid", title="cluster.toml")
 
@@ -105,6 +240,25 @@ class Config(Model):
     # optional. A config without [ingress] is rejected instead of silently
     # rendering a cluster with no ingress path.
     ingress: Ingress
+    magpie: Magpie = Magpie()
+    observability: Observability = Observability()
+    spinkube: Spinkube = Spinkube()
+    # Optional: a cluster without an operator-supplied registry simply has no
+    # agent runtime. Making it required would block every existing deployment
+    # and the native rehearsal on a registry that does not exist there.
+    agents: Agents | None = None
+
+    @model_validator(mode="after")
+    def check_gateway_wiring(self) -> Self:
+        # A gateway key the gateway never learned only produces 401s, and the
+        # agent runtime is then unusable in a way that looks like an outage.
+        # Both halves are seeded from one snapshot, so require them together.
+        if self.agents and self.agents.gateway_secret and not self.magpie.seed_dir:
+            raise ValueError(
+                "agents.gateway_secret requires magpie.seed_dir: the gateway key "
+                "must be one Magpie's caller-keys.json already records"
+            )
+        return self
 
 
 def format_errors(error: ValidationError) -> str:
@@ -137,6 +291,17 @@ def parse(config_file: str | Path) -> tuple[Config, Path]:
         raise ConfigError(f"{path}: file not found") from None
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: invalid TOML: {e}") from None
+
+    # The connector used to be opt-in through `ingress.mode`. A config that
+    # still carries it is the normal case during migration, so name the edit
+    # instead of leaving the reader with "extra inputs are not permitted".
+    ingress = raw.get("ingress")
+    if isinstance(ingress, dict) and "mode" in ingress:
+        raise ConfigError(
+            f"ingress.mode: the Cloudflare Tunnel connector is part of the "
+            f"baseline, so remove it and keep only ingress.tunnel_token_file "
+            f"in {path}"
+        )
 
     try:
         return Config.model_validate(raw), path.resolve()

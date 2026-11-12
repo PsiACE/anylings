@@ -39,8 +39,8 @@ known_hosts = ""
 # =============================================================================
 [argocd]
 
-# OPTIONAL. Default: "10.10.2"
-chart_version = "10.10.2"
+# OPTIONAL. Default: "10.14.0"
+chart_version = "10.14.0"
 
 # OPTIONAL. Default: "argo-system"
 namespace = "argo-system"
@@ -59,3 +59,103 @@ namespace = "argo-system"
 # output. The token is a file input, never a plaintext value in this file.
 # Example: ".local/cloudflare-tunnel.token"
 tunnel_token_file = ".local/cloudflare-tunnel.token"
+
+
+# =============================================================================
+#    The shared Magpie model gateway. Nothing here is a credential: the image
+#    and runtime settings are fixed by the rendered values, and provider keys
+#    live only in the running instance's /config.
+# =============================================================================
+[magpie]
+
+# Existing PersistentVolumeClaim to mount at /config, in the application's own
+# namespace ("default"). The platform mounts it and never creates it, so
+# removing the app from Git cannot delete its data; you own the claim, its
+# StorageClass and its backups. The claim must be writable by gid 65532.
+# OPTIONAL. Default: "" (an ephemeral emptyDir; providers, gateway keys and
+# sign-ins are lost when the pod is replaced)
+# Example: "magpie-config"
+config_claim = ""
+
+# Directory holding the gateway's own two stores, `providers.json` and
+# `caller-keys.json`. Naming it renders the `magpie-seed` Secret, the KSOPS
+# generator that decrypts it, and an init container that copies each file into
+# /config/magpie only when absent, so a restart never overwrites keys the
+# running gateway has since changed. Resolved relative to this file.
+# OPTIONAL. Default: "" (nothing is seeded; configure providers at runtime)
+# Example: "secret-inputs"
+seed_dir = ""
+
+
+# =============================================================================
+#    Optional self-hosted observability. Disabled by default; enabling it
+#    publishes two ClusterIP-only applications into the `observability`
+#    namespace: single-node VictoriaMetrics (7d retention target) and Gatus
+#    (probe status and alerting). No Grafana, Loki, operator or database is
+#    deployed, and no PersistentVolumeClaim is provisioned automatically.
+# =============================================================================
+[observability]
+
+# OPTIONAL. Default: false
+# enabled = true
+enabled = false
+
+# =============================================================================
+#    The T3 Code agent runtime. Optional: without this section no agent runtime
+#    is rendered, which keeps a cluster that has no published runtime image
+#    deployable. The image is built from `images/t3-code` in this repository and
+#    pushed to a registry this template cannot guess, so the operator names it.
+#    Provider credentials, model choice and any public route are instance
+#    decisions made after deployment; none of them are committed here.
+# =============================================================================
+# [agents]
+
+# Container image repository of the T3 Code runtime image, without a tag.
+# REQUIRED when this section is present.
+# Example: "registry.example.test/anylings/t3-code"
+# image_repository = "registry.example.test/anylings/t3-code"
+
+# OPTIONAL. Default: "0.1.8". The T3 Code release the image carries. Keep this
+# in step with the Containerfile's T3_VERSION, and prefer a release at least
+# three days old.
+# image_tag = "0.1.8"
+
+# OPTIONAL. Default: "" (the tag alone is the reference). A registry digest,
+# `sha256:` and 64 hex characters, as recorded by the runtime image workflow
+# after it publishes. A tag can be moved; a digest cannot, so a deployment that
+# must not drift pins this. The digest is for `image_repository` and must be
+# pushed there: it is not interchangeable with a differently named registry.
+# Example: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# image_digest = ""
+
+# Name of an existing PersistentVolumeClaim to mount at /home/t3, which holds
+# T3's database and the project checkouts it references. Empty means an
+# emptyDir: state is then lost when the pod is replaced. This template never
+# creates the claim, so its size and StorageClass stay an explicit choice.
+# OPTIONAL. Default: "" (ephemeral)
+# storage_existing_claim = ""
+
+# File holding the gateway key this runtime presents to Magpie, resolved
+# relative to this file. Naming it renders the `t3-code-magpie-gateway` Secret
+# and the `BUB_MAGPIE_API_KEY` secretKeyRef, and points the runtime at the
+# in-cluster gateway. It must be the same value Magpie recorded in its own
+# `caller-keys.json`. REQUIRES `magpie.seed_dir`: a key the gateway never
+# learned would only produce 401s.
+# OPTIONAL. Default: "" (no gateway wiring)
+# gateway_secret = ""
+
+
+# =============================================================================
+#    Optional SpinKube support: run Spin (WebAssembly) HTTP functions in the
+#    cluster. Disabled by default. Enabling it publishes two applications into
+#    the `spinkube` namespace: cert-manager (a prerequisite of the operator's
+#    webhook certificates) and the Spin operator with its two CRDs, its
+#    Spintainer executor and one sample SpinApp. Everything is ClusterIP-only;
+#    no runtime class, node shim or privileged installer is involved because the
+#    executor runs Spin inside an ordinary container.
+# =============================================================================
+[spinkube]
+
+# OPTIONAL. Default: false
+# enabled = true
+enabled = false

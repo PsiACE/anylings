@@ -17,6 +17,13 @@ spec:
     - ghcr.io/argoproj/argo-helm
     - ghcr.io/bjw-s-labs/helm
     - ghcr.io/stakater/charts
+    #% if observability.enabled %#
+    - ghcr.io/victoriametrics/helm-charts
+    #% endif %#
+    #% if spinkube.enabled %#
+    - ghcr.io/spinframework/charts
+    - quay.io/jetstack/charts
+    #% endif %#
   destinations:
     - name: in-cluster
       namespace: "#{ argocd.namespace }#"
@@ -26,6 +33,23 @@ spec:
       namespace: kube-system
     - name: in-cluster
       namespace: network
+    #% if observability.enabled %#
+    - name: in-cluster
+      namespace: observability
+    #% endif %#
+    #% if agents %#
+    # The agent runtime keeps its workspace and state in its own namespace,
+    # separate from the shared workloads in default.
+    - name: in-cluster
+      namespace: agents
+    #% endif %#
+    #% if spinkube.enabled %#
+    # The Spin feature keeps the operator, its executor and a sample app
+    # together, because the operator resolves an executor in the app's own
+    # namespace.
+    - name: in-cluster
+      namespace: spinkube
+    #% endif %#
   # Permit the cluster-scoped kinds used by Argo and reloader, not provider
   # networking, Nodes or persistent storage resources.
   clusterResourceWhitelist:
@@ -37,3 +61,11 @@ spec:
       kind: ClusterRole
     - group: rbac.authorization.k8s.io
       kind: ClusterRoleBinding
+    #% if spinkube.enabled %#
+    # cert-manager and the Spin operator own admission webhooks. They are
+    # cluster-scoped, so they need an explicit grant; nothing else is widened.
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+    #% endif %#

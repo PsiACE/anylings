@@ -1,0 +1,13 @@
+# The source pins for the toolchain in the image. requirements.txt is the
+# resolved, hash-constrained lock generated from this file with:
+#   uv pip compile --python-version 3.13 --prerelease=allow --generate-hashes \
+#       --no-header --no-annotate requirements.in -o requirements.txt
+# The `app` extra is what installs Bub's command line; without it `bub` exits
+# with a message saying so. `bub acp` is not in that extra: it comes from the
+# separate bub-acp-server plugin, which is what makes this an ACP runtime rather
+# than a Bub install that happens to report a version.
+#
+# bub-acp-server requires an agent-client-protocol release candidate, so the
+# lock must allow pre-releases for that one dependency.
+bub[app]==0.6.1
+bub-acp-server==0.1.0

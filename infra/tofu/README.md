@@ -55,18 +55,27 @@ ordinary `TF_VAR_*`/tfvars inputs. Never use the same backend state for two root
 
 - **k0s:** see [k0s/README.md](k0s/README.md). OpenTofu tracks desired inputs;
   this is not full runtime drift detection. Reset must not require live kubeconfig.
-- **DOKS:** ordinary non-HA control plane, two fixed `s-2vcpu-4gb` workers,
-  no autoscaling or automatic upgrade. The version must be a full offered DOKS
+- **DOKS:** ordinary non-HA control plane, one fixed pool of two `s-2vcpu-4gb`
+  workers by default, no autoscaling or automatic upgrade. `node_size` and
+  `node_count` are the only pool inputs. The version must be a full offered DOKS
   slug; region defaults to `sgp1`. DigitalOcean supplies default networking/CSI.
-  There is no optional VPC factory, tag interface or configurable node-pool module.
-- **Cloudflare:** the tunnel, its ingress, explicit HTTP(S) origins in the selected
-  zone, their DNS records and Access policies are always managed; this root has no
-  enable/disable switch for them. Routes default to Access-protected and require
-  allowed emails or existing group IDs. An intentionally public route must say
-  `access = false`. Policies precede tunnel configuration, then DNS; no admin
-  hostname or allow-everyone policy is invented. Only `r2_buckets` is optional: a
-  set of bucket names in `apac` using provider defaults, empty by default. WARP
-  routes and R2 lock-rule configuration are not wrapped by this root.
+  There is no optional VPC factory, tag interface or autoscaling controller.
+- **Cloudflare:** the tunnel, its ingress, explicit HTTP(S) origins, their DNS
+  records and Access policies are always managed; this root has no
+  enable/disable switch for them. Every route resolves to an existing zone in
+  the configured account: `zone_name` on the route, or `var.zone_name` when
+  unset, so one root serves several zones through one remotely managed tunnel.
+  A hostname outside its selected zone, a missing zone, or a zone owned by
+  another account fails closed. Routes default to Access-protected and require
+  allowed emails or existing group IDs; optional `access_allowed_idp_ids`
+  restricts the login page to existing identity providers such as GitHub without
+  creating one or widening that policy. An intentionally public route must say
+  `access = false`; restrict such a route in the tunnel ingress instead of
+  bypassing Access globally. Policies precede tunnel configuration, then DNS; no
+  admin hostname or allow-everyone policy is invented. Only `r2_buckets` is
+  optional: a set of bucket names in `apac` using provider defaults, empty by
+  default. WARP routes and R2 lock-rule configuration are not wrapped by this
+  root.
 - **Platform:** OpenTofu owns only `bootstrap`, sourced from
   `kubernetes/bootstrap.yaml`. Argo owns `argo` and `root`; the latter applies the
   project and its ApplicationSet. Apply waits for bootstrap sync/health, not all
@@ -85,6 +94,38 @@ Cloud tokens stay in environment variables (`DIGITALOCEAN_TOKEN`,
 `CLOUDFLARE_API_TOKEN`). Tunnel credentials and kubeconfig outputs/state are sensitive.
 Read the tunnel token into a private file referenced by platform configuration.
 Live cloud behavior, Access propagation and data recovery are not proven by `validate`.
+
+Routes, DNS, Access and the tunnel are baseline, so the first plan against an
+existing installation shows the tunnel's own resources as additions. R2 buckets
+appear only for names in `r2_buckets`. Nothing here removes an existing route or
+policy that the configuration still declares.
+
+## DOKS worker pool inputs
+
+| Input        | Default       | Validation             |
+| ------------ | ------------- | ---------------------- |
+| `node_size`  | `s-2vcpu-4gb` | DigitalOcean size slug |
+| `node_count` | `2`           | Whole number, 1 to 512 |
+
+The pool is one fixed, non-HA pool with `auto_scale = false`; `node_size` and
+`node_count` are its only inputs. Both defaults reproduce the previous fixed
+shape. A single-node cluster is a deliberate choice, not a default:
+
+```hcl
+# One worker instead of two; every other input keeps its default.
+node_count = 1
+```
+
+One node is non-HA: node maintenance, an upgrade or a node fault stops all
+workloads, with no second worker to receive them.
+
+Changing `node_size` on an existing cluster is not an in-place resize. A node
+pool's size slug is immutable, so it needs a reviewed pool migration (new pool,
+drain, removal of the old one) rather than an ordinary apply. `node_count` can
+change in place, and `prevent_destroy` still guards replacement and deletion.
+
+The DigitalOcean token is an environment credential
+(`DIGITALOCEAN_TOKEN`), never an input variable or a tracked tfvars value.
 
 ## Platform migration
 
@@ -105,10 +146,16 @@ this root directly: deleting its old HCL resources otherwise schedules deletion.
 4. Review the platform plan: only the new bootstrap Application should be added.
    Existing Argo must not be reinstalled. Apply and check `bootstrap`, `root`,
    `argo`, the `kubernetes` ApplicationSet and all generated workload Applications.
-   Existing workload names (`echo`, `reloader`, `cloudflare-tunnel`) are
-   retained to avoid rename-driven replacement. Resolve ownership conflicts
+   Retained workload names avoid rename-driven replacement;
+   `cloudflare-tunnel` is baseline. The retired `echo` sample has no replacement
+   by that name: it is removed by Git deletion like any other application, and
+   the real `magpie` workload is added separately. Resolve ownership conflicts
    explicitly; do not force over another controller's resources.
-5. Remove obsolete Git paths only after the new owners reconcile successfully.
+5. Remove `ingress.mode` from the operator's `cluster.toml` before rendering this
+   revision, as described in the root README: the connector is baseline, so a
+   config that still sets a mode is rejected. This is an input migration the
+   operator performs, not something an apply rewrites.
+6. Remove obsolete Git paths only after the new owners reconcile successfully.
 
 This migration has not been exercised against a live existing installation.
 Never substitute `destroy platform` or a whole-state reset for the handoff.
@@ -119,7 +166,14 @@ Never substitute `destroy platform` or a whole-state reset for the handoff.
 tofu fmt -check -recursive infra/tofu
 tofu -chdir=infra/tofu/ROOT init -backend=false -lockfile=readonly
 tofu -chdir=infra/tofu/ROOT validate
+tofu -chdir=infra/tofu/ROOT test
 ```
 
-CI validates all four roots and applies the normal k0s/platform roots on a disposable
-host. It does not apply cloud roots. Locks cover Linux/macOS on amd64/arm64.
+The DOKS root's `tests/cluster_pool.tftest.hcl` is an offline contract over a
+mocked provider: it covers the defaults, the explicit `ha = false`, a single node
+and an explicit size, and rejects an invalid count or size. It needs no token,
+makes no DigitalOcean API call, and writes no state.
+
+CI validates all four roots, runs those offline contracts, and applies the normal
+k0s/platform roots on a disposable host. It does not apply cloud roots. Locks
+cover Linux/macOS on amd64/arm64.

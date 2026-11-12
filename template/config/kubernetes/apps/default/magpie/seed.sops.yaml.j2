@@ -1,0 +1,19 @@
+#% if magpie.seed_dir %#
+---
+# The gateway's own two stores, read from magpie.seed_dir and encrypted here.
+# Magpie's init container copies each into /config/magpie only when absent, so
+# a restart never overwrites keys or providers the running gateway has since
+# changed. Nothing here is a provider credential: providers.json holds the
+# provider closure, caller-keys.json the issued gateway keys.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: magpie-seed
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: anylings
+type: Opaque
+stringData:
+  providers.json: #{ seed_file('providers.json') | tojson }#
+  caller-keys.json: #{ seed_file('caller-keys.json') | tojson }#
+#% endif %#

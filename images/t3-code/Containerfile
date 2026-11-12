@@ -1,0 +1,115 @@
+# syntax=docker/dockerfile:1
+#
+# The T3 Code web server, running on the upstream release binary, together with
+# the Bub ACP executable that T3 can start as a provider. One image, one
+# nonroot uid, no credentials: everything instance-specific (workspace, state,
+# provider sign-ins) is a mount or a runtime input.
+#
+# Both executables come from their upstream distribution channels:
+#   - T3 Code publishes a self-contained linux binary archive per architecture
+#     from its GitHub release, listed in that release's SHA256SUMS.
+#   - Bub publishes the `bub` console script from the `bub` PyPI project; the
+#     `app` extra is what installs the command-line stack.
+# Nothing else is installed at runtime, so `t3 --version` and `bub --version`
+# in the built image are the versions pinned below.
+
+ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168
+
+FROM ${UV_IMAGE} AS uv
+
+FROM ${PYTHON_IMAGE}
+
+ARG T3_VERSION=0.1.8
+# From https://github.com/pingdotgg/t3code/releases/download/v0.1.8/SHA256SUMS.
+# Both architectures are listed so that a typo or an unpublished build fails
+# the build instead of shipping a binary no release digest covers.
+ARG T3_SHA256_AMD64=b9c49dc00c23fbbc5961bdaff2d88e556d96c8dbd638c4501e2937c70650a9e5
+ARG T3_SHA256_ARM64=2bffbf608eef736c5c35e3431a7e5261d0c909e33d8a8feb83ef26a3747cf8f4
+ARG TARGETARCH
+
+# The release binary is dynamically linked against glibc and the C++/atomic
+# runtime libraries, so those are runtime dependencies rather than build
+# leftovers. git is what makes a mounted project usable at all.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        libatomic1 \
+        libstdc++6 \
+        openssh-client; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# Bub is installed into its own prefix rather than into the system interpreter,
+# so the base image's Python stays untouched and one directory holds the tool.
+COPY requirements.txt /tmp/requirements.txt
+RUN set -eux; \
+    uv venv --python 3.13 /opt/bub; \
+    uv pip install \
+        --python /opt/bub/bin/python \
+        --no-cache \
+        --require-hashes \
+        --requirements /tmp/requirements.txt; \
+    rm /tmp/requirements.txt; \
+    /opt/bub/bin/bub --version; \
+    # `bub acp` is the interface T3 launches, so a build that lacks it is not
+    # this image even though the version above printed fine.
+    /opt/bub/bin/bub acp --help > /dev/null
+
+# Verified download: the archive is checked against the release's published
+# digest before extraction, and the extracted binary runs once so a platform
+# mismatch fails the build instead of the pod.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64) t3_arch=x64; t3_sum="$T3_SHA256_AMD64" ;; \
+        arm64) t3_arch=arm64; t3_sum="$T3_SHA256_ARM64" ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    t3_archive="t3-${T3_VERSION}-linux-${t3_arch}.tar.gz"; \
+    curl --fail --location --silent --show-error --retry 3 \
+        --output "/tmp/${t3_archive}" \
+        "https://github.com/pingdotgg/t3code/releases/download/v${T3_VERSION}/${t3_archive}"; \
+    echo "${t3_sum}  /tmp/${t3_archive}" | sha256sum --check --strict --status - \
+        || { echo "checksum mismatch for ${t3_archive}" >&2; exit 1; }; \
+    mkdir -p /opt/t3; \
+    tar --extract --file "/tmp/${t3_archive}" --directory /opt/t3 --strip-components=1; \
+    rm "/tmp/${t3_archive}"; \
+    ln --symbolic /opt/t3/t3 /usr/local/bin/t3; \
+    t3 --version
+
+ENV PATH="/opt/bub/bin:${PATH}" \
+    HOME=/home/t3 \
+    T3CODE_HOME=/home/t3/.t3 \
+    T3CODE_PROJECT_ROOT=/home/t3/workspace \
+    T3CODE_HOST=0.0.0.0 \
+    T3CODE_PORT=3773 \
+    T3CODE_NO_BROWSER=true
+
+# One owned root holds both writable trees, so a single claim can carry T3's
+# state and the project checkouts that state refers to. A mount replaces it;
+# see values.yaml for the existing-claim option.
+RUN set -eux; \
+    mkdir -p /home/t3/.t3 /home/t3/workspace; \
+    chown --recursive 65532:65532 /home/t3
+
+COPY entrypoint.sh /usr/local/bin/t3-entrypoint
+RUN chmod 0755 /usr/local/bin/t3-entrypoint
+
+LABEL org.opencontainers.image.title="t3-code" \
+      org.opencontainers.image.description="T3 Code web server with the Bub ACP executable" \
+      org.opencontainers.image.source="https://github.com/pingdotgg/t3code" \
+      org.opencontainers.image.version="${T3_VERSION}"
+
+USER 65532:65532
+WORKDIR /home/t3/workspace
+
+# The container only ever binds its own interface; reachability is decided by
+# the Service, and T3's own pairing/bearer authentication stays enabled.
+EXPOSE 3773
+
+# exec in the entrypoint, so this process receives the pod's signals directly.
+ENTRYPOINT ["/usr/local/bin/t3-entrypoint"]

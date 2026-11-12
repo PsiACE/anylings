@@ -18,6 +18,17 @@ import validate
 # isolated directory.
 DEFAULT_CONFIG = 'cluster.toml'
 
+# Vendored manifests, keyed by their path inside the template inputs, mapped to
+# the optional-feature flag that owns them. These files are copied verbatim
+# rather than rendered, so they cannot gate themselves with a Jinja block the
+# way a `.j2` template does; excluding the path is the only way to keep a
+# disabled feature from publishing them. tests/ci/check-spinkube.sh checks the
+# CRD structure and sync-wave annotations, not the upstream digest. Re-verify
+# upstream provenance manually on upgrade, as documented in the vendored header.
+VENDORED_MANIFESTS = {
+    'kubernetes/apps/spinkube/spin-operator/crds.yaml': 'spinkube',
+}
+
 
 def _env_path(name: str, default: str) -> Path:
     return Path(os.environ.get(name) or default).expanduser()
@@ -88,6 +99,22 @@ class Plugin(makejinja.plugin.Plugin):
         ingress['tunnel_token_path'] = str(
             validate.resolve_relative(self._config_file, ingress['tunnel_token_file'])
         )
+        # Both app secret directories are resolved once, against the config
+        # file, so a relative path in cluster.toml means the same thing during
+        # a render as it did when the operator wrote it.
+        magpie = data['magpie']
+        magpie['seed_dir_path'] = (
+            str(validate.resolve_relative(self._config_file, magpie['seed_dir']))
+            if magpie['seed_dir']
+            else ''
+        )
+        agents = data.get('agents')
+        if agents is not None:
+            agents['gateway_secret_file'] = (
+                str(validate.resolve_relative(self._config_file, agents['gateway_secret']))
+                if agents['gateway_secret']
+                else ''
+            )
         return data
 
     def functions(self) -> makejinja.plugin.Functions:
@@ -101,12 +128,43 @@ class Plugin(makejinja.plugin.Plugin):
             """Read the cloudflare tunnel token from its configured file."""
             return _read_stripped(file_path or self._load()['ingress']['tunnel_token_path'])
 
+        def seed_file(name: str) -> str:
+            """Read one of Magpie's own stores from magpie.seed_dir."""
+            directory = self._load()['magpie']['seed_dir_path']
+            if not directory:
+                raise ValueError('magpie.seed_dir is not configured')
+            return _read_stripped(Path(directory) / name)
+
+        def gateway_key() -> str:
+            """Read the gateway key from agents.gateway_secret."""
+            path = (self._load().get('agents') or {}).get('gateway_secret_file', '')
+            if not path:
+                raise ValueError('agents.gateway_secret is not configured')
+            return _read_stripped(path)
+
         return [
             age_key,
             deploy_key,
             repository_path,
             tunnel_token,
+            seed_file,
+            gateway_key,
         ]
+
+    def path_filters(self) -> makejinja.plugin.PathFilters:
+        def vendored_manifest_owned(input_path: Path) -> bool:
+            """Keep a vendored manifest only while its feature is enabled."""
+            # The keys are the paths as they appear under the template inputs,
+            # and the plugin is not given that root, so compare the tail of the
+            # absolute path. The key set is fixed and fully qualified, so a
+            # suffix cannot collide with another tracked file.
+            path = input_path.as_posix()
+            for relative, section in VENDORED_MANIFESTS.items():
+                if path.endswith('/' + relative):
+                    return bool(self._load()[section]['enabled'])
+            return True
+
+        return [vendored_manifest_owned]
 
 
 # SSH host keys as published by each provider. Must cover every host in

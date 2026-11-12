@@ -1,10 +1,33 @@
 # Official Cloudflare resources: protected host routes and optional buckets.
-data "cloudflare_zones" "this" {
-  name = var.zone_name
+#
+# Every route selects an existing zone, either explicitly or through the default
+# zone_name. Each distinct zone is looked up once in the configured account; DNS
+# and Access resources for a hostname always use that hostname's zone.
+data "cloudflare_zone" "route" {
+  for_each = local.route_zones
+
+  filter = {
+    name    = each.key
+    account = { id = var.cloudflare_account_id }
+  }
+
+  # Fail closed: a zone that resolves outside the configured account, or under
+  # another name, never becomes a DNS or Access target.
+  lifecycle {
+    postcondition {
+      condition     = self.name == each.key && self.account.id == var.cloudflare_account_id
+      error_message = "Route zone ${each.key} must be an existing zone in the configured Cloudflare account."
+    }
+  }
 }
 
 locals {
-  zone = one(data.cloudflare_zones.this.result)
+  # The existing zone each hostname belongs to; one lookup per distinct zone.
+  route_zone = {
+    for hostname, route in var.routes : hostname => coalesce(route.zone_name, var.zone_name)
+  }
+
+  route_zones = toset(values(local.route_zone))
 
   tunnel_origin = "${cloudflare_zero_trust_tunnel_cloudflared.this.id}.cfargotunnel.com"
 
@@ -18,6 +41,10 @@ locals {
     [for email in var.access_include_emails : { email = { email = email } }],
     [for id in var.access_include_group_ids : { group = { id = id } }],
   )
+
+  # Empty means the provider's account default for the existing identities; the
+  # allowed-identities policy still gates every protected route.
+  access_allowed_idps = length(var.access_allowed_idp_ids) > 0 ? var.access_allowed_idp_ids : null
 
   ingress = concat(
     [
@@ -37,7 +64,8 @@ resource "cloudflare_zero_trust_tunnel_cloudflared" "this" {
   account_id = var.cloudflare_account_id
   name       = var.tunnel_name
   # Routes live in this configuration, so the tunnel is managed remotely and the
-  # in-cluster cloudflared runs with only the token.
+  # in-cluster cloudflared runs with only the token. One tunnel serves every
+  # route, in every selected zone of this account.
   config_src = "cloudflare"
 }
 
@@ -58,7 +86,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "this" {
 resource "cloudflare_dns_record" "route" {
   for_each = var.routes
 
-  zone_id = local.zone.id
+  zone_id = data.cloudflare_zone.route[local.route_zone[each.key]].zone_id
   name    = each.key
   type    = "CNAME"
   content = local.tunnel_origin
@@ -78,8 +106,13 @@ resource "cloudflare_zero_trust_access_application" "route" {
   type = "self_hosted"
 
   # self_hosted domain applications use zone scope; do not also set account_id.
-  zone_id = local.zone.id
+  zone_id = data.cloudflare_zone.route[local.route_zone[each.key]].zone_id
   domain  = each.key
+
+  # Restrict the login page to existing identity providers when an instance
+  # names them. This changes which identities can be offered; it never widens
+  # the policy below, and no provider is created here.
+  allowed_idps = local.access_allowed_idps
 
   session_duration = var.session_duration
 

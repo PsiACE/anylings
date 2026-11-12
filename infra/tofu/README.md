@@ -57,12 +57,19 @@ ordinary `TF_VAR_*`/tfvars inputs. Never use the same backend state for two root
   `node_count` are the only pool inputs. The version must be a full offered DOKS
   slug; region defaults to `sgp1`. DigitalOcean supplies default networking/CSI.
   There is no optional VPC factory, tag interface or autoscaling controller.
-- **Cloudflare:** explicit HTTP(S) origins in the selected zone. Routes default
-  to Access-protected and require allowed emails or existing group IDs. An
-  intentionally public route must say `access = false`. Policies precede tunnel
-  configuration, then DNS; no admin hostname or allow-everyone policy is invented.
-  `r2_buckets` is a set of optional bucket names in `apac`, using provider defaults.
-  WARP routes and R2 lock-rule configuration are not wrapped by this root.
+- **Cloudflare:** explicit HTTP(S) origins. Every route resolves to an existing
+  zone in the configured account: `zone_name` on the route, or `var.zone_name`
+  when unset, so one root serves several zones through one remotely managed
+  tunnel. A hostname outside its selected zone, a missing zone, or a zone owned
+  by another account fails closed. Routes default to Access-protected and require
+  allowed emails or existing group IDs; optional `access_allowed_idp_ids`
+  restricts the login page to existing identity providers such as GitHub without
+  creating one or widening that policy. An intentionally public route must say
+  `access = false`; restrict such a route in the tunnel ingress instead of
+  bypassing Access globally. Policies precede tunnel configuration, then DNS; no
+  admin hostname or allow-everyone policy is invented. `r2_buckets` is a set of
+  optional bucket names in `apac`, using provider defaults. WARP routes and R2
+  lock-rule configuration are not wrapped by this root.
 - **Platform:** OpenTofu owns only `bootstrap`, sourced from
   `kubernetes/bootstrap.yaml`. Argo owns `argo` and `root`; the latter applies the
   project and its ApplicationSet. Apply waits for bootstrap sync/health, not all

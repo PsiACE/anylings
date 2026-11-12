@@ -34,6 +34,10 @@ log "DOKS offline pool contracts"
 # The mocked provider still needs the already-initialized DOKS plugin cache, so
 # the test reuses that data directory instead of the last loop iteration's.
 TF_DATA_DIR="$work/tofu-doks" tofu -chdir=infra/tofu/doks test -no-color
+
+log "Cloudflare offline zone and route contracts"
+# Mocked provider only: no token, no Cloudflare API call and no state.
+TF_DATA_DIR="$work/tofu-cloudflare" tofu -chdir=infra/tofu/cloudflare test -no-color
 unset TF_DATA_DIR
 
 # Both supported render inputs, each in its own private directory, then the

@@ -20,8 +20,8 @@ with an expected identity and returns `{"ready": bool, "issues": [code]}`:
   with all replica counts at zero
 - no Pod, terminating included, still holding either claim
 
-Capacity is compared as the exact string the API returned. There is no Quantity
-parser, so an unexpected unit fails closed instead of being coerced.
+Capacity strings must match exactly. Kubernetes validates their Quantity
+syntax; this preflight does not replace API schema validation or convert units.
 
 Issue codes are bounded and never echo an object field, so a report is safe to
 log: it cannot carry a volume handle, a Secret value or a provider message.
@@ -29,7 +29,8 @@ log: it cannot carry a volume handle, a Secret value or a provider message.
 ## Running the preflight
 
 The CLI is a thin transport over that core. Provide an explicit kubeconfig,
-context and a private expected-identity file:
+context and a private expected-identity file. All three arguments must be
+non-blank; resource identities must be Kubernetes names, not kubectl options:
 
 ```console
 $ uv run --quiet --locked --no-dev python infra/platform/inspect-retained-pv.py \
@@ -59,7 +60,9 @@ Exit codes: `0` ready, `1` not ready, `2` input or transport error. Every
 cluster call is a bounded `kubectl get` with the given kubeconfig, context and
 request timeout; absence is requested with `--ignore-not-found`. Transport
 failures print a single sanitized code such as `api-forbidden`,
-`api-timeout`, `api-response-invalid` and never raw stderr.
+`api-timeout`, `api-response-invalid` and never raw stderr. Invalid arguments
+produce the constant `arguments-invalid` on stderr before any cluster call,
+without echoing potentially sensitive argument values.
 
 ## What this phase does not do
 

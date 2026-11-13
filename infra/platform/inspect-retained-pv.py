@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -129,6 +130,17 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+
+def _resource_name(value: object, *, namespace: bool = False) -> str:
+    """Accept Kubernetes names, never kubectl options from an input file."""
+    label = r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"
+    pattern = label if namespace else rf"{label}(?:\.{label})*"
+    limit = 63 if namespace else 253
+    if not isinstance(value, str) or len(value) > limit or re.fullmatch(pattern, value) is None:
+        raise TransportError("expected-invalid")
+    return value
+
+
 def _writer_names(writer: object) -> tuple[str, str]:
     if isinstance(writer, str) and writer.count("/") == 1:
         namespace, name = writer.split("/")
@@ -138,14 +150,14 @@ def _writer_names(writer: object) -> tuple[str, str]:
         namespace = name = None
     if _text(namespace) is None or _text(name) is None:
         raise TransportError("expected-invalid")
-    return _text(namespace), _text(name)
+    return _resource_name(namespace, namespace=True), _resource_name(name)
 
 
 def _required(expected: dict, key: str) -> str:
     value = _text(expected.get(key))
     if value is None:
         raise TransportError("expected-invalid")
-    return value
+    return _resource_name(value, namespace=key.endswith("_namespace"))
 
 
 def collect(client: Kubectl, expected: dict) -> dict:
@@ -177,11 +189,24 @@ def collect(client: Kubectl, expected: dict) -> dict:
     return snapshot
 
 
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        # Unknown arguments may contain mistakenly supplied credentials.
+        self.exit(2, "arguments-invalid\n")
+
+
+def _nonblank(value: str) -> str:
+    if _text(value) is None:
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
 def _parse(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument("--kubeconfig", required=True)
-    parser.add_argument("--context", required=True)
-    parser.add_argument("--expected", required=True)
+    parser = _ArgumentParser(add_help=True)
+    parser.add_argument("--kubeconfig", required=True, type=_nonblank)
+    parser.add_argument("--context", required=True, type=_nonblank)
+    parser.add_argument("--expected", required=True, type=_nonblank)
     # No execution flag exists: an unknown one such as --execute is rejected
     # here and no cluster call is made.
     return parser.parse_args(argv)
@@ -201,6 +226,9 @@ def main(argv: list[str] | None = None, invoke=_invoke) -> int:
     args = _parse(sys.argv[1:] if argv is None else argv)
     try:
         expected = _load_expected(args.expected)
+        # Reuse the core's public identity verdict before any cluster query.
+        if "expected-invalid" in inspect_snapshot({}, expected)["issues"]:
+            raise TransportError("expected-invalid")
         client = Kubectl(args.kubeconfig, args.context, invoke=invoke)
         report = inspect_snapshot(collect(client, expected), expected)
     except TransportError as error:

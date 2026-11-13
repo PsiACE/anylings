@@ -19,6 +19,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SECRET_MARKER = "synthetic-marker-never-printed"
@@ -243,7 +244,7 @@ class PreflightTest(unittest.TestCase):
             self.assertEqual(status, 2, flag)
             self.assertEqual(out, "")
             self.assertEqual(fake.calls, [], flag)
-            self.assertIn("unrecognized arguments", err.lower())
+            self.assertIn("arguments-invalid", err.lower())
 
     def test_forbidden_permission_error_is_sanitized(self):
         fake = FakeKubectl()
@@ -308,10 +309,7 @@ class PreflightTest(unittest.TestCase):
         status, out, _ = self.run_cli(fake)
         self.assertEqual(status, 2)
         self.assertEqual(json.loads(out), {"error": "expected-invalid"})
-        # The core decides identity, so this is reported, not re-checked here.
-        mutating = {"apply", "create", "delete", "patch", "replace", "exec", "proxy"}
-        for arguments in fake.calls:
-            self.assertFalse(mutating & set(arguments), arguments)
+        self.assertEqual(fake.calls, [])
 
     def test_malformed_writer_identity_stops_before_transport(self):
         wanted = expected()
@@ -344,6 +342,71 @@ class PreflightTest(unittest.TestCase):
         before = copy.deepcopy(wanted)
         cli.collect(cli.Kubectl(KUBECONFIG, CONTEXT, invoke=FakeKubectl()), wanted)
         self.assertEqual(wanted, before)
+
+
+
+    def test_blank_explicit_scope_never_uses_a_default_cluster(self):
+        for flag in ("--kubeconfig", "--context"):
+            for value in ("", "  "):
+                fake = FakeKubectl()
+                out, err = io.StringIO(), io.StringIO()
+                argv = ["--kubeconfig", KUBECONFIG, "--context", CONTEXT, "--expected", str(self.expected_path)]
+                argv[argv.index(flag) + 1] = value
+                with redirect_stdout(out), redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main(argv, invoke=fake)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(fake.calls, [])
+
+    def test_expected_resource_names_cannot_inject_kubectl_flags(self):
+        for key, value in (
+            ("pv_name", "--context=unexpected"),
+            ("source_name", "--raw=/api/v1/secrets"),
+            ("target_name", "--kubeconfig=/synthetic/other"),
+            ("source_namespace", "--all-namespaces"),
+        ):
+            wanted = expected()
+            wanted[key] = value
+            self.write_expected(wanted)
+            fake = FakeKubectl()
+            status, out, _ = self.run_cli(fake)
+            self.assertEqual(status, 2, key)
+            self.assertEqual(json.loads(out), {"error": "expected-invalid"})
+            self.assertEqual(fake.calls, [], key)
+
+    def test_expected_writer_name_cannot_inject_kubectl_flags(self):
+        wanted = expected()
+        wanted["writers"] = [{"namespace": "src", "name": "--raw=/api/v1/secrets"}]
+        self.write_expected(wanted)
+        fake = FakeKubectl()
+        status, out, _ = self.run_cli(fake)
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(out), {"error": "expected-invalid"})
+        self.assertEqual(fake.calls, [])
+
+    def test_argument_errors_never_echo_unknown_secret_values(self):
+        fake = FakeKubectl()
+        status, out, err = self.run_cli(fake, "--token", SECRET_MARKER)
+        self.assertEqual(status, 2)
+        self.assertEqual(fake.calls, [])
+        self.assertNotIn(SECRET_MARKER, out + err)
+
+    def test_default_process_seam_is_bounded_and_never_uses_a_shell(self):
+        fake = FakeKubectl()
+        options = []
+        def run(arguments, **kwargs):
+            options.append(kwargs)
+            return fake(arguments)
+        argv = ["--kubeconfig", KUBECONFIG, "--context", CONTEXT, "--expected", str(self.expected_path)]
+        with patch.object(cli.subprocess, "run", side_effect=run), redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(argv), 0)
+        self.assertTrue(options)
+        for kwargs in options:
+            self.assertTrue(kwargs["capture_output"])
+            self.assertTrue(kwargs["text"])
+            self.assertLessEqual(kwargs["timeout"], 30)
+            self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertFalse(kwargs.get("shell", False))
 
 
 if __name__ == "__main__":

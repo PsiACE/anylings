@@ -45,8 +45,14 @@ import subprocess
 import sys
 import time
 from urllib.error import HTTPError, URLError
+
+import yaml
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+# The archived pre-fix configuration, used as the regression control. Checked in
+# so a clean checkout needs no git history, network or clone depth.
+CONTROL_FIXTURE = Path(__file__).parent / "fixtures" / "collector-prefix-ae6a8bfc.yaml"
 
 # Markers that appear only in fields the slice must never persist.
 HOSTILE = "HOSTILE-MARKER"
@@ -234,7 +240,7 @@ def event_record(event_type, event, extra=None):
     return record
 
 
-def envelope(records, resource):
+def envelope(records, resource, resource_duplicates=None, resource_duplicates_first=False):
     """One OTLP request, always carrying hostile envelope metadata.
 
     A log record is not just its attributes. The envelope also carries an
@@ -245,8 +251,13 @@ def envelope(records, resource):
     one in a record attribute. Sending them on every request means the guard is
     exercised by every case, not only by a case that opts in.
 
-    The signature stays two-argument on purpose: an external probe wraps this
-    function to substitute its own scope, and must keep working.
+    The first two parameters are positional and stay that way on purpose: an
+    external probe wraps this function to substitute its own scope, and must
+    keep working. `resource_duplicates` is additive.
+
+    A repeated *resource* key is the sibling of a repeated record key: the
+    filters read the first occurrence and the store ingests every one, and the
+    value also lands in `_stream`.
     """
     scope_logs = {
         "scope": {
@@ -267,9 +278,18 @@ def envelope(records, resource):
         record.setdefault("traceId", "1" * 32)
         record.setdefault("spanId", "2" * 16)
         record.setdefault("flags", 1)
+    resource_pairs = list(resource.items())
+    if resource_duplicates:
+        duplicated = list(resource_duplicates.items())
+        resource_pairs = (
+            duplicated + resource_pairs if resource_duplicates_first
+            else resource_pairs + duplicated
+        )
     return {
         "resourceLogs": [{
-            "resource": {"attributes": attributes(resource)},
+            "resource": {"attributes": [
+                {"key": key, "value": string(value)} for key, value in resource_pairs
+            ]},
             "schemaUrl": f"{HOSTILE}-RESOURCE-SCHEMA",
             "scopeLogs": [scope_logs],
         }],
@@ -459,10 +479,20 @@ def payloads():
         ]),
     ]
 
+    # Two records sent with a repeated resource key by the runner below.
+    structured_resource_dup = [
+        structured_record("resDupKept", "INFO", None, int_value(1)),
+    ]
+    structured_resource_dup_hostile_first = [
+        structured_record("resDupGone", "INFO", None, int_value(1)),
+    ]
+
     return {
         "events_good": events_good,
         "events_hostile": events_hostile,
         "structured_good": structured_good,
+        "structured_resource_dup": structured_resource_dup,
+        "structured_resource_dup_hostile_first": structured_resource_dup_hostile_first,
         "structured_hostile": structured_hostile,
         "structured_duplicated": duplicated_good,
         "events_duplicated": events_duplicated,
@@ -495,45 +525,41 @@ def collector_config(rendered, store_base, ports, with_guards):
     relay["service"]["pipelines"]["logs/events"]["receivers"] = ["otlp/events"]
     relay["receivers"].pop("k8sobjects")
     if not with_guards:
-        # Regression control: the previously reviewed configuration, i.e. the
-        # same config without the type filters and with the old body that
-        # concatenated the optional parts unconditionally. It must leak, or
-        # this fixture no longer proves the guards do anything.
-        for key in ("filter/events_types", "filter/otlp_types", "transform/purge_envelope"):
-            relay["processors"].pop(key, None)
-        for pipeline in relay["service"]["pipelines"].values():
-            pipeline["processors"] = [
-                name for name in pipeline["processors"]
-                if not name.endswith("_types") and name != "transform/purge_envelope"
-            ]
-        # The control also reverts the first-occurrence normalisation, so the
-        # duplicate-key leak reproduces there and the assertions below cannot
-        # pass vacuously.
-        for name in ("transform/events_extract", "transform/otlp_extract"):
-            statements = relay["processors"][name]["log_statements"]
-            for group in statements:
-                # Drop every first-occurrence normalisation statement.
-                group["statements"] = [
-                    statement for statement in group["statements"]
-                    if statement != "keep_keys(attributes, [])"
-                    and "__otl_dup_" not in statement
-                    and not statement.startswith(
-                        'keep_keys(attributes, ["reason", "level"')
-                ]
-        relay["processors"]["transform/otlp_shape"] = {
-            "error_mode": "ignore",
-            "log_statements": [{
-                "context": "log",
-                "statements": [
-                    'set(log.body, Concat(["event", attributes["level"], attributes["component"], '
-                    'resource.attributes["k8s.namespace.name"], attributes["reason"]], " "))'
-                ] + [
-                    statement for statement in
-                    relay["processors"]["transform/otlp_shape"]["log_statements"][0]["statements"]
-                    if not statement.startswith("set(log.body")
-                ],
-            }],
+        # Regression control: the ARCHIVED pre-fix configuration, loaded as-is.
+        #
+        # It is not produced by deleting statements from the fixed config. That
+        # approach inherits the fixed config's later stages -- notably the shape
+        # stage's own trailing `keep_keys`, which collapses a repeated key to a
+        # single occurrence independently of the removed normalisation -- so
+        # whether a duplicate survived depended on field count and ordering
+        # rather than on the guards under test. A control built that way is not
+        # a faithful old negative, and its failures moved whenever the payload
+        # set changed.
+        #
+        # `tests/ci/fixtures/collector-prefix-ae6a8bfc.yaml` is the rendered
+        # relay from commit ae6a8bfc, checked in so a clean checkout needs no
+        # git history, no network and no clone depth. That commit predates the
+        # type guards, the envelope purge, the nil-free body and both
+        # duplicate-key normalisations, so it leaks every guard this fixture
+        # asserts. The loopback substitutions below are the same ones applied to
+        # the candidate, and nothing else about it changes.
+        relay = yaml.safe_load(CONTROL_FIXTURE.read_text())
+        store_port, events_port, structured_port, metrics_port, health_port = ports
+        relay["extensions"]["health_check"]["endpoint"] = f"127.0.0.1:{health_port}"
+        relay["receivers"]["otlp"]["protocols"]["http"]["endpoint"] = f"127.0.0.1:{structured_port}"
+        relay["receivers"]["otlp/events"] = {
+            "protocols": {"http": {"endpoint": f"127.0.0.1:{events_port}"}}
         }
+        relay["exporters"]["otlphttp/victoria-logs"]["logs_endpoint"] = (
+            f"{store_base}/insert/opentelemetry/v1/logs"
+        )
+        relay["service"]["telemetry"]["metrics"]["readers"] = [{
+            "pull": {"exporter": {"prometheus": {"host": "127.0.0.1", "port": metrics_port}}}
+        }]
+        # The archived config has only the events pipeline wired to
+        # `k8sobjects`; the fixture feeds both pipelines from local OTLP.
+        relay["service"]["pipelines"]["logs/events"]["receivers"] = ["otlp/events"]
+        relay["receivers"].pop("k8sobjects", None)
     return relay
 
 
@@ -605,12 +631,31 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
         post(f"http://127.0.0.1:{events_port}/v1/logs", envelope(
             records["events_duplicated"], resource,
         ))
+        # Repeated *resource* keys, in both orders, actually sent. These two
+        # posts are the reason `resDupKept` can exist in the store at all; the
+        # payloads were previously built and never sent, so the assertion for
+        # them could only ever fail.
+        resource_duplicates = {
+            "k8s.namespace.name": f"{HOSTILE}-RES-NAMESPACE",
+            "service.name": f"{HOSTILE}-RES-SERVICE",
+        }
+        # The resource must carry BOTH approved keys, or the duplicate supply
+        # becomes the first occurrence and the guard rejects it for that reason
+        # rather than the one under test.
+        duplicate_resource = {**resource, "service.name": "gateway"}
+        post(f"http://127.0.0.1:{structured_port}/v1/logs", envelope(
+            records["structured_resource_dup"], duplicate_resource,
+            resource_duplicates=resource_duplicates,
+        ))
+        post(f"http://127.0.0.1:{structured_port}/v1/logs", envelope(
+            records["structured_resource_dup_hostile_first"], duplicate_resource,
+            resource_duplicates=resource_duplicates, resource_duplicates_first=True,
+        ))
 
-        # Both duplicate cases: the valid-first record is stored, the
-        # hostile-first one must be dropped, so it is not part of the positive
-        # expectation but it is part of what the receiver accepted.
+        # Valid-first duplicates are stored; the hostile-first ones must be
+        # dropped, so only the former count towards the positive expectation.
         expected = (len(records["events_good"]) + len(records["structured_good"])
-                    + 2)
+                    + 3)
         # Wait for a record from *each* pipeline, not just for a total count: a
         # count alone can be satisfied by one pipeline while the other is still
         # in flight, and the control run then misses its nil placeholder.
@@ -620,7 +665,11 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
             assert all(child.poll() is None for child in children), "runtime service exited; see logs"
             stored = store_query(store_base)
             lines = [line for line in stored.splitlines() if line.strip()]
-            if len(lines) >= expected and "recovered" in stored and "BackOff" in stored:
+            # A total is not enough: wait for a representative of every payload
+            # group, otherwise a run can snapshot before the last posts land.
+            if len(lines) >= expected and all(
+                marker in stored for marker in ("recovered", "BackOff", "resDupKept")
+            ):
                 break
             time.sleep(0.5)
 
@@ -637,6 +686,7 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
             len(records[name]) for name in (
                 "events_good", "events_hostile", "structured_good",
                 "structured_hostile", "structured_duplicated", "events_duplicated",
+                "structured_resource_dup", "structured_resource_dup_hostile_first",
             )
         ),
     }
@@ -723,17 +773,46 @@ def run(scratch):
     )
     # And it stored the second occurrence of a repeated attribute key, which is
     # the bypass this run guards. Both pipelines must show it.
-    for duplicate in (f"{HOSTILE}-DUP-COMPONENT", f"{HOSTILE}-DUP-COUNT",
-                      f"{HOSTILE}-DUP-LEVEL"):
-        assert duplicate in leaked, (
-            f"the control did not store {duplicate}; the duplicate-key "
-            "assertions would then not be measuring the normalisation"
+    # Which *specific* duplicate field survives in the control is order- and
+    # field-count-dependent, and honestly so: the archived baseline's own shape
+    # stage ends with `keep_keys(attributes, ["event_count", "reason", "level",
+    # "component"])`, and that collapse happens independently of the guard under
+    # test. So the control is asserted to leak the duplicate *class*, not a
+    # hand-picked key -- claiming a particular one would be an assertion about
+    # pdata map ordering, not about normalisation.
+    duplicate_markers = {
+        marker for marker in (
+            f"{HOSTILE}-DUP-REASON", f"{HOSTILE}-DUP-LEVEL",
+            f"{HOSTILE}-DUP-COMPONENT", f"{HOSTILE}-DUP-COUNT",
+            f"{HOSTILE}-FIRST-REASON",
+        ) if marker in leaked
+    }
+    assert duplicate_markers, (
+        "the control stored no second-occurrence duplicate value; the "
+        "duplicate-key assertions would then not be measuring the normalisation"
+    )
+    # The mechanism, measured rather than assumed. The archived baseline's own
+    # shape stage ends with a `keep_keys` over the four record attributes, so in
+    # the control the two occurrences of a repeated key are collapsed to ONE
+    # stored field -- and *which* value that field holds is the leak: the second
+    # occurrence wins, so the value the allowlist never saw is what was stored.
+    # A control cannot therefore be asserted to show a literally repeated key;
+    # it is asserted to show the wrong value in the single field.
+    control_dup = next(
+        (record for record in control_records if "dupKept" in json.dumps(record)), None
+    )
+    if control_dup is None:
+        # The hostile value replaced the valid one, so the row is no longer
+        # findable by its reason; fall back to any row carrying the marker.
+        control_dup = next(
+            (record for record in control_records if f"{HOSTILE}-DUP-REASON" in json.dumps(record)),
+            None,
         )
-    control_lines = [
-        line for line in leaked.splitlines() if f"{HOSTILE}-DUP-COMPONENT" in line
-    ]
-    assert control_lines, "no control line carried the duplicated value"
-    assert control_lines[0].count('"component":') >= 1, control_lines[0][:200]
+    assert control_dup is not None, "the control stored no duplicate-key record at all"
+    assert control_dup.get("reason") != "dupKept", (
+        "the control stored the FIRST occurrence, so it is not a faithful "
+        f"pre-fix baseline: {control_dup.get('reason')!r}"
+    )
     print(
         "[observability] runtime: regression control without type guards leaks "
         f"{len(control_records)} records and flattened keys {sorted(leaked_keys)}"
@@ -749,7 +828,7 @@ def run(scratch):
     # Exactly the well-formed records, and no more.
     # Nine baseline positives plus the valid-first duplicate record and the
     # duplicated Events record; the hostile-first duplicate is rejected.
-    assert len(records) == 11, [record["_msg"] for record in records]
+    assert len(records) == 12, [record["_msg"] for record in records]
 
     # Reasons are distinct per case, so a collapsed or duplicated record shows.
     events = [record for record in records if "event_type" in record]
@@ -758,7 +837,7 @@ def run(scratch):
         "BackOff", "FailedMount", "Scheduled", "Scheduled", "Unhealthy"], events
     assert sorted(record["reason"] for record in structured) == [
         "authFailure", "backlog", "dupKept", "queueDepth", "recovered",
-        "retryBudget"], structured
+        "resDupKept", "retryBudget"], structured
     events = {record["event_reason"] + "/" + record["event_type"]: record for record in events}
     structured = {record["reason"]: record for record in structured}
 
@@ -877,6 +956,27 @@ def run(scratch):
     assert mounted["severity_text"] == "WARN", mounted
     for marker in (f"{HOSTILE}-EV-SEVERITY", f"{HOSTILE}-EV-COUNT", f"{HOSTILE}-EV-REASON"):
         assert marker not in fixed["stored"], marker
+
+    # Repeated *resource* keys: the valid value must win, in both orders, and
+    # the hostile occurrence must not reach the store or the stream label.
+    resource_kept = next(
+        (record for record in records if record.get("reason") == "resDupKept"), None
+    )
+    assert resource_kept is not None, "the valid-first resource-duplicate record was not stored"
+    assert resource_kept["k8s.namespace.name"] == "agents", resource_kept
+    assert resource_kept["service.name"] == "gateway", resource_kept
+    assert all(record.get("reason") != "resDupGone" for record in records), (
+        "the hostile-first resource-duplicate record was stored"
+    )
+    for marker in (f"{HOSTILE}-RES-NAMESPACE", f"{HOSTILE}-RES-SERVICE"):
+        assert marker not in fixed["stored"], marker
+    # One occurrence per resource key, checked on the raw line because a parsed
+    # dict cannot represent a repeat.
+    for line in fixed["stored"].splitlines():
+        if not line.strip():
+            continue
+        for key in ("k8s.namespace.name", "service.name"):
+            assert line.count(f'"{key}":') <= 1, (key, line[:240])
 
     # Rejections are counted per filter, so the drop is observable and the
     # guard is demonstrably the component that did the work.

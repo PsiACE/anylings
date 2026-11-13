@@ -166,9 +166,15 @@ alternateConfig:
       log_statements:
         - context: resource
           statements:
-            # First occurrence only, here too: a duplicate resource key would
-            # otherwise be stored twice as well.
-            - keep_keys(attributes, ["k8s.namespace.name"])
+            # The resource attribute list repeats keys the same way the record
+            # list does, and `keep_keys` filters by key name without collapsing
+            # repeats. Copy the value out, rebuild the map from that copy only,
+            # and write it back, so exactly one occurrence -- the one the
+            # allowlist inspects -- can reach the store.
+            - set(attributes["__otl_dup_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil
+            - keep_keys(attributes, ["__otl_dup_ns"])
+            - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
+            - delete_key(attributes, "__otl_dup_ns")
         - context: log
           statements:
             # Nothing inherited from the caller's record attributes survives.
@@ -244,7 +250,16 @@ alternateConfig:
       log_statements:
         - context: resource
           statements:
-            - keep_keys(attributes, ["k8s.namespace.name", "service.name"])
+            # Same rebuild as the record map. A repeated resource key is
+            # caller-controlled on this path, and it would otherwise be stored
+            # once per occurrence and leak into `_stream`.
+            - set(attributes["__otl_dup_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil
+            - set(attributes["__otl_dup_svc"], attributes["service.name"]) where attributes["service.name"] != nil
+            - keep_keys(attributes, ["__otl_dup_ns", "__otl_dup_svc"])
+            - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
+            - set(attributes["service.name"], attributes["__otl_dup_svc"]) where attributes["__otl_dup_svc"] != nil
+            - delete_key(attributes, "__otl_dup_ns")
+            - delete_key(attributes, "__otl_dup_svc")
         - context: log
           statements:
             # Deterministic first-occurrence normalisation. The collector keeps

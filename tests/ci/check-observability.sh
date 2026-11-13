@@ -700,8 +700,58 @@ events_extract = config['processors']['transform/events_extract']['log_statement
 events_log = next(group['statements'] for group in events_extract if group['context'] == 'log')
 assert events_log[0] == 'keep_keys(attributes, [])', events_log[:2]
 assert not any('keep_keys(attributes, ["event_' in statement for statement in events_log), events_log
-resource_statements = next(group['statements'] for group in events_extract if group['context'] == 'resource')
-assert resource_statements == ['keep_keys(attributes, ["k8s.namespace.name"])'], resource_statements
+def assert_resource_normalised(processor, approved):
+    """The resource map is normalised exactly like the record map.
+
+    The resource attribute list repeats keys the same way the record list does,
+    and `keep_keys` filters by name without collapsing repeats. So this asserts
+    the copy-out / rebuild / delete *effect*, not a literal statement list: a
+    different but equivalent normalisation is acceptable, while the pre-fix
+    `keep_keys`-only stage is not. Asserting the text would forbid the only
+    correct implementation, which is what this replaced.
+    """
+    groups = config['processors'][processor]['log_statements']
+    resource = next(group['statements'] for group in groups if group['context'] == 'resource')
+    scratch = [f"__otl_dup_{name}" for _, name in approved]
+    # Each approved value is copied out under its own scratch key, under a
+    # presence condition, from the approved source key.
+    for source, name in approved:
+        copy = f'set(attributes["__otl_dup_{name}"], attributes["{source}"])'
+        assert any(statement.startswith(copy) for statement in resource), (processor, source, resource)
+    # The map is rebuilt from the scratch keys alone, so no caller key survives
+    # by accident and no unapproved key can be re-added.
+    keep = next((statement for statement in resource if statement.startswith('keep_keys(attributes, [')), None)
+    assert keep is not None, (processor, resource)
+    kept = keep.split('[', 1)[1].rsplit(']', 1)[0]
+    assert sorted(kept.replace('"', '').split(', ')) == sorted(scratch), (processor, kept, scratch)
+    # Each scratch value is written back under the approved name, then removed.
+    for source, name in approved:
+        restore = f'set(attributes["{source}"], attributes["__otl_dup_{name}"])'
+        assert any(statement.startswith(restore) for statement in resource), (processor, source, resource)
+        assert any(statement == f'delete_key(attributes, "__otl_dup_{name}")' for statement in resource), (processor, name, resource)
+    # Nothing writes the caller's map wholesale, and no unapproved key is read.
+    assert not any(statement.startswith('set(attributes,') for statement in resource), resource
+    approved_sources = {source for source, _ in approved}
+    for statement in resource:
+        for _, name in approved:
+            if statement.startswith(f'set(attributes["{name}"]'):
+                assert f'__otl_dup_{name}' in statement, (processor, statement)
+    # Leftover scratch keys would be a stored field of their own. Parenthesised
+    # so the comparison is not parsed as part of the generator expression.
+    removed = [statement for statement in resource
+               if statement.startswith('delete_key(attributes, "__otl_dup_')]
+    assert len(removed) == len(approved), (processor, removed, approved)
+    return approved_sources
+
+
+# Events carries namespace only; structured carries namespace and service.
+assert assert_resource_normalised(
+    'transform/events_extract', [('k8s.namespace.name', 'ns')]
+) == {'k8s.namespace.name'}
+assert assert_resource_normalised(
+    'transform/otlp_extract',
+    [('k8s.namespace.name', 'ns'), ('service.name', 'svc')],
+) == {'k8s.namespace.name', 'service.name'}
 
 # Integer contract: `event_count` is optional, but a value that is present must
 # already be an integer. A range check alone is not a type check, and under

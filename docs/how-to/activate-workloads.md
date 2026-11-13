@@ -13,6 +13,9 @@ It is a controlled maintenance operation, not a zero-downtime upgrade.
   again; do not assume a squash produces the same replica settings.
 - Verify the pinned runtime image is available. Keep the existing credentials,
   recovery material, infrastructure state and volume identities outside Git.
+- Verify the destination namespace exists before stopping services. If it is
+  absent, prepare it explicitly through the reviewed operator procedure, without
+  activating replacement workloads or allowing a new volume to provision.
 - Keep both stages unmerged until every transition is ready. Merging quiesce
   and allowing Argo to sync stops the runtime and gateway.
 

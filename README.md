@@ -325,7 +325,7 @@ cannot change what the cluster runs; leaving it empty deploys the tag alone.
 
 ## Observability
 
-Opt in with `[observability] enabled = true`. That publishes four applications
+Opt in with `[observability] enabled = true`. That publishes six applications
 into the `observability` namespace; leaving it disabled publishes nothing, adds
 no namespace and allows no extra chart registry.
 
@@ -349,6 +349,49 @@ no namespace and allows no extra chart registry.
   termination, readiness, scheduling, requests/limits, ownership and replica
   availability. It cannot read Secrets or ConfigMaps and exports no arbitrary
   workload annotations or labels.
+- **victoria-logs** — single-node VictoriaLogs (`victoria-logs-single` chart
+  `0.13.12`, image `v1.53.0`), the operational log store. Ingest is OTLP over
+  HTTP from the collector below; it tails no file and reads no Kubernetes
+  object itself.
+- **otel-events** — pinned OpenTelemetry contrib `0.140.1` on collector chart
+  `0.140.0`, a single replica. Watches Kubernetes Events read-only and accepts
+  structured OTLP records on port `4318`. See
+  [Operational logs](#operational-logs) for the fields it keeps.
+
+### Operational logs
+
+Two controlled inputs reach one store. Neither reads a session, a prompt, tool
+output or an application's arbitrary log file.
+
+1. **Kubernetes Events**, through the `k8sobjects` receiver with one read-only
+   grant: `get, list, watch` on `events`. No `pods/log`, no `pods/exec`, no
+   Secrets, no `nodes/proxy`, no host path, no privileged daemon.
+2. **Structured OTLP** from a workload, sent to
+   `http://otel-events.observability.svc.cluster.local:4318/v1/logs`, with these
+   attributes: `reason` (required, `[A-Za-z][A-Za-z0-9]{0,63}`), `level`
+   (required, one of `DEBUG`, `INFO`, `WARN`, `ERROR`), `component` (optional,
+   a DNS label), and `event_count` (optional integer, `0`–`100000`). The record
+   body is never read.
+
+Both pipelines extract a fixed field set, **drop** any record that does not
+match the allowlist, then compose the stored body from the surviving fields
+alone. Persisted fields are `event_type`, `event_severity`, `event_reason`,
+`event_count`, `object_kind`, `object_name`, `event_namespace`, `level`,
+`component`, namespace and service name. The event message, note, annotations,
+managed fields, resource UIDs, authorization headers, cookies, query strings and
+every unlisted attribute are discarded with the whole record — a free-text
+`reason` is rejected, not token-scrubbed. Rejected records are counted in
+`otelcol_processor_filter_logs_filtered_total` and the **Operational logs**
+dashboard, so a privacy decision is visible without repeating its content.
+
+This vertical does **not** provide application container logs or node logs. Real
+file-based coverage needs a separate source integration and is not claimed here.
+
+The store keeps `-retentionPeriod=3d` and
+`-retention.maxDiskSpaceUsageBytes=1GiB` in a bounded `emptyDir`; the caps are a
+query target, not hard erasure, and a reschedule loses the data. Its added
+requests are **50m / 128Mi** and limits **500m / 512Mi**; the collector's are
+**30m / 96Mi** and **300m / 256Mi**.
 
 The vmui **Nodes and workloads** dashboard includes actual usage, requested
 resources (not measured utilization), restarts/OOM/scheduling, controller usage,
@@ -389,10 +432,14 @@ Read these as operational facts, not guarantees:
 - **Gatus history is bounded memory, not a seven-day archive.** It runs with
   `storage.type: memory`, so its own results and events are capped by count and
   lost on restart. Longer probe history means querying the scraped metrics.
-- **Nothing survives a reschedule by default.** VictoriaMetrics uses a bounded
-  `emptyDir`, and no `PersistentVolumeClaim` is provisioned for any
-  application, so no cloud volume is created or billed implicitly. To keep
-  metrics across a pod replacement, create a claim yourself and point
+- **The log store is an operational window, not an audit trail.** VictoriaLogs
+  keeps `3d` and 1GiB of allowlisted operational records. It drops whole per-day
+  partitions, so the window is a query bound, not proof of deletion. It holds no
+  application container or node logs, and no session, prompt or tool output.
+- **Nothing survives a reschedule by default.** VictoriaMetrics and VictoriaLogs
+  both use a bounded `emptyDir`, and no `PersistentVolumeClaim` is provisioned
+  for any application, so no cloud volume is created or billed implicitly. To
+  keep data across a pod replacement, create a claim yourself and point
   `server.persistentVolume.existingClaim` at it.
 - **Access is in-cluster.** All Services are `ClusterIP`; no Ingress, route,
   LoadBalancer or NodePort is rendered. Reaching vmui or Gatus from outside is a
@@ -411,14 +458,16 @@ kubectl --namespace observability create secret generic gatus-telegram \
 ```
 
 The rendered values do not carry resource sizing for your environment: the
-committed limits (`768Mi` for the metric store, `128Mi` for Gatus) are a small
-default, and ingestion is additionally capped by series and label budgets.
+committed limits (`768Mi` for the metric store, `512Mi` for the log store,
+`256Mi` for the event collector, `128Mi` for Gatus) are a small default, and
+ingestion is additionally capped by series, label and record budgets.
 Dashboards live in the published `victoria-metrics-dashboards` ConfigMap and are
 loaded by vmui, not by a separate dashboard server.
 
-Web analytics and access-log analysis are not part of this slice. Aggregate
-usage reporting would need its own store; until then, treat web analytics as
-pending rather than inferring it from these metrics.
+Web analytics and access-log analysis are not part of this slice, and neither
+are distributed traces. Aggregate usage reporting and traces each need their
+own store and source; until then, treat them as pending rather than inferring
+them from these metrics or from the operational log records.
 
 Other action-first commands:
 

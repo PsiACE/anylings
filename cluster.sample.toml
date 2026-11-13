@@ -89,11 +89,13 @@ seed_dir = ""
 
 # =============================================================================
 #    Optional self-hosted observability. Disabled by default; enabling it
-#    publishes four ClusterIP-only applications into the `observability`
+#    publishes six ClusterIP-only applications into the `observability`
 #    namespace: VictoriaMetrics (7d retention target), Gatus (probe status),
-#    per-node OTel kubelet collectors and kube-state-metrics (workload state).
-#    No Grafana, Loki, operator or database is deployed, and no
-#    PersistentVolumeClaim is provisioned automatically.
+#    per-node OTel kubelet collectors, kube-state-metrics (workload state),
+#    VictoriaLogs (3d operational log store) and one event collector that
+#    watches read-only Kubernetes Events plus structured OTLP records.
+#    No Grafana, Loki, operator or database is deployed, no node/host log tail
+#    is collected, and no PersistentVolumeClaim is provisioned automatically.
 # =============================================================================
 [observability]
 

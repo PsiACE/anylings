@@ -227,7 +227,9 @@ class Observability(Model):
     # Off by default: the slice needs ClusterIP-only access and its own
     # monitoring decision, so it never appears in a cluster that did not ask
     # for it. Enabling it deploys VictoriaMetrics, Gatus, per-node kubelet
-    # usage collectors and kube-state-metrics.
+    # usage collectors, kube-state-metrics, VictoriaLogs and the event
+    # collector. Log coverage is operational Events plus structured OTLP; it
+    # is not application or node container log collection.
     enabled: bool = False
 
 

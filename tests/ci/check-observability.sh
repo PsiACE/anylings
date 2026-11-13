@@ -98,7 +98,7 @@ check_default_off() {
 check_enabled_apps() {
   local apps="$enabled_out/kubernetes/apps/observability" project="$enabled_out/kubernetes/projects/kubernetes.yaml"
   local app text
-  for app in victoria-metrics gatus otel-kubelet kube-state-metrics; do
+  for app in victoria-metrics gatus otel-kubelet kube-state-metrics victoria-logs otel-events; do
     [ -f "$apps/$app/config.json" ] || die "$app was not published as an application"
     [ -f "$apps/$app/values.yaml" ] || die "$app has no rendered values file"
   done
@@ -116,7 +116,13 @@ check_enabled_apps() {
     || die "the AppProject does not allow the pinned VictoriaMetrics chart registry"
   grep -q 'namespace: observability' <<<"$text" \
     || die "the AppProject does not allow the observability destination"
-  log "enabled slice publishes four pinned applications with a scoped AppProject"
+  jq -e '.chart == "victoria-logs-single" and .chartVersion == "0.13.12"' \
+    "$apps/victoria-logs/config.json" >/dev/null \
+    || die "the log store chart is not pinned to the reviewed version"
+  jq -e '.chart == "opentelemetry-collector" and .chartVersion == "0.140.0"' \
+    "$apps/otel-events/config.json" >/dev/null \
+    || die "the event collector reuses the pinned collector chart"
+  log "enabled slice publishes six pinned applications with a scoped AppProject"
 }
 
 # -------------------------------------------------------- chart rendering --
@@ -508,17 +514,225 @@ print('[observability] pinned collectors: minimal RBAC, TLS/SA, resources, priva
 PYTEST
 }
 
+# ------------------------------------------------------- operational logs --
+
+# The log store must bound itself by age, by disk and by scratch volume, and
+# must not obtain a claim or a cluster role it has no use for.
+check_log_store() {
+  local out="$scratch/victoria-logs.yaml" args workload
+  chart_render "$enabled_out/kubernetes/apps/observability/victoria-logs" "$out"
+  assert_no_public_exposure "$out" "the log store"
+  kubeconform -strict -summary "$out"
+
+  workload='select(.kind == "Deployment" or .kind == "StatefulSet")'
+  yq -e "$workload" "$out" >/dev/null || die "the log store rendered no workload"
+  args="$(yq -r "$workload | .spec.template.spec.containers[].args[]" "$out")"
+  grep -qx -- '--retentionPeriod=3d' <<<"$args" \
+    || die "the log store does not run with an explicit 3d retention"
+  grep -qx -- '--retention.maxDiskSpaceUsageBytes=1GiB' <<<"$args" \
+    || die "the log store does not cap the disk its retention may use"
+  for flag in --memory.allowedBytes --insert.maxLineSizeBytes \
+    --insert.maxFieldsPerLine --maxConcurrentInserts --search.maxQueryDuration; do
+    grep -q -- "^$flag=" <<<"$args" \
+      || die "the log store does not bound $flag"
+  done
+  yq -e "$workload | .spec.template.spec.containers[] | .resources.limits.memory" "$out" >/dev/null \
+    || die "the log store container has no memory limit"
+  yq -e "$workload | .spec.template.spec.containers[] | .resources.requests.memory" "$out" >/dev/null \
+    || die "the log store container has no memory request"
+  yq -e "$workload | .spec.template.spec.securityContext.runAsNonRoot == true" "$out" >/dev/null \
+    || die "the log store pod does not require a non-root user"
+  yq -e "$workload | .spec.template.spec.containers[].securityContext.readOnlyRootFilesystem == true" "$out" >/dev/null \
+    || die "the log store container has a writable root filesystem"
+  if [ -n "$(yq -r "$workload | .spec.template.spec.securityContext.runAsUser" "$out")" ]; then
+    [ "$(yq -r "$workload | .spec.template.spec.securityContext.runAsUser" "$out")" != 0 ] \
+      || die "the log store pod runs as uid 0"
+  fi
+  # An emptyDir with a sizeLimit, never a claim the cluster would bill for.
+  yq -e "$workload | .spec.template.spec.volumes[] | select(.emptyDir) | .emptyDir.sizeLimit" "$out" >/dev/null \
+    || die "the log store scratch volume has no sizeLimit"
+  if yq -e 'select(.kind == "PersistentVolumeClaim")' "$out" >/dev/null 2>&1; then
+    die "the log store provisions a PersistentVolumeClaim on its own"
+  fi
+  # The chart's bundled Vector agent tails every container log on the node.
+  # This slice ingests structured OTLP only, so it must not be rendered at all.
+  if yq -e 'select(.kind == "DaemonSet")' "$out" >/dev/null 2>&1; then
+    die "the log store chart rendered its host log-tailing DaemonSet"
+  fi
+  if yq -e 'select(.kind == "ServiceAccount") | .automountServiceAccountToken == true' "$out" >/dev/null 2>&1; then
+    die "the log store mounts an API token it never uses"
+  fi
+  for kind in ClusterRole ClusterRoleBinding; do
+    if yq -e "select(.kind == \"$kind\")" "$out" >/dev/null 2>&1; then
+      die "the log store renders a $kind, which its HTTP ingest path does not need"
+    fi
+  done
+  assert_no_public_exposure "$out" "the log store"
+  log "log store: 3d + 1GiB caps, capped, non-root, ClusterIP, no claim, no cluster RBAC, no host agent"
+}
+
+# The event collector is the only component allowed to read the Kubernetes API
+# for logs. Its grant is one read-only resource, and its configuration must
+# prove that nothing outside the allowlist can reach the store.
+check_event_collector() {
+  local out="$scratch/otel-events.yaml" role config docs="$scratch/otel-events.json"
+  local app="$enabled_out/kubernetes/apps/observability/otel-events"
+  chart_render "$app" "$out"
+  assert_no_public_exposure "$out" "the event collector"
+  kubeconform -strict -summary "$out"
+
+  yq -e 'select(.kind == "Deployment")' "$out" >/dev/null \
+    || die "the event collector rendered no Deployment"
+  # One replica: two watchers would duplicate every record.
+  [ "$(yq -r 'select(.kind == "Deployment") | .spec.replicas' "$out")" = 1 ] \
+    || die "the event collector is not a single-replica watcher"
+  role="$(yq -o=json -I=0 'select(.kind == "ClusterRole")' "$out")"
+  [ -n "$role" ] || die "the event collector renders no ClusterRole"
+  jq -e '.rules == [{"apiGroups": [""], "resources": ["events"], "verbs": ["get", "list", "watch"]}]' \
+    <<<"$role" >/dev/null \
+    || die "the event collector's RBAC is wider than read-only Events"
+  # A pod mount of a host path or an API proxy would be a host-level log reader.
+  if yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.volumes[] | select(.hostPath)' "$out" >/dev/null 2>&1; then
+    die "the event collector mounts a host path"
+  fi
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.securityContext.runAsNonRoot == true' "$out" >/dev/null \
+    || die "the event collector does not require a non-root user"
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.containers[].securityContext.readOnlyRootFilesystem == true' "$out" >/dev/null \
+    || die "the event collector has a writable root filesystem"
+
+  config="$(yq -r 'select(.kind == "ConfigMap") | .data.relay // ""' "$out")"
+  [ -n "$config" ] || die "the event collector rendered no configuration"
+  printf '%s\n' "$config" >"$scratch/rendered-events-collector.yaml"
+  yq -o=json '.' "$scratch/rendered-events-collector.yaml" >"$docs"
+  yq -o=json '.' "$scratch/rendered-events-collector.yaml" >"$scratch/rendered-events-collector.json"
+  # Decode the real rendered configuration with the existing tools; every
+  # assertion below is about what the collector will actually run.
+  uv run --quiet --locked --no-dev python - "$docs" <<'PYLOG'
+import json
+import sys
+
+config = json.load(open(sys.argv[1]))
+
+# Exactly two inputs, and neither of them reads a file, a host path or a proxy.
+assert set(config['receivers']) == {'k8sobjects', 'otlp'}, config['receivers']
+events = config['receivers']['k8sobjects']
+assert events['auth_type'] == 'serviceAccount', events
+assert events['include_initial_state'] is False, events
+assert events['objects'] == [{'name': 'events', 'mode': 'watch'}], events
+assert set(config['receivers']['otlp']['protocols']) == {'http'}
+
+# One exporter, and it is VictoriaLogs' own OTLP path: no third pipeline stage.
+assert set(config['exporters']) == {'otlphttp/victoria-logs'}
+endpoint = config['exporters']['otlphttp/victoria-logs']['logs_endpoint']
+assert endpoint == 'http://victoria-logs.observability.svc.cluster.local:9428/insert/opentelemetry/v1/logs', endpoint
+
+pipelines = config['service']['pipelines']
+assert set(pipelines) == {'logs/events', 'logs/structured'}, pipelines
+for name, pipeline in pipelines.items():
+    assert pipeline['exporters'] == ['otlphttp/victoria-logs'], (name, pipeline)
+# Both pipelines filter before they shape, so a rejected record never reaches
+# the statement that composes a body from it.
+assert pipelines['logs/events']['processors'] == [
+    'memory_limiter', 'transform/events_extract', 'filter/events_allowlist', 'transform/events_shape']
+assert pipelines['logs/structured']['processors'] == [
+    'memory_limiter', 'transform/otlp_extract', 'filter/otlp_allowlist', 'transform/otlp_shape']
+
+# Drop-not-sanitize: every allowlist entry rejects a missing or malformed field
+# outright, and no entry rewrites a value into an accepted one.
+filters = config['processors']['filter/events_allowlist']['logs']['log_record']
+assert len(filters) == 7, filters
+textual = [condition for condition in filters if 'event_count' not in condition]
+numeric = [condition for condition in filters if 'event_count' in condition]
+assert len(textual) == 6 and len(numeric) == 1, filters
+for condition in textual:
+    assert condition.startswith('attributes['), condition
+    assert 'IsMatch' in condition, condition
+    # A missing or malformed field is rejected, never defaulted.
+    assert '== nil or not IsMatch' in condition, condition
+assert 'attributes["event_count"] < 0' in numeric[0], numeric
+assert config['processors']['filter/events_allowlist']['error_mode'] == 'ignore'
+
+# The composed body is built from allowlisted attributes only: a marker that
+# only ever appeared in the original message cannot be concatenated here.
+shape = config['processors']['transform/events_shape']['log_statements'][0]['statements']
+compose = next(statement for statement in shape if 'set(log.body' in statement)
+for field in ('event_type', 'object_kind', 'event_namespace', 'object_name', 'event_reason'):
+    assert f'attributes["{field}"]' in compose, (field, compose)
+for forbidden in ('message', 'note', 'annotations', 'metadata', 'body'):
+    assert f'"{forbidden}"' not in compose, compose
+keep = next(statement for statement in shape if statement.startswith('keep_keys'))
+assert 'body' not in keep and 'message' not in keep, keep
+
+# The structured input requires an explicit level and reason, so an arbitrary
+# application body cannot enter the store by arriving without them.
+structured = config['processors']['filter/otlp_allowlist']['logs']['log_record']
+joined = '\n'.join(structured)
+assert 'attributes["reason"]' in joined and 'attributes["level"]' in joined
+assert 'resource.attributes["service.name"]' in joined
+print('[observability] rendered event collector: read-only Events RBAC, two filtered pipelines, allowlisted body only')
+PYLOG
+
+  yq -o=json '.' "$out" | jq -s '.' >"$docs"
+  uv run --quiet --locked --no-dev python - "$docs" <<'PYRBAC'
+import json
+import sys
+
+documents = [doc for doc in json.load(open(sys.argv[1])) if doc]
+role = next(doc for doc in documents if doc['kind'] == 'ClusterRole')
+binding = next(doc for doc in documents if doc['kind'] == 'ClusterRoleBinding')
+account = next(doc for doc in documents if doc['kind'] == 'ServiceAccount')
+assert binding['roleRef']['name'] == role['metadata']['name']
+assert binding['subjects'] == [{
+    'kind': 'ServiceAccount', 'name': account['metadata']['name'], 'namespace': 'observability'}]
+deployment = next(doc for doc in documents if doc['kind'] == 'Deployment')
+pod = deployment['spec']['template']['spec']
+assert pod['serviceAccountName'] == account['metadata']['name']
+assert not any(pod.get(key) for key in ('hostNetwork', 'hostPID', 'hostIPC'))
+container = pod['containers'][0]
+assert container['image'] == 'otel/opentelemetry-collector-contrib:0.140.1'
+assert not any(port.get('hostPort') for port in container.get('ports', []))
+assert {port['containerPort'] for port in container['ports']} == {4318, 8888}
+assert not any(doc['kind'] in ('PersistentVolumeClaim', 'StatefulSet', 'DaemonSet') for doc in documents)
+print('[observability] rendered event collector: SA binding, no host namespace or port, pinned image, ClusterIP only')
+PYRBAC
+
+  # The dashboard reads this collector's drop counter, so the metric must be
+  # one the pinned collector really exports.
+  grep -q 'otelcol_processor_filter_logs_filtered_total' \
+    "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    || die "the operational log dashboard does not read the collector's drop counter"
+  log "event collector: read-only Events, single watcher, allowlist-only body, drop counter wired"
+}
+
 check_default_off
 check_enabled_apps
 check_metric_store
+check_log_store
+check_event_collector
 check_status_dashboards
 check_workload_metrics
 check_wiring
 if [ "${1:-}" = --runtime ]; then
   : "${OTELCOL_BIN:?set OTELCOL_BIN to the pinned 0.140.1 release binary}"
   : "${VICTORIA_METRICS_BIN:?set VICTORIA_METRICS_BIN to the pinned v1.155.0 release binary}"
+  : "${VICTORIA_LOGS_BIN:?set VICTORIA_LOGS_BIN to the pinned v1.53.0 release binary}"
   yq -r '.data["nodes-workloads.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
     | jq '[.rows[].panels[].expr[]]' >"$scratch/workload-queries.json"
+  yq -r '.data["operational-logs.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    | jq '[.rows[].panels[].expr[]]' >"$scratch/log-queries.json"
+  # Decode the chart output the earlier checks already rendered, so the fixture
+  # asserts against the store's actual arguments, not the values file.
+  [ -s "$scratch/victoria-logs.yaml" ] || die "the log store chart output was not captured"
+  yq -o=json '.' "$scratch/victoria-logs.yaml" | jq -s '.' >"$scratch/victoria-logs.json"
+  [ -s "$scratch/rendered-events-collector.yaml" ] \
+    || die "the rendered event collector configuration was not captured"
+  [ -s "$scratch/log-queries.json" ] || die "the operational log dashboard has no queries"
   uv run --quiet --locked --no-dev python tests/ci/observability-runtime.py "$scratch"
+  # The same rendered collector configuration, with only loopback endpoints
+  # substituted, feeds the actual log store and is then queried.
+  uv run --quiet --locked --no-dev python tests/ci/operational-logs-runtime.py "$scratch"
 fi
 log "observability contracts passed"

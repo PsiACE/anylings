@@ -1,0 +1,246 @@
+#% if observability.enabled %#
+---
+# One operational-log collector, as a single Deployment: the `k8sobjects`
+# receiver watches the Kubernetes Events API and cannot run as a replicated
+# watcher without producing duplicate records.
+#
+# Two controlled inputs feed one store:
+#   * `k8sobjects` - cluster Events, reduced to allowlisted operational fields.
+#   * `otlp`       - structured operational records from a workload, with the
+#                    documented schema below and no free-text body.
+#
+# Nothing here tails a file, mounts the host, runs a privileged daemon, reads
+# Secrets or proxies the node. It never receives prompts, sessions, tool
+# output or arbitrary application labels.
+fullnameOverride: otel-events
+mode: deployment
+replicaCount: 1
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.140.1"
+command:
+  name: otelcol-contrib
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+clusterRole:
+  create: true
+  rules:
+    # Read-only Events. No pods/log, no pods/exec, no Secrets, no write verb.
+    - apiGroups: [""]
+      resources: [events]
+      verbs: [get, list, watch]
+# No presets: a preset would add filelog/hostmetrics or widen RBAC.
+presets:
+  logsCollection:
+    enabled: false
+  hostMetrics:
+    enabled: false
+  kubernetesAttributes:
+    enabled: false
+  clusterMetrics:
+    enabled: false
+  kubeletMetrics:
+    enabled: false
+  kubernetesEvents:
+    enabled: false
+hostNetwork: false
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+resources:
+  requests:
+    cpu: 30m
+    memory: 96Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+ports:
+  # Applications send structured records here, in-cluster only.
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+  # The collector's own counters, including how many records the filters
+  # dropped. VictoriaMetrics scrapes this Service.
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+  otlp:
+    enabled: false
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+service:
+  enabled: true
+  type: ClusterIP
+useGOMEMLIMIT: true
+# Complete replacement, not a merge with the chart's examples.
+alternateConfig:
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+  receivers:
+    k8sobjects:
+      auth_type: serviceAccount
+      # A missing or forbidden resource is an error worth seeing, not silence.
+      error_mode: propagate
+      # Only the live stream: no snapshot replay on restart.
+      include_initial_state: false
+      objects:
+        # Core/v1 Events carry `reason`, `type`, `involvedObject` and `count`;
+        # the events.k8s.io shape is read as a fallback below.
+        - name: events
+          mode: watch
+    otlp:
+      protocols:
+        http:
+          endpoint: ${env:MY_POD_IP}:4318
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_mib: 200
+      spike_limit_mib: 50
+    # Kubernetes Events arrive as a body kvlist: {type, object:{...}}. This
+    # reads only the fields below out of it. Nothing else survives the record,
+    # and the compose step writes a new body from those fields alone.
+    transform/events_extract:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            - keep_keys(attributes, ["k8s.namespace.name"])
+        - context: log
+          statements:
+            - set(attributes["event_type"], body["type"])
+            - set(attributes["event_severity"], body["object"]["type"])
+            - set(attributes["event_reason"], body["object"]["reason"])
+            # Core/v1 keeps the count; events.k8s.io moves it into series.
+            - set(attributes["event_count"], body["object"]["count"])
+            - set(attributes["event_count"], body["object"]["series"]["count"]) where attributes["event_count"] == nil
+            - set(attributes["event_count"], 1) where attributes["event_count"] == nil
+            - set(attributes["object_kind"], body["object"]["involvedObject"]["kind"])
+            - set(attributes["object_kind"], body["object"]["regarding"]["kind"]) where attributes["object_kind"] == nil
+            - set(attributes["object_name"], body["object"]["involvedObject"]["name"])
+            - set(attributes["object_name"], body["object"]["regarding"]["name"]) where attributes["object_name"] == nil
+            - set(attributes["event_namespace"], body["object"]["involvedObject"]["namespace"])
+            - set(attributes["event_namespace"], body["object"]["regarding"]["namespace"]) where attributes["event_namespace"] == nil
+            - set(attributes["event_namespace"], body["object"]["metadata"]["namespace"]) where attributes["event_namespace"] == nil
+    # Drop, rather than sanitize, anything that does not match the allowlist.
+    # A record whose reason is free text (a message pasted into `reason`) is
+    # discarded whole, so no substring of it can reach the store.
+    filter/events_allowlist:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_type"] == nil or not IsMatch(attributes["event_type"], "^(ADDED|MODIFIED|DELETED)$")'
+          - 'attributes["event_severity"] == nil or not IsMatch(attributes["event_severity"], "^(Normal|Warning)$")'
+          - 'attributes["event_reason"] == nil or not IsMatch(attributes["event_reason"], "^[A-Za-z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["object_kind"] == nil or not IsMatch(attributes["object_kind"], "^[A-Z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["object_name"] == nil or not IsMatch(attributes["object_name"], "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")'
+          - 'attributes["event_namespace"] == nil or not IsMatch(attributes["event_namespace"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$")'
+          - 'attributes["event_count"] < 0 or attributes["event_count"] > 100000'
+    # The persisted body is composed here from allowlisted fields only. The
+    # original message, note, annotations and metadata are already gone, and
+    # this statement would not copy them even if they were not.
+    transform/events_shape:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - set(log.body, Concat(["event", attributes["event_type"], attributes["object_kind"], attributes["event_namespace"], attributes["object_name"], attributes["event_reason"]], " "))
+            - set(log.severity_text, "WARN") where attributes["event_severity"] == "Warning"
+            - set(log.severity_number, SEVERITY_NUMBER_WARN) where attributes["event_severity"] == "Warning"
+            - set(log.severity_text, "INFO") where attributes["event_severity"] == "Normal"
+            - set(log.severity_number, SEVERITY_NUMBER_INFO) where attributes["event_severity"] == "Normal"
+            - keep_keys(attributes, ["event_type", "event_severity", "event_reason", "event_count", "object_kind", "object_name", "event_namespace"])
+    # The structured OTLP input. A sender must supply `reason` and `level`;
+    # `component` and `event_count` are optional. Its body is never read.
+    transform/otlp_extract:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            - keep_keys(attributes, ["k8s.namespace.name", "service.name"])
+        - context: log
+          statements:
+            - set(attributes["event_count"], 1) where attributes["event_count"] == nil
+    filter/otlp_allowlist:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["reason"] == nil or not IsMatch(attributes["reason"], "^[A-Za-z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["level"] == nil or not IsMatch(attributes["level"], "^(DEBUG|INFO|WARN|ERROR)$")'
+          - 'attributes["component"] != nil and not IsMatch(attributes["component"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
+          - 'attributes["event_count"] < 0 or attributes["event_count"] > 100000'
+          - 'resource.attributes["service.name"] != nil and not IsMatch(resource.attributes["service.name"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsMatch(resource.attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$")'
+    transform/otlp_shape:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - set(log.body, Concat(["event", attributes["level"], attributes["component"], resource.attributes["k8s.namespace.name"], attributes["reason"]], " "))
+            - set(log.severity_text, "ERROR") where attributes["level"] == "ERROR"
+            - set(log.severity_number, SEVERITY_NUMBER_ERROR) where attributes["level"] == "ERROR"
+            - set(log.severity_text, "WARN") where attributes["level"] == "WARN"
+            - set(log.severity_number, SEVERITY_NUMBER_WARN) where attributes["level"] == "WARN"
+            - set(log.severity_text, "INFO") where attributes["level"] == "INFO"
+            - set(log.severity_number, SEVERITY_NUMBER_INFO) where attributes["level"] == "INFO"
+            - set(log.severity_text, "DEBUG") where attributes["level"] == "DEBUG"
+            - set(log.severity_number, SEVERITY_NUMBER_DEBUG) where attributes["level"] == "DEBUG"
+            - keep_keys(attributes, ["event_count", "reason", "level", "component"])
+  exporters:
+    otlphttp/victoria-logs:
+      # OTLP/HTTP to VictoriaLogs' native ingest path: no extra agent, gateway
+      # or protocol translation process.
+      logs_endpoint: http://victoria-logs.observability.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+      timeout: 5s
+      # Bounded buffer: a stalled store applies backpressure instead of
+      # growing the collector's memory without limit.
+      sending_queue:
+        enabled: true
+        queue_size: 128
+        num_consumers: 2
+      retry_on_failure:
+        enabled: true
+        initial_interval: 1s
+        max_interval: 5s
+        max_elapsed_time: 30s
+  service:
+    extensions: [health_check]
+    telemetry:
+      logs:
+        level: warn
+      metrics:
+        level: normal
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: ${env:MY_POD_IP}
+                  port: 8888
+    pipelines:
+      logs/events:
+        receivers: [k8sobjects]
+        processors: [memory_limiter, transform/events_extract, filter/events_allowlist, transform/events_shape]
+        exporters: [otlphttp/victoria-logs]
+      logs/structured:
+        receivers: [otlp]
+        processors: [memory_limiter, transform/otlp_extract, filter/otlp_allowlist, transform/otlp_shape]
+        exporters: [otlphttp/victoria-logs]
+#% endif %#

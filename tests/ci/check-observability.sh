@@ -1237,6 +1237,25 @@ method_filter = next(s for s in filters if 'attributes["http.request.method"]' i
 assert "GET|HEAD|POST|PUT|PATCH|DELETE" in method_filter, method_filter
 status_filter = next(s for s in filters if 'attributes["http.response.status_code"]' in s)
 assert "IsInt(" in status_filter and "< 100" in status_filter, status_filter
+# A span carrying links is rejected whole, because this release has no link
+# context and the store's LogSQL projection keeps link attributes.
+assert any("Len(links) > 0" in s for s in filters), filters
+# Trace state is cleared on the span, not stored.
+assert 'set(trace_state, "")' in span_group["statements"], span_group
+# Retained resource values are bounds-checked with `delete_key`, which removes
+# the key; `set(..., nil)` was measured not to.
+resource_statements = resource_group["statements"]
+for key in ("service.name", "k8s.namespace.name", "deployment.environment.name"):
+    assert any(s.startswith(f'delete_key(attributes, "{key}")') for s in resource_statements), \
+        (key, resource_statements)
+# Query delimiters are absent from the name/route classes: a query string is not
+# an operation identifier.
+for statement in (name_filter, *[s for s in filters if 'attributes["http.route"]' in s]):
+    class_text = statement.split('"^', 1)[1].split('$"', 1)[0]
+    # `?` and `=` are unambiguous query delimiters. `,` is checked as a pair
+    # with `=` because it is also a legal literal inside a character class.
+    assert "?" not in class_text, statement
+    assert "=" not in class_text, statement
 print("[observability] trace path: dedicated exporter, ordered drop-then-rebuild, closed attribute set")
 PYTRACES
   log "trace store: 7d + disk caps, non-root, ClusterIP, no claim, no cluster RBAC; collector has a dedicated trace pipeline"

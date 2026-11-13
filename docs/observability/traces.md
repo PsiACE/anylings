@@ -84,9 +84,14 @@ Rejected whole:
 
 - free text, and names longer than 120 characters
 
-Route templates and common database statement shapes are accepted **on purpose**;
-they are the default names emitted by the standard HTTP and database
-instrumentations, so rejecting them would discard the most common traces.
+Query delimiters (`?`, `=`) are **not** accepted in a name or route: a string
+carrying `?token=...` is a query string, not an operation identifier.
+
+This is a **syntactic** bound, and it is worth being precise about what it does
+not do. Text that fits the accepted class — a legal-looking statement, a word
+sequence, a dotted token — can still contain an arbitrary secret. The collector
+cannot detect that semantically and does not claim to; keeping secrets out of span
+names and attribute values is the sender's responsibility.
 
 **The rejection is observable, not silent.** A rejected span is counted, not
 returned to the sender:

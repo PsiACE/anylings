@@ -70,13 +70,28 @@ HOSTILE_STATUS_MESSAGE = f"{HOSTILE}-STATUS"
 # A credential placed in an *allowed* attribute key: dropping keys alone would
 # not catch this, so the value contract must reject it.
 HOSTILE_ALLOWED_KEY_VALUE = f"Bearer {HOSTILE}-ALLOWEDKEY"
+# Surfaces that are cleared outright rather than filtered, plus the two that
+# cannot be cleared and are therefore rejected with the span.
+HOSTILE_TRACE_STATE = f"vendor={HOSTILE}-TRACESTATE"
+HOSTILE_LINK = {"credential": f"Bearer {HOSTILE}-LINKCRED",
+                "note": f"{HOSTILE}-LINKATTR",
+                "trace_state": f"lk={HOSTILE}-LINKSTATE"}
+HOSTILE_NAME_QUERY = f"/checkout?token={HOSTILE}-NAMEQUERY"
+HOSTILE_ROUTE_QUERY = f"/checkout?x={HOSTILE}-ROUTEQUERY"
+HOSTILE_RESOURCE_VALUES = {"service.name": f"Bearer {HOSTILE}-SVCCRED",
+                           "k8s.namespace.name": f"{HOSTILE}-NSPROMPT explain"}
+# Names/values the contract must still ACCEPT.
+VALID_ROUTE_TEMPLATE = "/checkout/{cartId}"
 
 ALL_CANARIES = sorted({
     *HOSTILE_SPAN_ATTRIBUTES.values(),
     *HOSTILE_RESOURCE_ATTRIBUTES.values(),
+    *HOSTILE_RESOURCE_VALUES.values(),
+    *HOSTILE_LINK.values(),
     HOSTILE_SCOPE["name"], HOSTILE_SCOPE["attribute"],
     HOSTILE_EVENT["name"], HOSTILE_EVENT["attribute"],
     HOSTILE_STATUS_MESSAGE, HOSTILE_ALLOWED_KEY_VALUE,
+    HOSTILE_TRACE_STATE, HOSTILE_NAME_QUERY, HOSTILE_ROUTE_QUERY,
 })
 
 
@@ -186,6 +201,28 @@ def spans_payload():
                     span(probe_id, root_id, "/checkout/{cartId}",
                          now - 2_000_000, now - 1_500_000, {"code": 1},
                          {"http.route": string("/checkout/{cartId}")}),
+                    # W3C trace state on a kept span: it must be cleared.
+                    span("6666666666666666", root_id, "TRACESTATE", now - 2_200_000,
+                         now - 1_800_000, {"code": 1}, {}) | {"traceState": HOSTILE_TRACE_STATE},
+                    # A span carrying a link is rejected whole: this release has
+                    # no link context, and the store's LogSQL projection would
+                    # otherwise keep the link attributes.
+                    {**span("7777777777777777", root_id, "LINKPROBE",
+                            now - 2_100_000, now - 1_700_000, {"code": 1}, {}),
+                     "links": [{
+                         "traceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                         "spanId": "cccccccccccccccc",
+                         "traceState": HOSTILE_LINK["trace_state"],
+                         "attributes": [
+                             {"key": "authorization",
+                              "value": string(HOSTILE_LINK["credential"])},
+                             {"key": "link.note", "value": string(HOSTILE_LINK["note"])},
+                         ],
+                     }]},
+                    # Query strings are not operation identifiers.
+                    span("8888888888888888", root_id, HOSTILE_NAME_QUERY,
+                         now - 1_900_000, now - 1_600_000, {"code": 1},
+                         {"http.route": string(HOSTILE_ROUTE_QUERY)}),
                     # A credential smuggled through an ALLOWED key. Key
                     # filtering alone would keep the key, so the value contract
                     # must reject this span; it is not expected to be stored.
@@ -337,7 +374,22 @@ def run(scratch):
             spans = {span["operationName"]: span for span in traces[0]["spans"]}
             assert set(spans) == {
                 "GET /checkout", "SELECT cart", "/checkout/{cartId}", "CANARY",
+                "TRACESTATE",
             }, spans.keys()
+            # A span carrying a link is rejected whole, so it and its hostile
+            # link attributes never reach either projection.
+            assert "LINKPROBE" not in spans, spans.keys()
+            # `Len(links) > 0` must have dropped something, or the link rule is
+            # not actually running.
+            metrics = urlopen(
+                f"http://127.0.0.1:{metrics_port}/metrics", timeout=10).read().decode()
+            filtered = sum(
+                float(line.rsplit(" ", 1)[1]) for line in metrics.splitlines()
+                if line.startswith("otelcol_processor_filter_spans_filtered_total{")
+            )
+            # name-query, query-route, allowed-key credential, link span, and the
+            # resource-value span is filtered by resource attributes.
+            assert filtered >= 3, filtered
             root, child = spans["GET /checkout"], spans["SELECT cart"]
             assert root["duration"] > 0 and child["duration"] > 0, (root, child)
             assert child["references"], "the child span lost its parent reference"
@@ -357,9 +409,25 @@ def run(scratch):
             # instrumentation scope (name and attributes), the status message,
             # the resource attributes, and a credential placed in an *allowed*
             # key -- which key filtering alone would not catch.
-            stored = json.dumps(traces)
+            # BOTH projections are scanned. The Jaeger API is a view: this
+            # store also keeps its own LogSQL projection, which is where link
+            # attributes and span trace state were found to survive even when
+            # Jaeger omitted them. Scanning only the view would pass on a real
+            # leak.
+            jaeger_projection = json.dumps(traces)
+            with urlopen(
+                f"{base}/select/logsql/query?{urlencode({'query': '*', 'limit': 200})}",
+                timeout=10,
+            ) as response:
+                logsql_projection = response.read().decode()
+            assert logsql_projection.strip(), "the store's LogSQL projection was empty"
+            assert "GET /checkout" in logsql_projection, (
+                "the LogSQL projection does not contain the stored span, so a "
+                "clean scan would prove nothing")
+            stored = jaeger_projection + logsql_projection
             for marker in ALL_CANARIES:
-                assert marker not in stored, marker
+                assert marker not in jaeger_projection, ("jaeger", marker)
+                assert marker not in logsql_projection, ("logsql", marker)
             for marker in HOSTILE_SPAN_ATTRIBUTES.values():
                 assert marker not in stored, marker
             for marker in HOSTILE_RESOURCE_ATTRIBUTES.values():

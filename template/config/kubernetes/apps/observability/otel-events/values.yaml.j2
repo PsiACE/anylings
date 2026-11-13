@@ -365,16 +365,34 @@ alternateConfig:
           # The accepted shapes, deliberately: a leading-slash route template
           # (`/checkout/{cartId}`) and an operation name starting with a letter
           # (HTTP methods, RPC names, SQL statement heads).
-          - 'not IsMatch(name, "^(/[A-Za-z0-9 ./_:=?{}()*:,<>+-]{0,118}|[A-Za-z][A-Za-z0-9 ./_:=?{}()*:,<>-]{0,119})$")'
+          #
+          # Query delimiters (`?`, `=`, `,`) are NOT in the class. A name or
+          # route carrying `?token=...` is a query string, not an operation
+          # identifier, and it was previously accepted. This is a SYNTACTIC
+          # bound only: text that fits the class -- including a legal-looking
+          # `SELECT` statement or a word sequence -- can still contain an
+          # arbitrary secret. Senders must not put secrets in span names; the
+          # collector cannot detect that semantically and does not claim to.
+          - 'not IsMatch(name, "^(/[A-Za-z0-9 ./_{}()*:<>+-]{0,118}|[A-Za-z][A-Za-z0-9 ./_{}()*:<>-]{0,119})$")'
           # Allowed string attributes must be short and free of credential,
           # session and secret shapes. A value that fails is rejected with the
           # span rather than rewritten.
           - 'attributes["http.request.method"] != nil and (not IsString(attributes["http.request.method"]) or not IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$"))'
-          - 'attributes["http.route"] != nil and (not IsString(attributes["http.route"]) or not IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_:=?{}()*:,<>+-]{0,119}$"))'
+          # Same syntactic bound for routes: no query delimiters.
+          - 'attributes["http.route"] != nil and (not IsString(attributes["http.route"]) or not IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$"))'
           - 'attributes["rpc.method"] != nil and (not IsString(attributes["rpc.method"]) or not IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9 ./_:-]{0,119}$"))'
           - 'attributes["error.type"] != nil and (not IsString(attributes["error.type"]) or not IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$"))'
           # The one numeric field: a real HTTP status code, not a string.
           - 'attributes["http.response.status_code"] != nil and (not IsInt(attributes["http.response.status_code"]) or attributes["http.response.status_code"] < 100 or attributes["http.response.status_code"] > 599)'
+          # A span carrying links is rejected whole. This collector release has
+          # no OTTL context for a link, so its attributes and link trace state
+          # cannot be cleared -- and `set(links, [])` was measured NOT to empty
+          # the slice in a live pipeline, even though the same statement works
+          # against the debug exporter. The store's own LogSQL projection keeps
+          # `link:link_attr:*` and `link:link_trace_state:*`, so "clear it" is
+          # not achievable and "drop the span" is the only honest bound.
+          # Link-based correlation is not a shipped feature.
+          - 'Len(links) > 0'
     # Clear every surface the checks above cannot protect, then repopulate from
     # the surviving values only. Span events are removed entirely: an event name
     # and its fields are caller free text, and no shipped query needs them.
@@ -383,6 +401,19 @@ alternateConfig:
       trace_statements:
         - context: resource
           statements:
+            # Retained resource values are caller-controlled too. A
+            # Bearer-shaped `service.name` or a free-text namespace would
+            # otherwise sit in the stream identity of every trace.
+            #
+            # `delete_key` is used because `set(..., nil)` does NOT remove a key
+            # from a pcommon map -- measured against the pinned collector: the
+            # assignment silently left the value in place. These bounds are type
+            # + charset + length, which rejects credentials and prose; a
+            # legal-looking identifier can still be a secret, so the contract is
+            # "bounded identifier", not "guaranteed secret-free".
+            - delete_key(attributes, "service.name") where attributes["service.name"] != nil and (not IsString(attributes["service.name"]) or not IsMatch(attributes["service.name"], "^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$"))
+            - delete_key(attributes, "k8s.namespace.name") where attributes["k8s.namespace.name"] != nil and (not IsString(attributes["k8s.namespace.name"]) or not IsMatch(attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
+            - delete_key(attributes, "deployment.environment.name") where attributes["deployment.environment.name"] != nil and (not IsString(attributes["deployment.environment.name"]) or not IsMatch(attributes["deployment.environment.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
             - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
             - set(attributes["service.name"], attributes["service.name"]) where attributes["service.name"] != nil
             - set(resource.schema_url, "")
@@ -405,6 +436,10 @@ alternateConfig:
           statements:
             # A status message is caller free text; clear it rather than store it.
             - set(status.message, "")
+            # W3C trace state is an unused caller string. It reaches the store
+            # as `w3c.tracestate` in the Jaeger projection and as `trace_state`
+            # in the store's own LogSQL projection.
+            - set(trace_state, "")
             - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
             - set(attributes["http.request.method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil
             - set(attributes["http.response.status_code"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil

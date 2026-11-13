@@ -78,8 +78,9 @@ Following Argo CD Autopilot's model, there is exactly one deletion behaviour:
   Git credential may be removed.
 - Argo self-management alone omits the deletion finalizer, as upstream specifies.
 - There is no retention mode, no preserve toggle and no parallel "detach" path.
-- Infrastructure objects keep their own explicit lifecycle: R2 buckets carry
-  `prevent_destroy`, and the k0s owner requires a reviewed lifecycle change.
+- Infrastructure objects keep their own explicit lifecycle: the k0s and DOKS
+  cluster owners and R2 buckets carry `prevent_destroy`, so removing any of them
+  is a reviewed lifecycle change rather than a plain destroy.
 
 Storage follows the same rule. This template creates no PersistentVolumeClaim for
 an application; an operator-owned claim is mounted, never adopted, so deleting the

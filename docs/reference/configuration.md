@@ -61,10 +61,10 @@ file at render time and the rendered Secret is encrypted whole.
 
 ### `[magpie]` — optional
 
-| Key            | Default | Rule                                                                                                                                   |
-| -------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `config_claim` | `""`    | Empty keeps an `emptyDir`; otherwise an existing PVC name (DNS subdomain, ≤253 characters, each label ≤63) in the `gateways` namespace |
-| `seed_dir`     | `""`    | Empty renders no seed; otherwise a directory holding `providers.json` and `caller-keys.json`                                           |
+| Key            | Default | Rule                                                                                                                                    |
+| -------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `config_claim` | `""`    | Empty keeps an `emptyDir`; otherwise an existing PVC name (lowercase DNS subdomain, at most 253 characters) in the `gateways` namespace |
+| `seed_dir`     | `""`    | Empty renders no seed; otherwise a directory holding `providers.json` and `caller-keys.json`                                            |
 
 Naming `seed_dir` renders the `magpie-seed` Secret, its KSOPS generator and an init
 container that copies each file into `/config/magpie` **only when absent**, so a
@@ -72,20 +72,31 @@ restart never overwrites state the running gateway has since changed. This
 template never creates the claim, so removing the application leaves the claim and
 its data to you.
 
+Both claim inputs (this one and `agents.storage_existing_claim`) reject a name
+longer than 253 characters, and they differ on the label bound: the agent
+runtime's input also rejects a dot-separated label longer than 63 characters,
+while this one does not — so an over-long label passes the render and is only
+rejected later by the API server. Keep every claim name within Kubernetes' own
+limits: 253 characters overall with labels of at most 63.
+
 ### `[agents]` — optional, no default
 
 Omit the section and no agent runtime is rendered.
 
-| Key                      | Default               | Rule                                                                             |
-| ------------------------ | --------------------- | -------------------------------------------------------------------------------- |
-| `image_repository`       | —                     | Required. Registry path without tag or digest                                    |
-| `image_tag`              | `bub0.6.1-t3web0.1.8` | ≤128 characters; the image carries two components, so the tag names both         |
-| `image_digest`           | `""`                  | Empty, or `sha256:` plus 64 lowercase hex; combined into `repository:tag@digest` |
-| `storage_existing_claim` | `""`                  | Empty keeps an `emptyDir`; otherwise an existing PVC name mounted at `/home/t3`  |
-| `gateway_secret`         | `""`                  | File holding a gateway key **already** recorded by Magpie's `caller-keys.json`   |
+| Key                      | Default               | Rule                                                                                                                                                     |
+| ------------------------ | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `image_repository`       | —                     | Required. Registry path without tag or digest                                                                                                            |
+| `image_tag`              | `bub0.6.1-t3web0.1.8` | ≤128 characters; the image carries two components, so the tag names both                                                                                 |
+| `image_digest`           | `""`                  | Empty, or `sha256:` plus 64 lowercase hex; combined into `repository:tag@digest`                                                                         |
+| `storage_existing_claim` | `""`                  | Empty keeps an `emptyDir`; otherwise an existing PVC name (lowercase DNS subdomain, at most 253 characters, each label at most 63) mounted at `/home/t3` |
+| `gateway_secret`         | `""`                  | File holding a gateway key **already** recorded by Magpie's `caller-keys.json`                                                                           |
 
 `gateway_secret` requires `magpie.seed_dir`. A key the gateway never learned only
 produces 401s, so the pair is validated together.
+
+There is no registry-credential input: pulling from a private registry is the
+cluster's concern, and this template does not configure it. See the
+published-image section below for the supply requirements.
 
 ### Optional slices: observability and SpinKube
 
@@ -116,6 +127,35 @@ when less than 256MiB of free disk remains. Log coverage is Kubernetes Events pl
 structured OTLP record; see [operational
 logs](../observability/operational-logs.md) for the field contract rather than
 assuming container or node log collection.
+
+## Published runtime image
+
+A published runtime image exists so a cluster can run the agent workload without
+building anything at deploy time. The repository builds it and, on a normal
+merge to the default branch, the workflow
+(`.github/workflows/runtime-image.yaml`) publishes it and records the reference
+a render names. The publisher builds **linux/amd64 only**: the multi-architecture
+source pins exist for operator-built images, but the
+workflow does not publish a multi-architecture manifest, so its tags must not be
+deployed on arm64 nodes regardless of any pull-secret configuration — an image
+pull secret authenticates a registry, it does not make an amd64 image run on
+arm64. If your registry requires authentication, a freshly created package is
+private until its registry settings are changed and until then a cluster needs
+its pulls authorized. If anonymous pulls fail, the symptom is `ImagePullBackOff`
+rather than a rendering error. This repository does not create image pull secrets
+and defines no registry-credential input.
+
+## Node-local storage (k0s)
+
+The k0s backend optionally installs a local-path provisioner on the cluster with
+`just apply k0s-storage`. It needs an explicit kubeconfig and context, and
+`ANYLINGS_STORAGE_PATH` set to an absolute, dedicated node-local directory — a
+system, kubelet or home path is rejected. The provisioner installs a
+`local-path` StorageClass deliberately **not** made the cluster default; a claim
+must name that class explicitly. Node-local storage is a single-node feature: it
+is not replicated, not HA and not a replacement for a StorageClass your CSI
+driver provides. Nothing in this repository creates a claim for it; you choose
+the class in each application's values/PVC.
 
 ## Runtime authentication
 

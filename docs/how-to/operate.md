@@ -53,6 +53,11 @@ just plan doks
 just apply doks
 ```
 
+For the k0s backend, optional node-local storage is a separate step
+(`just apply k0s-storage` with `ANYLINGS_STORAGE_PATH`); it is deliberately not
+the cluster default and is documented with the other inputs in the
+[configuration reference](../reference/configuration.md#node-local-storage-k0s).
+
 Then export the issued kubeconfig to a private file and select a context
 explicitly — the platform root refuses to fall back to a current context:
 
@@ -93,6 +98,15 @@ application reference resolves inside the published tree. Review the generated
 diff before publishing, then push **only** `$ANYLINGS_OUTPUT_DIR/kubernetes/` to
 the configured repository, branch and prefix. Bootstrap inputs, the age identity
 and any inspection manifests stay behind.
+
+A render that fails partway leaves an output directory without its ownership
+marker, and every later render and `just --yes reset platform` refuse it rather
+than adopt or delete it. That refusal is the safety property, so finish the
+missing prerequisite first (most often the token file), then remove only the
+generated paths the render owns inside that directory — `bootstrap/`,
+`kubernetes/` and `.sops.yaml` — and re-run `configure`. Never point the output
+directory at a populated location, and do not delete a directory the renderer
+did not create.
 
 First installation only:
 
@@ -157,7 +171,10 @@ need an authorized environment of your own.
 
 ## Tear down
 
-Order matters, and every step is destructive:
+Order matters, and every step is destructive. Both cluster owners carry an
+explicit `prevent_destroy` guard, so the last step is a **reviewed lifecycle
+change**, not a plain command that quietly removes a cluster: OpenTofu refuses
+the destroy until you have decided to remove that protection and recorded why.
 
 1. Remove workload directories from Git and let Argo prune them.
 2. `just destroy platform` deletes the bootstrap Application and cascades through
@@ -165,11 +182,19 @@ Order matters, and every step is destructive:
    or volume this repository did not create is deleted, and none is backed up for
    you.
 3. `just destroy cloudflare` removes tunnel routes, DNS records and Access
-   applications. R2 buckets carry `prevent_destroy`; removing or replacing them
-   needs a reviewed lifecycle change.
-4. `just destroy k0s` or `just destroy doks` removes the cluster. k0s keeps its
-   recorded hosts and configuration in state, so reset still needs access to
+   applications. R2 buckets also carry `prevent_destroy`, so removing or replacing
+   them needs the same kind of reviewed change.
+4. The cluster itself. `just destroy k0s` or `just destroy doks` attempts the
+   teardown, and the owner's guard blocks it on a permanent cluster: review the
+   lifecycle change in the root, then apply it deliberately. k0s keeps its
+   recorded hosts and configuration in state, so a reset still needs access to
    them.
+
+Ordering is a precondition, not a convenience. Stop writers and confirm the
+storage and access preconditions, including a retained-volume inspection before
+any rebind, **before** removing the cluster that serves them. Destruction is not
+a rollback: nothing here restores data, reverses a DNS or Access change, or
+re-creates a deleted claim.
 
 Keep the backend state, the age identity and the configuration until teardown
 succeeds. A failed reset is an error, not a partially completed teardown: retry

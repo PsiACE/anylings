@@ -9,16 +9,16 @@ platform behaves the same way whichever control plane you bring.
 
 ## What it supports
 
-| Capability                | Default | Behaviour and limits                                                                                                                                          |
-| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| k0s cluster               | —       | Hosts you name explicitly, applied through the official k0sctl orchestration pattern; a single controller is not HA                                           |
-| DOKS cluster              | —       | Explicit release slug, one fixed non-HA worker pool; no autoscaling and no automatic upgrade                                                                  |
-| Argo CD GitOps            | always  | One bootstrap Application owns Argo itself, a projects root and an ApplicationSet that discovers `apps/*/*/config.json`                                       |
-| Cloudflare Tunnel         | always  | Outbound-only connector in the cluster; the tunnel, routes, DNS and Access applications belong to the `cloudflare` OpenTofu root                              |
-| Magpie model gateway      | always  | One replica, gateway-key authentication, no vendor credential in Git; `/config` is ephemeral unless you name an existing claim                                |
-| Bub agent runtime         | opt-in  | One replica with a browser surface, behind the server's own pairing or bearer tokens; you publish the image and choose the provider and model at runtime      |
-| Self-hosted observability | opt-in  | Metrics, probe status, workload state, kubelet usage and operational logs as ClusterIP Services; no application or node log collection, no traces, no Grafana |
-| SpinKube                  | opt-in  | cert-manager plus the Spin operator and one sample WASM app, all ClusterIP-only                                                                               |
+| Capability                | Default | Behaviour and limits                                                                                                                                                          |
+| ------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| k0s cluster               | —       | Hosts you name explicitly, applied through the official k0sctl orchestration pattern; a single controller is not HA. Optional node-local storage via `just apply k0s-storage` |
+| DOKS cluster              | —       | Explicit release slug, one fixed non-HA worker pool; no autoscaling and no automatic upgrade                                                                                  |
+| Argo CD GitOps            | always  | One bootstrap Application owns Argo itself, a projects root and an ApplicationSet that discovers `apps/*/*/config.json`; the platform root applies it                         |
+| Cloudflare Tunnel         | always  | Outbound-only connector in the cluster; the tunnel, routes, DNS and Access applications belong to the `cloudflare` OpenTofu root                                              |
+| Magpie model gateway      | always  | One replica, gateway-key authentication, no vendor credential in Git; `/config` is ephemeral unless you name an existing claim                                                |
+| Bub agent runtime         | opt-in  | One replica with a browser surface, behind the server's own pairing or bearer tokens; you publish the amd64 image and choose the provider and model at runtime                |
+| Self-hosted observability | opt-in  | Metrics, probe status, workload state, kubelet usage and operational logs as ClusterIP Services; no application or node log collection, no traces, no Grafana                 |
+| SpinKube                  | opt-in  | cert-manager plus the Spin operator and one sample WASM app, all ClusterIP-only                                                                                               |
 
 Retention values are query bounds, not proof of deletion: an `emptyDir` store
 loses everything when its Pod is replaced, and a retention window stops queries
@@ -27,8 +27,10 @@ PersistentVolumeClaim on your behalf.
 
 ## Getting started
 
-You need `mise`, an age identity, a Git repository Argo can read, and a reviewed
-OpenTofu backend for the roots you apply. The short path:
+You need `mise`, an age identity, a Git repository Argo can read, a Cloudflare
+tunnel token as a private file (the connector is baseline), and a reviewed
+OpenTofu backend for the roots you apply. The short, offline-capable path
+renders and validates configuration without touching a cluster:
 
 ```bash
 mise trust && mise install --locked
@@ -37,15 +39,20 @@ export ANYLINGS_CONFIG="$PWD/.local/instance/cluster.toml"
 export ANYLINGS_OUTPUT_DIR="$PWD/.local/instance/rendered"
 export SOPS_AGE_KEY_FILE="$PWD/.local/instance/age.key"
 just init platform          # cluster.toml sample + age key, created once
+# write the tunnel token from the cloudflare root's tunnel_token output to the
+# file named by ingress.tunnel_token_file, then:
 just configure platform     # render, encrypt and validate
 just check platform         # encryption and resolvable references, read-only
 ```
 
-Then publish only the rendered `kubernetes/` directory to the configured Git
-prefix, install Argo once with `just bootstrap platform`, and let Argo reconcile
-the rest. [Operating the platform](docs/how-to/operate.md) walks through a
-complete first installation, day-two changes and teardown; [configuration
-reference](docs/reference/configuration.md) has every input and default.
+The render needs the token file to exist; it is never a value in the
+configuration, and nothing creates that file for you. The steps before the
+first real run — provisioning a cluster, exporting an explicit kubeconfig and
+context, preparing the token, publishing `kubernetes/`, installing Argo with
+`just bootstrap platform`, and applying the platform root — are in the
+[operating guide](docs/how-to/operate.md), which is the complete path; the
+[configuration reference](docs/reference/configuration.md) explains every input
+and default.
 
 ## Observability
 

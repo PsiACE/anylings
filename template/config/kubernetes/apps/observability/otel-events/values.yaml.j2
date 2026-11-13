@@ -380,7 +380,7 @@ alternateConfig:
           - 'attributes["http.request.method"] != nil and (not IsString(attributes["http.request.method"]) or not IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$"))'
           # Same syntactic bound for routes: no query delimiters.
           - 'attributes["http.route"] != nil and (not IsString(attributes["http.route"]) or not IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$"))'
-          - 'attributes["rpc.method"] != nil and (not IsString(attributes["rpc.method"]) or not IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9 ./_:-]{0,119}$"))'
+          - 'attributes["rpc.method"] != nil and (not IsString(attributes["rpc.method"]) or not IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9._:/-]{0,119}$"))'
           - 'attributes["error.type"] != nil and (not IsString(attributes["error.type"]) or not IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$"))'
           # The one numeric field: a real HTTP status code, not a string.
           - 'attributes["http.response.status_code"] != nil and (not IsInt(attributes["http.response.status_code"]) or attributes["http.response.status_code"] < 100 or attributes["http.response.status_code"] > 599)'
@@ -401,6 +401,15 @@ alternateConfig:
       trace_statements:
         - context: resource
           statements:
+            # Close the scratch channel before any copy runs. These names are
+            # the collector's own, so a caller that writes one directly would
+            # otherwise need no legitimate counterpart, survive the
+            # scratch-only keep, and be written back as the real key. Dropping
+            # them first means the only scratch values present are the copies
+            # made below, which are checked.
+            - delete_key(attributes, "__trace_keep_service")
+            - delete_key(attributes, "__trace_keep_ns")
+            - delete_key(attributes, "__trace_keep_env")
             # CANONICAL REBUILD, not in-place filtering.
             #
             # `attributes[...]` reads the FIRST occurrence of a key, while the
@@ -432,6 +441,20 @@ alternateConfig:
             - delete_key(attributes, "__trace_keep_service")
             - delete_key(attributes, "__trace_keep_ns")
             - delete_key(attributes, "__trace_keep_env")
+            # Close the scratch channel itself. A caller can send
+            # `__trace_keep_service` directly: it then needs no copy to exist,
+            # survives the scratch-only keep, and is written back as the real
+            # key by the statement above. Measured at the previous head: all
+            # eight retained keys stored caller text that way.
+            #
+            # `keep_keys` over the approved REAL names removes every scratch
+            # occurrence, whatever its origin, and every other key with it. The
+            # checks below run after this, so the exported value is the one that
+            # was checked, and no scratch name can survive to export.
+            - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
+            - delete_key(attributes, "service.name") where attributes["service.name"] != nil and (not IsString(attributes["service.name"]) or not IsMatch(attributes["service.name"], "^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$"))
+            - delete_key(attributes, "k8s.namespace.name") where attributes["k8s.namespace.name"] != nil and (not IsString(attributes["k8s.namespace.name"]) or not IsMatch(attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
+            - delete_key(attributes, "deployment.environment.name") where attributes["deployment.environment.name"] != nil and (not IsString(attributes["deployment.environment.name"]) or not IsMatch(attributes["deployment.environment.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
             - set(resource.schema_url, "")
         - context: scope
           statements:
@@ -450,6 +473,13 @@ alternateConfig:
             - set(name, "event")
         - context: span
           statements:
+            # Close the span-map scratch channel before the copies run, for the
+            # same reason as the resource map above.
+            - delete_key(attributes, "__trace_keep_method")
+            - delete_key(attributes, "__trace_keep_status")
+            - delete_key(attributes, "__trace_keep_route")
+            - delete_key(attributes, "__trace_keep_rpc")
+            - delete_key(attributes, "__trace_keep_error")
             # A status message is caller free text; clear it rather than store it.
             - set(status.message, "")
             # W3C trace state is an unused caller string. It reaches the store
@@ -463,7 +493,7 @@ alternateConfig:
             - set(attributes["__trace_keep_method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil and IsString(attributes["http.request.method"]) and IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$")
             - set(attributes["__trace_keep_status"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil and IsInt(attributes["http.response.status_code"]) and attributes["http.response.status_code"] >= 100 and attributes["http.response.status_code"] <= 599
             - set(attributes["__trace_keep_route"], attributes["http.route"]) where attributes["http.route"] != nil and IsString(attributes["http.route"]) and IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$")
-            - set(attributes["__trace_keep_rpc"], attributes["rpc.method"]) where attributes["rpc.method"] != nil and IsString(attributes["rpc.method"]) and IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9 ./_:-]{0,119}$")
+            - set(attributes["__trace_keep_rpc"], attributes["rpc.method"]) where attributes["rpc.method"] != nil and IsString(attributes["rpc.method"]) and IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9._:/-]{0,119}$")
             - set(attributes["__trace_keep_error"], attributes["error.type"]) where attributes["error.type"] != nil and IsString(attributes["error.type"]) and IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$")
             - keep_keys(attributes, ["__trace_keep_method", "__trace_keep_status", "__trace_keep_route", "__trace_keep_rpc", "__trace_keep_error"])
             - set(attributes["http.request.method"], attributes["__trace_keep_method"]) where attributes["__trace_keep_method"] != nil
@@ -476,6 +506,15 @@ alternateConfig:
             - delete_key(attributes, "__trace_keep_route")
             - delete_key(attributes, "__trace_keep_rpc")
             - delete_key(attributes, "__trace_keep_error")
+            # Same closure for the span map: keep the approved real names only,
+            # so a caller-supplied scratch name cannot be written back, then
+            # re-check the values that survive.
+            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
+            - delete_key(attributes, "http.request.method") where attributes["http.request.method"] != nil and (not IsString(attributes["http.request.method"]) or not IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$"))
+            - delete_key(attributes, "http.response.status_code") where attributes["http.response.status_code"] != nil and (not IsInt(attributes["http.response.status_code"]) or attributes["http.response.status_code"] < 100 or attributes["http.response.status_code"] > 599)
+            - delete_key(attributes, "http.route") where attributes["http.route"] != nil and (not IsString(attributes["http.route"]) or not IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$"))
+            - delete_key(attributes, "rpc.method") where attributes["rpc.method"] != nil and (not IsString(attributes["rpc.method"]) or not IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9._:/-]{0,119}$"))
+            - delete_key(attributes, "error.type") where attributes["error.type"] != nil and (not IsString(attributes["error.type"]) or not IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$"))
   exporters:
     otlphttp/victoria-traces:
       # OTLP/HTTP to VictoriaTraces' native ingest path. Separate from the log

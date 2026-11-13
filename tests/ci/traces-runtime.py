@@ -82,12 +82,27 @@ HOSTILE_RESOURCE_VALUES = {"service.name": f"Bearer {HOSTILE}-SVCCRED",
                            "k8s.namespace.name": f"{HOSTILE}-NSPROMPT explain"}
 # Names/values the contract must still ACCEPT.
 VALID_ROUTE_TEMPLATE = "/checkout/{cartId}"
+# The collector's own scratch names are writable by the caller. A sender that
+# writes straight into one needs no legitimate counterpart to exist, so these
+# values would be written back as the real key unless the scratch channel is
+# closed. Each is paired with a real destination key below.
+SCRATCH_NAMES = {
+    "__trace_keep_service": f"Bearer {HOSTILE}-SCRATCH-SVC",
+    "__trace_keep_ns": f"{HOSTILE}-SCRATCH-NS sentence",
+    "__trace_keep_env": f"{HOSTILE}-SCRATCH-ENV",
+    "__trace_keep_method": f"Bearer {HOSTILE}-SCRATCH-METHOD",
+    "__trace_keep_status": f"{HOSTILE}-SCRATCH-STATUS",
+    "__trace_keep_route": f"/x?y={HOSTILE}-SCRATCH-ROUTE",
+    "__trace_keep_rpc": f"{HOSTILE}-SCRATCH-RPC",
+    "__trace_keep_error": f"{HOSTILE}-SCRATCH-ERROR",
+}
 
 ALL_CANARIES = sorted({
     *HOSTILE_SPAN_ATTRIBUTES.values(),
     *HOSTILE_RESOURCE_ATTRIBUTES.values(),
     *HOSTILE_RESOURCE_VALUES.values(),
     *HOSTILE_LINK.values(),
+    *SCRATCH_NAMES.values(),
     HOSTILE_SCOPE["name"], HOSTILE_SCOPE["attribute"],
     HOSTILE_EVENT["name"], HOSTILE_EVENT["attribute"],
     HOSTILE_STATUS_MESSAGE, HOSTILE_ALLOWED_KEY_VALUE,
@@ -281,6 +296,36 @@ def spans_payload():
                     {"key": "http.request.method",
                      "value": string(f"Bearer {HOSTILE}-DUP-METHOD")},
                 ],
+            }, {
+                # Scratch-only: no legitimate counterpart for any of these, so
+                # the copy conditions never fire and the caller's value would be
+                # written back verbatim unless the scratch channel is closed.
+                "traceId": trace_id,
+                "spanId": "aaaaaaaaaaaaaaab",
+                "name": "SCRATCHONLY",
+                "kind": 2,
+                "startTimeUnixNano": str(now - 950_000),
+                "endTimeUnixNano": str(now - 550_000),
+                "status": {"code": 1},
+                "attributes": [
+                    {"key": name, "value": string(value)}
+                    for name, value in SCRATCH_NAMES.items()
+                ],
+            }, {
+                # A scratch name repeated with a valid value, to check that the
+                # real value still wins and the scratch occurrence is removed.
+                "traceId": trace_id,
+                "spanId": "aaaaaaaaaaaaaaac",
+                "name": "SCRATCHDUP",
+                "kind": 2,
+                "startTimeUnixNano": str(now - 850_000),
+                "endTimeUnixNano": str(now - 450_000),
+                "status": {"code": 1},
+                "attributes": [
+                    {"key": "http.route", "value": string("/kept")},
+                    {"key": "__trace_keep_route", "value": string(SCRATCH_NAMES["__trace_keep_route"])},
+                    {"key": "__trace_keep_route", "value": string("/kept")},
+                ],
             }]}],
         }],
     }
@@ -432,8 +477,12 @@ def run(scratch):
             # do not survive.
             assert set(spans) == {
                 "GET /checkout", "SELECT cart", "/checkout/{cartId}", "CANARY",
-                "TRACESTATE", "DUPROUTE",
+                "TRACESTATE", "DUPROUTE", "SCRATCHONLY", "SCRATCHDUP",
             }, spans.keys()
+            # A caller-written scratch name must not become a real key, and the
+            # real value must win when both are present.
+            assert [tag["value"] for tag in spans["SCRATCHDUP"]["tags"]
+                    if tag["key"] == "http.route"] == ["/kept"], spans["SCRATCHDUP"]["tags"]
             # The duplicate span keeps exactly one route, the valid one.
             assert [tag["value"] for tag in spans["DUPROUTE"]["tags"]
                     if tag["key"] == "http.route"] == ["/dup"], spans["DUPROUTE"]["tags"]

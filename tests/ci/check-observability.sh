@@ -1255,6 +1255,20 @@ for group, prefix in ((resource_group, "__trace_keep_"), (span_group, "__trace_k
     assert deletes, (group["context"], statements)
     for name in kept_names:
         assert f'delete_key(attributes, "{name}")' in deletes, (name, deletes)
+    # The scratch channel is closed before the copies, and the final map keeps
+    # only the approved real names. A caller-written scratch name therefore
+    # cannot survive to be written back, which is the 38189a91 regression.
+    first_delete = next(i for i, s in enumerate(statements)
+                        if s.startswith("delete_key(attributes,"))
+    first_set = next(i for i, s in enumerate(statements)
+                     if s.startswith('set(attributes["') and prefix in s)
+    assert first_delete < first_set, (group["context"], first_delete, first_set)
+    final_keeps = [s for s in statements if s.startswith("keep_keys(attributes, [")]
+    assert len(final_keeps) >= 2, (group["context"], final_keeps)
+    approved = _re.findall(r'"([^"]+)"', final_keeps[-1])
+    assert approved, final_keeps
+    for name in approved:
+        assert not name.startswith(prefix), (group["context"], name)
 # Query delimiters are absent from the name/route classes: a query string is not
 # an operation identifier.
 for statement in (name_filter, *[s for s in filters if 'attributes["http.route"]' in s]):

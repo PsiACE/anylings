@@ -88,6 +88,12 @@ Rejected whole:
 Query delimiters (`?`, `=`) are **not** accepted in a name or route: a string
 carrying `?token=...` is a query string, not an operation identifier.
 
+**Neither repeated keys nor internal scratch names bypass the contract.** The
+collector rebuilds the retained maps: values are copied under internal names, the
+map is emptied, checked copies are written back, and the final map keeps only the
+approved names. A repeated key cannot ship an unchecked second value, and a sender
+that writes an internal scratch name directly has it dropped before the rebuild.
+
 This is a **syntactic** bound — length and character set. It rejects a query
 string because `?` and `=` are outside the class; it does **not** reject text that
 fits the class. A legal-looking statement, a word sequence or a dotted token can

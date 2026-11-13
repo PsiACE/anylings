@@ -1,0 +1,11 @@
+#% if observability.enabled %#
+{
+  "appName": "otel-kubelet",
+  "namespace": "observability",
+  "chartRepo": "ghcr.io/open-telemetry/opentelemetry-helm-charts",
+  "chart": "opentelemetry-collector",
+  "chartVersion": "0.140.0",
+  "valuesFile": #{ repository_path('kubernetes/apps/observability/otel-kubelet/values.yaml') | tojson }#,
+  "manifestPath": #{ repository_path('kubernetes/apps/observability/otel-kubelet') | tojson }#
+}
+#% endif %#

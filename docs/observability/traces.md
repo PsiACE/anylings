@@ -62,12 +62,13 @@ session identifiers, prompts, tool output and arbitrary host or workload labels.
 The following caller-controlled surfaces cannot be allowlisted usefully, so they
 are cleared rather than preserved:
 
-| Surface                                           | Handling                                         |
-| ------------------------------------------------- | ------------------------------------------------ |
-| span **events** (name and fields)                 | fields emptied, name replaced with a fixed label |
-| instrumentation **scope** name/version/attributes | replaced with fixed values, attributes emptied   |
-| **status message**                                | cleared                                          |
-| resource and scope **schema URL**                 | cleared                                          |
+| Surface                                           | Handling                                          |
+| ------------------------------------------------- | ------------------------------------------------- |
+| span **events** (name and fields)                 | fields emptied, name replaced with a fixed label  |
+| instrumentation **scope** name/version/attributes | replaced with fixed values, attributes emptied    |
+| **status message**                                | cleared                                           |
+| **trace state** (W3C), span and link              | cleared; a span carrying a link is rejected whole |
+| resource and scope **schema URL**                 | cleared                                           |
 
 The span _name_ is retained but bounded. This matters because it is the field
 most instrumentation sets automatically — see below.
@@ -91,8 +92,10 @@ carrying `?token=...` is a query string, not an operation identifier.
 **Neither repeated keys nor internal scratch names bypass the contract.** The
 collector rebuilds the retained maps: values are copied under internal names, the
 map is emptied, checked copies are written back, and the final map keeps only the
-approved names. A repeated key cannot ship an unchecked second value, and a sender
-that writes an internal scratch name directly has it dropped before the rebuild.
+approved names. A repeated key cannot ship an unchecked second value, and the
+rebuild admits only the approved real names before copying, so a sender that
+writes an internal scratch name — once or many times — has every occurrence
+dropped rather than all but the first.
 
 This is a **syntactic** bound — length and character set. It rejects a query
 string because `?` and `=` are outside the class; it does **not** reject text that

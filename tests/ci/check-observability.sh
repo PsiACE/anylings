@@ -1241,9 +1241,9 @@ for group, prefix in ((resource_group, "__trace_keep_"), (span_group, "__trace_k
     assert copies, (group["context"], statements)
     for copy in copies:
         assert " where " in copy and ("IsMatch" in copy or "IsInt" in copy), copy
-    keep = next(s for s in statements if s.startswith("keep_keys(attributes, ["))
-    assert prefix in keep, (group["context"], keep)
-    # Only scratch names survive the keep, so no original occurrence can escape.
+    # The scratch-only keep, distinct from the approved-name allowlist.
+    keep = next(s for s in statements
+                if s.startswith("keep_keys(attributes, [") and prefix in s)
     import re as _re
     kept_names = _re.findall(r'"([^"]+)"', keep)
     assert kept_names, keep
@@ -1255,20 +1255,32 @@ for group, prefix in ((resource_group, "__trace_keep_"), (span_group, "__trace_k
     assert deletes, (group["context"], statements)
     for name in kept_names:
         assert f'delete_key(attributes, "{name}")' in deletes, (name, deletes)
-    # The scratch channel is closed before the copies, and the final map keeps
-    # only the approved real names. A caller-written scratch name therefore
-    # cannot survive to be written back, which is the 38189a91 regression.
-    first_delete = next(i for i, s in enumerate(statements)
-                        if s.startswith("delete_key(attributes,"))
-    first_set = next(i for i, s in enumerate(statements)
-                     if s.startswith('set(attributes["') and prefix in s)
-    assert first_delete < first_set, (group["context"], first_delete, first_set)
-    final_keeps = [s for s in statements if s.startswith("keep_keys(attributes, [")]
-    assert len(final_keeps) >= 2, (group["context"], final_keeps)
-    approved = _re.findall(r'"([^"]+)"', final_keeps[-1])
-    assert approved, final_keeps
+    # The scratch channel is closed BEFORE the copies by an allowlist of the
+    # approved real names. `delete_key` per scratch name was not enough: it
+    # removes only the first occurrence, so a doubled scratch key survived and
+    # was written back as the real key (measured at the previous head with
+    # entirely legal route values).
+    keeps = [i for i, s in enumerate(statements)
+             if s.startswith("keep_keys(attributes, [")]
+    first_copy = next(i for i, s in enumerate(statements)
+                      if s.startswith('set(attributes["') and prefix in s)
+    opens = [i for i in keeps if i < first_copy]
+    assert opens, (group["context"], keeps, first_copy)
+    approved = _re.findall(r'"([^"]+)"', statements[opens[0]])
+    assert approved, statements[opens[0]]
     for name in approved:
         assert not name.startswith(prefix), (group["context"], name)
+    # The final map also keeps only approved names, after the write-back.
+    closes = [i for i in keeps if i > first_copy]
+    assert closes, (group["context"], keeps)
+    final = _re.findall(r'"([^"]+)"', statements[closes[-1]])
+    assert final == approved, (group["context"], final, approved)
+    # No per-scratch `delete_key` is used to enforce closure, because one call
+    # cannot remove a duplicate.
+    closure = [s for s in statements
+               if s.startswith("delete_key(attributes,") and prefix in s]
+    assert not closure or all(i > first_copy for i in [
+        statements.index(s) for s in closure]), (group["context"], closure)
 # Query delimiters are absent from the name/route classes: a query string is not
 # an operation identifier.
 for statement in (name_filter, *[s for s in filters if 'attributes["http.route"]' in s]):

@@ -401,15 +401,14 @@ alternateConfig:
       trace_statements:
         - context: resource
           statements:
-            # Close the scratch channel before any copy runs. These names are
-            # the collector's own, so a caller that writes one directly would
-            # otherwise need no legitimate counterpart, survive the
-            # scratch-only keep, and be written back as the real key. Dropping
-            # them first means the only scratch values present are the copies
-            # made below, which are checked.
-            - delete_key(attributes, "__trace_keep_service")
-            - delete_key(attributes, "__trace_keep_ns")
-            - delete_key(attributes, "__trace_keep_env")
+            # Close the scratch channel before any copy runs, over ALL
+            # occurrences. `delete_key` removes only the FIRST match, so a
+            # caller that sends a scratch name twice would still leave one
+            # behind -- measured: `__trace_keep_route` twice, valid-looking
+            # values, and the survivor was written back as the real route.
+            # An allowlist of the real names removes every occurrence of every
+            # other key, including any scratch name, in one pass.
+            - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
             # CANONICAL REBUILD, not in-place filtering.
             #
             # `attributes[...]` reads the FIRST occurrence of a key, while the
@@ -473,13 +472,9 @@ alternateConfig:
             - set(name, "event")
         - context: span
           statements:
-            # Close the span-map scratch channel before the copies run, for the
-            # same reason as the resource map above.
-            - delete_key(attributes, "__trace_keep_method")
-            - delete_key(attributes, "__trace_keep_status")
-            - delete_key(attributes, "__trace_keep_route")
-            - delete_key(attributes, "__trace_keep_rpc")
-            - delete_key(attributes, "__trace_keep_error")
+            # Same allowlist closure for the span map. Dropping scratch names
+            # one at a time is not enough: a repeated scratch key survives.
+            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
             # A status message is caller free text; clear it rather than store it.
             - set(status.message, "")
             # W3C trace state is an unused caller string. It reaches the store

@@ -96,6 +96,11 @@ SCRATCH_NAMES = {
     "__trace_keep_rpc": f"{HOSTILE}-SCRATCH-RPC",
     "__trace_keep_error": f"{HOSTILE}-SCRATCH-ERROR",
 }
+# A scratch name sent TWICE with legal-looking values and no real counterpart.
+# `delete_key` removes only the first occurrence, so the survivor was written
+# back as the real key. The values here are legal routes on purpose: this is a
+# contract-closure failure, not a syntax or type bypass.
+DOUBLED_LEGAL_SCRATCH = ["/leak-a", "/leak-b"]
 
 ALL_CANARIES = sorted({
     *HOSTILE_SPAN_ATTRIBUTES.values(),
@@ -103,6 +108,7 @@ ALL_CANARIES = sorted({
     *HOSTILE_RESOURCE_VALUES.values(),
     *HOSTILE_LINK.values(),
     *SCRATCH_NAMES.values(),
+    *DOUBLED_LEGAL_SCRATCH,
     HOSTILE_SCOPE["name"], HOSTILE_SCOPE["attribute"],
     HOSTILE_EVENT["name"], HOSTILE_EVENT["attribute"],
     HOSTILE_STATUS_MESSAGE, HOSTILE_ALLOWED_KEY_VALUE,
@@ -312,6 +318,23 @@ def spans_payload():
                     for name, value in SCRATCH_NAMES.items()
                 ],
             }, {
+                # A scratch name sent twice with LEGAL values and no real
+                # counterpart. On the previous head `delete_key` removed only
+                # the first, so `/leak-b` was written back as `http.route`.
+                # Purely legal values: the assertion here is about closure, not
+                # about syntax.
+                "traceId": trace_id,
+                "spanId": "aaaaaaaaaaaaaaad",
+                "name": "DOUBLEDSCRATCH",
+                "kind": 2,
+                "startTimeUnixNano": str(now - 820_000),
+                "endTimeUnixNano": str(now - 420_000),
+                "status": {"code": 1},
+                "attributes": [
+                    {"key": "__trace_keep_route", "value": string(DOUBLED_LEGAL_SCRATCH[0])},
+                    {"key": "__trace_keep_route", "value": string(DOUBLED_LEGAL_SCRATCH[1])},
+                ],
+            }, {
                 # A scratch name repeated with a valid value, to check that the
                 # real value still wins and the scratch occurrence is removed.
                 "traceId": trace_id,
@@ -478,7 +501,11 @@ def run(scratch):
             assert set(spans) == {
                 "GET /checkout", "SELECT cart", "/checkout/{cartId}", "CANARY",
                 "TRACESTATE", "DUPROUTE", "SCRATCHONLY", "SCRATCHDUP",
+                "DOUBLEDSCRATCH",
             }, spans.keys()
+            # No route at all must survive from a scratch-only payload.
+            assert not [tag for tag in spans["DOUBLEDSCRATCH"]["tags"]
+                        if tag["key"] == "http.route"], spans["DOUBLEDSCRATCH"]["tags"]
             # A caller-written scratch name must not become a real key, and the
             # real value must win when both are present.
             assert [tag["value"] for tag in spans["SCRATCHDUP"]["tags"]

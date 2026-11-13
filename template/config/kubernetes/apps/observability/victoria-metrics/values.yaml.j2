@@ -126,6 +126,18 @@ server:
           metric_relabel_configs:
             - action: labeldrop
               regex: uid
+        - job_name: otel-events
+          # The collector's own counters. `..._filter_logs_filtered` is the
+          # drop counter: it counts discarded records without repeating any
+          # field from them, so a privacy decision is observable, not silent.
+          static_configs:
+            - targets: [otel-events.observability.svc.cluster.local:8888]
+          sample_limit: 2000
+        - job_name: victoria-logs
+          # The log store's own health and ingestion counters.
+          static_configs:
+            - targets: [victoria-logs.observability.svc.cluster.local:9428]
+          sample_limit: 2000
 service:
   # ClusterIP only. The chart makes a StatefulSet service headless; this is a
   # Deployment and an ordinary Service, and nothing here creates an Ingress or

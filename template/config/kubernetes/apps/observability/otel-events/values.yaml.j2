@@ -1,0 +1,381 @@
+#% if observability.enabled %#
+---
+# One operational-log collector, as a single Deployment: the `k8sobjects`
+# receiver watches the Kubernetes Events API and cannot run as a replicated
+# watcher without producing duplicate records.
+#
+# Two controlled inputs feed one store:
+#   * `k8sobjects` - cluster Events, reduced to allowlisted operational fields.
+#   * `otlp`       - structured operational records from a workload, with the
+#                    documented schema below and no free-text body.
+#
+# Nothing here tails a file, mounts the host, runs a privileged daemon, reads
+# Secrets or proxies the node. It never receives prompts, sessions, tool
+# output or arbitrary application labels.
+fullnameOverride: otel-events
+mode: deployment
+replicaCount: 1
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.140.1"
+command:
+  name: otelcol-contrib
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+clusterRole:
+  create: true
+  rules:
+    # Read-only Events. No pods/log, no pods/exec, no Secrets, no write verb.
+    - apiGroups: [""]
+      resources: [events]
+      verbs: [get, list, watch]
+# No presets: a preset would add filelog/hostmetrics or widen RBAC.
+presets:
+  logsCollection:
+    enabled: false
+  hostMetrics:
+    enabled: false
+  kubernetesAttributes:
+    enabled: false
+  clusterMetrics:
+    enabled: false
+  kubeletMetrics:
+    enabled: false
+  kubernetesEvents:
+    enabled: false
+hostNetwork: false
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+resources:
+  requests:
+    cpu: 30m
+    memory: 96Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+ports:
+  # Applications send structured records here, in-cluster only.
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+  # The collector's own counters, including how many records the filters
+  # dropped. VictoriaMetrics scrapes this Service.
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+  otlp:
+    enabled: false
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+service:
+  enabled: true
+  type: ClusterIP
+useGOMEMLIMIT: true
+# Complete replacement, not a merge with the chart's examples.
+alternateConfig:
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+  receivers:
+    k8sobjects:
+      auth_type: serviceAccount
+      # A missing or forbidden resource is an error worth seeing, not silence.
+      error_mode: propagate
+      # Only the live stream: no snapshot replay on restart.
+      include_initial_state: false
+      objects:
+        # Core/v1 Events carry `reason`, `type`, `involvedObject` and `count`;
+        # the events.k8s.io shape is read as a fallback below.
+        - name: events
+          mode: watch
+    otlp:
+      protocols:
+        http:
+          endpoint: ${env:MY_POD_IP}:4318
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_mib: 200
+      spike_limit_mib: 50
+    # A log record carries far more than its attributes: an instrumentation
+    # scope with a caller-chosen name, version, attributes and schema URL, a
+    # resource schema URL, a caller-supplied severity text, an event name, trace
+    # and span IDs, and flags. VictoriaLogs stores every one of those it
+    # receives, as `scope.name`, `scope.version`, `scope.attributes.<key>`,
+    # `event_name`, `severity_text`, `trace_id` and `span_id` -- so an
+    # allowlist over record attributes alone leaves them wide open. This stage
+    # clears them for BOTH pipelines before anything else reads the record.
+    #
+    # Nothing here is caller text this slice needs: the scope is `unknown` and
+    # the severity is set from the validated `level`/`event_severity` field in
+    # the shape stage. Trace correlation is a separate future requirement, not
+    # something to carry blind, so the IDs are cleared rather than assumed safe.
+    transform/purge_envelope:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            - set(resource.schema_url, "")
+        - context: scope
+          statements:
+            # A fixed value this repository owns, never the caller's string.
+            - set(scope.name, "otel-events")
+            - set(scope.version, "0")
+            - keep_keys(scope.attributes, [])
+            - set(scope.schema_url, "")
+        - context: log
+          statements:
+            - set(log.event_name, "")
+            - set(log.trace_id, TraceID(0x00000000000000000000000000000000))
+            - set(log.span_id, SpanID(0x0000000000000000))
+            - set(log.flags, 0)
+            # A repeated attribute key is the other half of this problem. The
+            # collector keeps every occurrence, `attributes[...]` reads the
+            # FIRST one, and the store ingests ALL of them -- so an allowlisted
+            # check and the stored value could disagree, and the store would
+            # receive both. `keep_keys` retains the first occurrence of each
+            # listed key and drops every other occurrence and key, which makes
+            # the validated value and the stored value the same one. It runs
+            # before any other stage reads an attribute.
+            # The caller's severity text is free text; the shape stage writes
+            # the severity from the allowlisted field immediately after.
+            - set(log.severity_text, "")
+    # Kubernetes Events arrive as a body kvlist: {type, object:{...}}. This
+    # reads only the fields below out of it. Nothing else survives the record,
+    # and the compose step writes a new body from those fields alone.
+    transform/events_extract:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            # The resource attribute list repeats keys the same way the record
+            # list does, and `keep_keys` filters by key name without collapsing
+            # repeats. Copy the value out, rebuild the map from that copy only,
+            # and write it back, so exactly one occurrence -- the one the
+            # allowlist inspects -- can reach the store.
+            - set(attributes["__otl_dup_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil
+            - keep_keys(attributes, ["__otl_dup_ns"])
+            - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
+            # End with a whitelist over the approved names, never a delete of a
+            # scratch name the caller can also supply. `delete_key` resolves to
+            # `pdata.Map.Remove`, which removes the FIRST matching entry only, so
+            # a caller who repeats the scratch name leaves an occurrence behind --
+            # stored as a new field and promoted into `_stream`. `keep_keys` uses
+            # `RemoveIf` and drops every non-matching entry, and after the rebuild
+            # each approved name exists exactly once.
+            - keep_keys(attributes, ["k8s.namespace.name"])
+        - context: log
+          statements:
+            # Nothing inherited from the caller's record attributes survives.
+            # The Events fields are re-derived from the API object in the body,
+            # so any attribute already on the record -- including a second
+            # occurrence of `event_severity` or `event_count` -- is discarded
+            # rather than merged with the derived value.
+            - keep_keys(attributes, [])
+            - set(attributes["event_type"], body["type"])
+            - set(attributes["event_severity"], body["object"]["type"])
+            - set(attributes["event_reason"], body["object"]["reason"])
+            # Core/v1 keeps the count; events.k8s.io moves it into series.
+            - set(attributes["event_count"], body["object"]["count"])
+            - set(attributes["event_count"], body["object"]["series"]["count"]) where attributes["event_count"] == nil
+            - set(attributes["event_count"], 1) where attributes["event_count"] == nil
+            - set(attributes["object_kind"], body["object"]["involvedObject"]["kind"])
+            - set(attributes["object_kind"], body["object"]["regarding"]["kind"]) where attributes["object_kind"] == nil
+            - set(attributes["object_name"], body["object"]["involvedObject"]["name"])
+            - set(attributes["object_name"], body["object"]["regarding"]["name"]) where attributes["object_name"] == nil
+            - set(attributes["event_namespace"], body["object"]["involvedObject"]["namespace"])
+            - set(attributes["event_namespace"], body["object"]["regarding"]["namespace"]) where attributes["event_namespace"] == nil
+            - set(attributes["event_namespace"], body["object"]["metadata"]["namespace"]) where attributes["event_namespace"] == nil
+    # Type guards run before any regex or range check, because a comparison or
+    # regex on the wrong type raises under `error_mode: ignore` and would leave
+    # the record alive. `not IsInt` / `not IsString` are total: a map, array,
+    # bool, double or free-text value fails them and the record is dropped.
+    # `event_count` is optional and defaults to the integer 1 above; anything
+    # present must already be an integer.
+    filter/events_types:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_count"] != nil and not IsInt(attributes["event_count"])'
+          - 'attributes["event_type"] == nil or not IsString(attributes["event_type"])'
+          - 'attributes["event_severity"] == nil or not IsString(attributes["event_severity"])'
+          - 'attributes["event_reason"] == nil or not IsString(attributes["event_reason"])'
+          - 'attributes["object_kind"] == nil or not IsString(attributes["object_kind"])'
+          - 'attributes["object_name"] == nil or not IsString(attributes["object_name"])'
+          - 'attributes["event_namespace"] == nil or not IsString(attributes["event_namespace"])'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsString(resource.attributes["k8s.namespace.name"])'
+    # Drop, rather than sanitize, anything that does not match the allowlist.
+    # A record whose reason is free text (a message pasted into `reason`) is
+    # discarded whole, so no substring of it can reach the store.
+    filter/events_allowlist:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_type"] == nil or not IsMatch(attributes["event_type"], "^(ADDED|MODIFIED|DELETED)$")'
+          - 'attributes["event_severity"] == nil or not IsMatch(attributes["event_severity"], "^(Normal|Warning)$")'
+          - 'attributes["event_reason"] == nil or not IsMatch(attributes["event_reason"], "^[A-Za-z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["object_kind"] == nil or not IsMatch(attributes["object_kind"], "^[A-Z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["object_name"] == nil or not IsMatch(attributes["object_name"], "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")'
+          - 'attributes["event_namespace"] == nil or not IsMatch(attributes["event_namespace"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$")'
+          - 'attributes["event_count"] < 0 or attributes["event_count"] > 100000'
+    # The persisted body is composed here from allowlisted fields only. The
+    # original message, note, annotations and metadata are already gone, and
+    # this statement would not copy them even if they were not.
+    transform/events_shape:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - set(log.body, Concat(["event", attributes["event_type"], attributes["object_kind"], attributes["event_namespace"], attributes["object_name"], attributes["event_reason"]], " "))
+            - set(log.severity_text, "WARN") where attributes["event_severity"] == "Warning"
+            - set(log.severity_number, SEVERITY_NUMBER_WARN) where attributes["event_severity"] == "Warning"
+            - set(log.severity_text, "INFO") where attributes["event_severity"] == "Normal"
+            - set(log.severity_number, SEVERITY_NUMBER_INFO) where attributes["event_severity"] == "Normal"
+            - keep_keys(attributes, ["event_type", "event_severity", "event_reason", "event_count", "object_kind", "object_name", "event_namespace"])
+    # The structured OTLP input. A sender must supply `reason` and `level`;
+    # `component` and `event_count` are optional. Its body is never read.
+    transform/otlp_extract:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            # Same rebuild as the record map. A repeated resource key is
+            # caller-controlled on this path, and it would otherwise be stored
+            # once per occurrence and leak into `_stream`.
+            - set(attributes["__otl_dup_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil
+            - set(attributes["__otl_dup_svc"], attributes["service.name"]) where attributes["service.name"] != nil
+            - keep_keys(attributes, ["__otl_dup_ns", "__otl_dup_svc"])
+            - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
+            - set(attributes["service.name"], attributes["__otl_dup_svc"]) where attributes["__otl_dup_svc"] != nil
+            # Whitelist, not `delete_key`: `delete_key` is `pdata.Map.Remove`,
+            # which removes only the first matching entry. A caller who repeats
+            # the scratch name would leave an occurrence behind, stored as a new
+            # field and promoted into `_stream`. `keep_keys` removes every
+            # non-matching entry, so no caller-chosen key can survive.
+            - keep_keys(attributes, ["k8s.namespace.name", "service.name"])
+        - context: log
+          statements:
+            # Deterministic first-occurrence normalisation. The collector keeps
+            # every occurrence of a repeated key, `attributes[...]` reads the
+            # FIRST, and the store ingests ALL of them -- so without this a
+            # record could be validated on one value and stored with another.
+            # Each approved value is copied out, the attribute map is rebuilt
+            # from those copies only, so exactly one occurrence survives and it
+            # is the one the filters below inspect.
+            - set(attributes["__otl_dup_reason"], attributes["reason"]) where attributes["reason"] != nil
+            - set(attributes["__otl_dup_level"], attributes["level"]) where attributes["level"] != nil
+            - set(attributes["__otl_dup_component"], attributes["component"]) where attributes["component"] != nil
+            - set(attributes["__otl_dup_count"], attributes["event_count"]) where attributes["event_count"] != nil
+            - keep_keys(attributes, ["__otl_dup_reason", "__otl_dup_level", "__otl_dup_component", "__otl_dup_count"])
+            - set(attributes["reason"], attributes["__otl_dup_reason"]) where attributes["__otl_dup_reason"] != nil
+            - set(attributes["level"], attributes["__otl_dup_level"]) where attributes["__otl_dup_level"] != nil
+            - set(attributes["component"], attributes["__otl_dup_component"]) where attributes["__otl_dup_component"] != nil
+            - set(attributes["event_count"], attributes["__otl_dup_count"]) where attributes["__otl_dup_count"] != nil
+            - delete_key(attributes, "__otl_dup_reason")
+            - delete_key(attributes, "__otl_dup_level")
+            - delete_key(attributes, "__otl_dup_component")
+            - delete_key(attributes, "__otl_dup_count")
+            - set(attributes["event_count"], 1) where attributes["event_count"] == nil
+    # Same type-first rule as the Events pipeline: nothing is compared or
+    # regex-matched until it is proven to be the type that check expects, so
+    # `error_mode: ignore` cannot turn a type failure into a surviving record.
+    filter/otlp_types:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_count"] != nil and not IsInt(attributes["event_count"])'
+          - 'attributes["reason"] == nil or not IsString(attributes["reason"])'
+          - 'attributes["level"] == nil or not IsString(attributes["level"])'
+          - 'attributes["component"] != nil and not IsString(attributes["component"])'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsString(resource.attributes["k8s.namespace.name"])'
+          - 'resource.attributes["service.name"] != nil and not IsString(resource.attributes["service.name"])'
+    filter/otlp_allowlist:
+      error_mode: ignore
+      logs:
+        log_record:
+          # `== nil or` is redundant after the type filter, but an evaluation
+          # error inside a filter keeps the record, so this stays fail-closed.
+          - 'attributes["reason"] == nil or not IsMatch(attributes["reason"], "^[A-Za-z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["level"] == nil or not IsMatch(attributes["level"], "^(DEBUG|INFO|WARN|ERROR)$")'
+          - 'attributes["component"] != nil and not IsMatch(attributes["component"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
+          - 'attributes["event_count"] < 0 or attributes["event_count"] > 100000'
+          - 'resource.attributes["service.name"] != nil and not IsMatch(resource.attributes["service.name"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsMatch(resource.attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$")'
+    # The body is composed by appending only the parts that exist, so an absent
+    # optional component or namespace leaves no `<nil>` placeholder behind.
+    transform/otlp_shape:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - set(log.body, Concat(["event", attributes["level"]], " "))
+            - set(log.body, Concat([log.body, attributes["component"]], " ")) where attributes["component"] != nil
+            - set(log.body, Concat([log.body, resource.attributes["k8s.namespace.name"]], " ")) where resource.attributes["k8s.namespace.name"] != nil
+            - set(log.body, Concat([log.body, attributes["reason"]], " "))
+            - set(log.severity_text, "ERROR") where attributes["level"] == "ERROR"
+            - set(log.severity_number, SEVERITY_NUMBER_ERROR) where attributes["level"] == "ERROR"
+            - set(log.severity_text, "WARN") where attributes["level"] == "WARN"
+            - set(log.severity_number, SEVERITY_NUMBER_WARN) where attributes["level"] == "WARN"
+            - set(log.severity_text, "INFO") where attributes["level"] == "INFO"
+            - set(log.severity_number, SEVERITY_NUMBER_INFO) where attributes["level"] == "INFO"
+            - set(log.severity_text, "DEBUG") where attributes["level"] == "DEBUG"
+            - set(log.severity_number, SEVERITY_NUMBER_DEBUG) where attributes["level"] == "DEBUG"
+            - keep_keys(attributes, ["event_count", "reason", "level", "component"])
+  exporters:
+    otlphttp/victoria-logs:
+      # OTLP/HTTP to VictoriaLogs' native ingest path: no extra agent, gateway
+      # or protocol translation process.
+      logs_endpoint: http://victoria-logs.observability.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+      timeout: 5s
+      # Bounded buffer: a stalled store applies backpressure instead of
+      # growing the collector's memory without limit.
+      sending_queue:
+        enabled: true
+        queue_size: 128
+        num_consumers: 2
+      retry_on_failure:
+        enabled: true
+        initial_interval: 1s
+        max_interval: 5s
+        max_elapsed_time: 30s
+  service:
+    extensions: [health_check]
+    telemetry:
+      logs:
+        level: warn
+      metrics:
+        level: normal
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: ${env:MY_POD_IP}
+                  port: 8888
+    pipelines:
+      logs/events:
+        receivers: [k8sobjects]
+        processors: [memory_limiter, transform/purge_envelope, transform/events_extract, filter/events_types, filter/events_allowlist, transform/events_shape]
+        exporters: [otlphttp/victoria-logs]
+      logs/structured:
+        receivers: [otlp]
+        processors: [memory_limiter, transform/purge_envelope, transform/otlp_extract, filter/otlp_types, filter/otlp_allowlist, transform/otlp_shape]
+        exporters: [otlphttp/victoria-logs]
+#% endif %#

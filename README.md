@@ -325,7 +325,7 @@ cannot change what the cluster runs; leaving it empty deploys the tag alone.
 
 ## Observability
 
-Opt in with `[observability] enabled = true`. That publishes four applications
+Opt in with `[observability] enabled = true`. That publishes six applications
 into the `observability` namespace; leaving it disabled publishes nothing, adds
 no namespace and allows no extra chart registry.
 
@@ -349,6 +349,38 @@ no namespace and allows no extra chart registry.
   termination, readiness, scheduling, requests/limits, ownership and replica
   availability. It cannot read Secrets or ConfigMaps and exports no arbitrary
   workload annotations or labels.
+- **victoria-logs** — single-node VictoriaLogs (`victoria-logs-single` chart
+  `0.13.12`, image `v1.53.0`), the operational log store. Ingest is OTLP over
+  HTTP from the collector below; it tails no file and reads no Kubernetes
+  object itself. Contract and limits:
+  [operational logs how-to](docs/observability/operational-logs.md).
+- **otel-events** — pinned OpenTelemetry contrib `0.140.1` on collector chart
+  `0.140.0`, a single replica. Watches Kubernetes Events read-only and accepts
+  structured OTLP records on port `4318`. See the
+  [operational logs how-to](docs/observability/operational-logs.md) for the
+  field contract.
+
+### Operational logs
+
+Log coverage is **Kubernetes Events plus a structured OTLP input only**. It is
+not application or node container log collection, and reading it as "full logs"
+would be wrong.
+
+- **Kubernetes Events** — one read-only grant (`get, list, watch` on `events`).
+- **Structured OTLP** — a workload sends an allowlisted operational record to
+  `http://otel-events.observability.svc.cluster.local:4318/v1/logs`. A free-text
+  log line is not accepted; the body is never read.
+
+Both pipelines **drop** a record that is missing a field or carries the wrong
+type, then compose the stored body from the surviving fields alone. Event
+messages, notes, annotations, prompts, sessions and tool output are never
+copied, and rejected records are counted rather than echoed.
+
+See **[Operational logs how-to](docs/observability/operational-logs.md)** for the
+exact field contract, the per-field type rules, retention and its limits, and the
+verification commands. The store keeps `3d` and 1GiB in a bounded `emptyDir`; its
+added requests are **50m / 128Mi** (limits **500m / 512Mi**) and the collector's
+are **30m / 96Mi** (limits **300m / 256Mi**).
 
 The vmui **Nodes and workloads** dashboard includes actual usage, requested
 resources (not measured utilization), restarts/OOM/scheduling, controller usage,
@@ -389,10 +421,15 @@ Read these as operational facts, not guarantees:
 - **Gatus history is bounded memory, not a seven-day archive.** It runs with
   `storage.type: memory`, so its own results and events are capped by count and
   lost on restart. Longer probe history means querying the scraped metrics.
-- **Nothing survives a reschedule by default.** VictoriaMetrics uses a bounded
-  `emptyDir`, and no `PersistentVolumeClaim` is provisioned for any
-  application, so no cloud volume is created or billed implicitly. To keep
-  metrics across a pod replacement, create a claim yourself and point
+- **The log store is an operational window, not an audit trail.** VictoriaLogs
+  keeps `3d` and 1GiB of allowlisted operational records. It drops whole per-day
+  partitions, so the window is a query bound, not proof of deletion. It holds no
+  application container or node logs, and no session, prompt or tool output. See
+  the [operational logs how-to](docs/observability/operational-logs.md).
+- **Nothing survives a reschedule by default.** VictoriaMetrics and VictoriaLogs
+  both use a bounded `emptyDir`, and no `PersistentVolumeClaim` is provisioned
+  for any application, so no cloud volume is created or billed implicitly. To
+  keep data across a pod replacement, create a claim yourself and point
   `server.persistentVolume.existingClaim` at it.
 - **Access is in-cluster.** All Services are `ClusterIP`; no Ingress, route,
   LoadBalancer or NodePort is rendered. Reaching vmui or Gatus from outside is a
@@ -411,14 +448,16 @@ kubectl --namespace observability create secret generic gatus-telegram \
 ```
 
 The rendered values do not carry resource sizing for your environment: the
-committed limits (`768Mi` for the metric store, `128Mi` for Gatus) are a small
-default, and ingestion is additionally capped by series and label budgets.
+committed limits (`768Mi` for the metric store, `512Mi` for the log store,
+`256Mi` for the event collector, `128Mi` for Gatus) are a small default, and
+ingestion is additionally capped by series, label and record budgets.
 Dashboards live in the published `victoria-metrics-dashboards` ConfigMap and are
 loaded by vmui, not by a separate dashboard server.
 
-Web analytics and access-log analysis are not part of this slice. Aggregate
-usage reporting would need its own store; until then, treat web analytics as
-pending rather than inferring it from these metrics.
+Web analytics and access-log analysis are not part of this slice, and neither
+are distributed traces. Aggregate usage reporting and traces each need their
+own store and source; until then, treat them as pending rather than inferring
+them from these metrics or from the operational log records.
 
 Other action-first commands:
 

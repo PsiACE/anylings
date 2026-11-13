@@ -98,7 +98,7 @@ check_default_off() {
 check_enabled_apps() {
   local apps="$enabled_out/kubernetes/apps/observability" project="$enabled_out/kubernetes/projects/kubernetes.yaml"
   local app text
-  for app in victoria-metrics gatus otel-kubelet kube-state-metrics; do
+  for app in victoria-metrics gatus otel-kubelet kube-state-metrics victoria-logs otel-events; do
     [ -f "$apps/$app/config.json" ] || die "$app was not published as an application"
     [ -f "$apps/$app/values.yaml" ] || die "$app has no rendered values file"
   done
@@ -116,7 +116,13 @@ check_enabled_apps() {
     || die "the AppProject does not allow the pinned VictoriaMetrics chart registry"
   grep -q 'namespace: observability' <<<"$text" \
     || die "the AppProject does not allow the observability destination"
-  log "enabled slice publishes four pinned applications with a scoped AppProject"
+  jq -e '.chart == "victoria-logs-single" and .chartVersion == "0.13.12"' \
+    "$apps/victoria-logs/config.json" >/dev/null \
+    || die "the log store chart is not pinned to the reviewed version"
+  jq -e '.chart == "opentelemetry-collector" and .chartVersion == "0.140.0"' \
+    "$apps/otel-events/config.json" >/dev/null \
+    || die "the event collector reuses the pinned collector chart"
+  log "enabled slice publishes six pinned applications with a scoped AppProject"
 }
 
 # -------------------------------------------------------- chart rendering --
@@ -508,17 +514,388 @@ print('[observability] pinned collectors: minimal RBAC, TLS/SA, resources, priva
 PYTEST
 }
 
+# ------------------------------------------------------- operational logs --
+
+# The log store must bound itself by age, by disk and by scratch volume, and
+# must not obtain a claim or a cluster role it has no use for.
+check_log_store() {
+  local out="$scratch/victoria-logs.yaml" args workload
+  chart_render "$enabled_out/kubernetes/apps/observability/victoria-logs" "$out"
+  assert_no_public_exposure "$out" "the log store"
+  kubeconform -strict -summary "$out"
+
+  workload='select(.kind == "Deployment" or .kind == "StatefulSet")'
+  yq -e "$workload" "$out" >/dev/null || die "the log store rendered no workload"
+  args="$(yq -r "$workload | .spec.template.spec.containers[].args[]" "$out")"
+  grep -qx -- '--retentionPeriod=3d' <<<"$args" \
+    || die "the log store does not run with an explicit 3d retention"
+  grep -qx -- '--retention.maxDiskSpaceUsageBytes=1GiB' <<<"$args" \
+    || die "the log store does not cap the disk its retention may use"
+  for flag in --memory.allowedBytes --insert.maxLineSizeBytes \
+    --insert.maxFieldsPerLine --maxConcurrentInserts --search.maxQueryDuration; do
+    grep -q -- "^$flag=" <<<"$args" \
+      || die "the log store does not bound $flag"
+  done
+  yq -e "$workload | .spec.template.spec.containers[] | .resources.limits.memory" "$out" >/dev/null \
+    || die "the log store container has no memory limit"
+  yq -e "$workload | .spec.template.spec.containers[] | .resources.requests.memory" "$out" >/dev/null \
+    || die "the log store container has no memory request"
+  yq -e "$workload | .spec.template.spec.securityContext.runAsNonRoot == true" "$out" >/dev/null \
+    || die "the log store pod does not require a non-root user"
+  yq -e "$workload | .spec.template.spec.containers[].securityContext.readOnlyRootFilesystem == true" "$out" >/dev/null \
+    || die "the log store container has a writable root filesystem"
+  if [ -n "$(yq -r "$workload | .spec.template.spec.securityContext.runAsUser" "$out")" ]; then
+    [ "$(yq -r "$workload | .spec.template.spec.securityContext.runAsUser" "$out")" != 0 ] \
+      || die "the log store pod runs as uid 0"
+  fi
+  # An emptyDir with a sizeLimit, never a claim the cluster would bill for.
+  yq -e "$workload | .spec.template.spec.volumes[] | select(.emptyDir) | .emptyDir.sizeLimit" "$out" >/dev/null \
+    || die "the log store scratch volume has no sizeLimit"
+  if yq -e 'select(.kind == "PersistentVolumeClaim")' "$out" >/dev/null 2>&1; then
+    die "the log store provisions a PersistentVolumeClaim on its own"
+  fi
+  # The chart's bundled Vector agent tails every container log on the node.
+  # This slice ingests structured OTLP only, so it must not be rendered at all.
+  if yq -e 'select(.kind == "DaemonSet")' "$out" >/dev/null 2>&1; then
+    die "the log store chart rendered its host log-tailing DaemonSet"
+  fi
+  if yq -e 'select(.kind == "ServiceAccount") | .automountServiceAccountToken == true' "$out" >/dev/null 2>&1; then
+    die "the log store mounts an API token it never uses"
+  fi
+  for kind in ClusterRole ClusterRoleBinding; do
+    if yq -e "select(.kind == \"$kind\")" "$out" >/dev/null 2>&1; then
+      die "the log store renders a $kind, which its HTTP ingest path does not need"
+    fi
+  done
+  assert_no_public_exposure "$out" "the log store"
+  log "log store: 3d + 1GiB caps, capped, non-root, ClusterIP, no claim, no cluster RBAC, no host agent"
+}
+
+# The event collector is the only component allowed to read the Kubernetes API
+# for logs. Its grant is one read-only resource, and its configuration must
+# prove that nothing outside the allowlist can reach the store.
+check_event_collector() {
+  local out="$scratch/otel-events.yaml" role config docs="$scratch/otel-events.json"
+  local app="$enabled_out/kubernetes/apps/observability/otel-events"
+  chart_render "$app" "$out"
+  assert_no_public_exposure "$out" "the event collector"
+  kubeconform -strict -summary "$out"
+
+  yq -e 'select(.kind == "Deployment")' "$out" >/dev/null \
+    || die "the event collector rendered no Deployment"
+  # One replica: two watchers would duplicate every record.
+  [ "$(yq -r 'select(.kind == "Deployment") | .spec.replicas' "$out")" = 1 ] \
+    || die "the event collector is not a single-replica watcher"
+  role="$(yq -o=json -I=0 'select(.kind == "ClusterRole")' "$out")"
+  [ -n "$role" ] || die "the event collector renders no ClusterRole"
+  jq -e '.rules == [{"apiGroups": [""], "resources": ["events"], "verbs": ["get", "list", "watch"]}]' \
+    <<<"$role" >/dev/null \
+    || die "the event collector's RBAC is wider than read-only Events"
+  # A pod mount of a host path or an API proxy would be a host-level log reader.
+  if yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.volumes[] | select(.hostPath)' "$out" >/dev/null 2>&1; then
+    die "the event collector mounts a host path"
+  fi
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.securityContext.runAsNonRoot == true' "$out" >/dev/null \
+    || die "the event collector does not require a non-root user"
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.containers[].securityContext.readOnlyRootFilesystem == true' "$out" >/dev/null \
+    || die "the event collector has a writable root filesystem"
+
+  config="$(yq -r 'select(.kind == "ConfigMap") | .data.relay // ""' "$out")"
+  [ -n "$config" ] || die "the event collector rendered no configuration"
+  printf '%s\n' "$config" >"$scratch/rendered-events-collector.yaml"
+  yq -o=json '.' "$scratch/rendered-events-collector.yaml" >"$docs"
+  yq -o=json '.' "$scratch/rendered-events-collector.yaml" >"$scratch/rendered-events-collector.json"
+  # Decode the real rendered configuration with the existing tools; every
+  # assertion below is about what the collector will actually run.
+  uv run --quiet --locked --no-dev python - "$docs" <<'PYLOG'
+import json
+import sys
+
+config = json.load(open(sys.argv[1]))
+
+# Exactly two inputs, and neither of them reads a file, a host path or a proxy.
+assert set(config['receivers']) == {'k8sobjects', 'otlp'}, config['receivers']
+events = config['receivers']['k8sobjects']
+assert events['auth_type'] == 'serviceAccount', events
+assert events['include_initial_state'] is False, events
+assert events['objects'] == [{'name': 'events', 'mode': 'watch'}], events
+assert set(config['receivers']['otlp']['protocols']) == {'http'}
+
+# One exporter, and it is VictoriaLogs' own OTLP path: no third pipeline stage.
+assert set(config['exporters']) == {'otlphttp/victoria-logs'}
+endpoint = config['exporters']['otlphttp/victoria-logs']['logs_endpoint']
+assert endpoint == 'http://victoria-logs.observability.svc.cluster.local:9428/insert/opentelemetry/v1/logs', endpoint
+
+pipelines = config['service']['pipelines']
+assert set(pipelines) == {'logs/events', 'logs/structured'}, pipelines
+for name, pipeline in pipelines.items():
+    assert pipeline['exporters'] == ['otlphttp/victoria-logs'], (name, pipeline)
+# Types are checked before any regex or range, that allowlist runs before the
+# shape stage, and the shape stage runs before the exporter. A record rejected
+# by the type guard can therefore never reach the statement that composes a
+# body from it -- the ordering is the privacy guarantee, not a detail.
+assert pipelines['logs/events']['processors'] == [
+    'memory_limiter', 'transform/purge_envelope', 'transform/events_extract',
+    'filter/events_types', 'filter/events_allowlist', 'transform/events_shape'], pipelines
+assert pipelines['logs/structured']['processors'] == [
+    'memory_limiter', 'transform/purge_envelope', 'transform/otlp_extract',
+    'filter/otlp_types', 'filter/otlp_allowlist', 'transform/otlp_shape'], pipelines
+
+# A log record carries an envelope the attributes allowlist never sees, and the
+# store persists every part of it as its own field. The purge stage must run
+# first in both pipelines and must clear each caller-controlled part; replacing
+# them with a repository constant is fine, forwarding them is not.
+purge = config['processors']['transform/purge_envelope']
+assert purge['error_mode'] == 'ignore', purge
+statements = {
+    (group['context'], statement.split(',')[0].split('(')[1].strip())
+    for group in purge['log_statements'] for statement in group['statements']
+}
+expected_purge = {
+    ('resource', 'resource.schema_url'),
+    ('scope', 'scope.name'),
+    ('scope', 'scope.version'),
+    ('scope', 'scope.attributes'),
+    ('scope', 'scope.schema_url'),
+    ('log', 'log.event_name'),
+    ('log', 'log.trace_id'),
+    ('log', 'log.span_id'),
+    ('log', 'log.flags'),
+    ('log', 'log.severity_text'),
+}
+assert statements == expected_purge, statements ^ expected_purge
+# The scope name/version are the fixed values this repository owns, never a
+# pass-through, and no scope attribute survives.
+fixed_scope = {
+    statement.split(',', 1)[0]: statement.rsplit(',', 1)[1].strip()
+    for group in purge['log_statements'] if group['context'] == 'scope'
+    for statement in group['statements'] if statement.startswith('set(scope.name') or statement.startswith('set(scope.version')
+}
+assert fixed_scope == {
+    'set(scope.name': '"otel-events")',
+    'set(scope.version': '"0")',
+}, fixed_scope
+assert any(statement == 'keep_keys(scope.attributes, [])'
+           for group in purge['log_statements'] if group['context'] == 'scope'
+           for statement in group['statements']), purge
+
+# A repeated attribute key is validated on its first occurrence and stored from
+# every occurrence, so the checked value and the stored value could differ. Both
+# pipelines must normalise to exactly one occurrence before anything reads it,
+# and the Events pipeline must discard inherited record attributes entirely.
+extract = config['processors']['transform/otlp_extract']['log_statements']
+log_statements = next(group['statements'] for group in extract if group['context'] == 'log')
+assert any(statement.startswith('set(attributes["__otl_dup_reason"]') for statement in log_statements), log_statements
+assert any(statement.startswith('keep_keys(attributes, ["__otl_dup_') for statement in log_statements), log_statements
+for key in ('reason', 'level', 'component', 'event_count'):
+    assert any(statement.startswith(f'set(attributes["{key}"], attributes["__otl_dup_') for statement in log_statements), key
+    assert any(statement.startswith(f'delete_key(attributes, "__otl_dup_') for statement in log_statements), key
+# The rebuild must be the only path by which an approved key survives: nothing
+# may re-add the caller's original map wholesale.
+assert not any('set(attributes,' in statement for statement in log_statements), log_statements
+events_extract = config['processors']['transform/events_extract']['log_statements']
+events_log = next(group['statements'] for group in events_extract if group['context'] == 'log')
+assert events_log[0] == 'keep_keys(attributes, [])', events_log[:2]
+assert not any('keep_keys(attributes, ["event_' in statement for statement in events_log), events_log
+def assert_resource_normalised(processor, approved):
+    """The resource map is normalised exactly like the record map.
+
+    The resource attribute list repeats keys the same way the record list does,
+    and `keep_keys` filters by name without collapsing repeats. So this asserts
+    the copy-out / rebuild / delete *effect*, not a literal statement list: a
+    different but equivalent normalisation is acceptable, while the pre-fix
+    `keep_keys`-only stage is not. Asserting the text would forbid the only
+    correct implementation, which is what this replaced.
+    """
+    groups = config['processors'][processor]['log_statements']
+    resource = next(group['statements'] for group in groups if group['context'] == 'resource')
+    scratch = [f"__otl_dup_{name}" for _, name in approved]
+    # Each approved value is copied out under its own scratch key, under a
+    # presence condition, from the approved source key.
+    for source, name in approved:
+        copy = f'set(attributes["__otl_dup_{name}"], attributes["{source}"])'
+        assert any(statement.startswith(copy) for statement in resource), (processor, source, resource)
+    # The map is rebuilt from the scratch keys alone, so no caller key survives
+    # by accident and no unapproved key can be re-added.
+    keep = next((statement for statement in resource if statement.startswith('keep_keys(attributes, [')), None)
+    assert keep is not None, (processor, resource)
+    kept = keep.split('[', 1)[1].rsplit(']', 1)[0]
+    assert sorted(kept.replace('"', '').split(', ')) == sorted(scratch), (processor, kept, scratch)
+    # Each scratch value is written back under the approved name.
+    for source, name in approved:
+        restore = f'set(attributes["{source}"], attributes["__otl_dup_{name}"])'
+        assert any(statement.startswith(restore) for statement in resource), (processor, source, resource)
+    # The stage must END with a whitelist over the approved names.
+    #
+    # Scratch keys are caller-writable: a sender may repeat `__otl_dup_ns` in
+    # its own resource list. `delete_key` is `pdata.Map.Remove`, which removes
+    # only the FIRST matching entry, so a cleanup built from `delete_key` leaves
+    # an occurrence behind that is then stored as a new field and promoted into
+    # `_stream`. `keep_keys` uses `RemoveIf` and drops every non-matching entry,
+    # so the approved names are the only keys that can survive.
+    expected_keep = 'keep_keys(attributes, [' + ', '.join(
+        '"%s"' % source for source, _ in approved) + '])'
+    assert resource[-1] == expected_keep, (processor, resource[-1], expected_keep)
+    # No cleanup may depend on removing a name the caller can also supply.
+    assert not any(statement.startswith('delete_key(attributes, "__otl_dup_')
+                   for statement in resource), (processor, resource)
+    # Nothing writes the caller's map wholesale, and no unapproved key is read.
+    assert not any(statement.startswith('set(attributes,') for statement in resource), resource
+    approved_sources = {source for source, _ in approved}
+    for statement in resource:
+        for _, name in approved:
+            if statement.startswith(f'set(attributes["{name}"]'):
+                assert f'__otl_dup_{name}' in statement, (processor, statement)
+    return approved_sources
+
+
+# Events carries namespace only; structured carries namespace and service.
+assert assert_resource_normalised(
+    'transform/events_extract', [('k8s.namespace.name', 'ns')]
+) == {'k8s.namespace.name'}
+assert assert_resource_normalised(
+    'transform/otlp_extract',
+    [('k8s.namespace.name', 'ns'), ('service.name', 'svc')],
+) == {'k8s.namespace.name', 'service.name'}
+
+# Integer contract: `event_count` is optional, but a value that is present must
+# already be an integer. A range check alone is not a type check, and under
+# `error_mode: ignore` a type error keeps the record, so this guard is what
+# actually stops a string or a nested map from being stored.
+for pipeline in ('events', 'otlp'):
+    guards = config['processors'][f'filter/{pipeline}_types']['logs']['log_record']
+    joined = '\n'.join(guards)
+    count_guard = next(guard for guard in guards if 'event_count' in guard)
+    assert 'not IsInt(attributes["event_count"])' in count_guard, count_guard
+    # Absent is allowed; present-and-wrong is not. Anything else is not a guard.
+    assert '!= nil' in count_guard and 'IsMatch' not in count_guard, count_guard
+    # Every other accepted attribute is proven to be a string first, because a
+    # regex on a map, array, bool or double raises and would keep the record.
+    string_guards = [guard for guard in guards if 'IsString' in guard]
+    expected_strings = 7 if pipeline == 'events' else 5
+    assert len(string_guards) == expected_strings, (pipeline, guards)
+    for guard in string_guards:
+        assert 'not IsString' in guard, guard
+
+# Drop-not-sanitize: every allowlist entry rejects a missing or malformed field
+# outright, and no entry rewrites a value into an accepted one.
+filters = config['processors']['filter/events_allowlist']['logs']['log_record']
+assert len(filters) == 7, filters
+textual = [condition for condition in filters if 'event_count' not in condition]
+numeric = [condition for condition in filters if 'event_count' in condition]
+assert len(textual) == 6 and len(numeric) == 1, filters
+for condition in textual:
+    assert condition.startswith('attributes['), condition
+    assert 'IsMatch' in condition, condition
+    # A missing or malformed field is rejected, never defaulted.
+    assert '== nil or not IsMatch' in condition, condition
+assert 'attributes["event_count"] < 0' in numeric[0], numeric
+assert config['processors']['filter/events_allowlist']['error_mode'] == 'ignore'
+
+# The composed body is built from allowlisted attributes only: a marker that
+# only ever appeared in the original message cannot be concatenated here.
+shape = config['processors']['transform/events_shape']['log_statements'][0]['statements']
+compose = next(statement for statement in shape if 'set(log.body' in statement)
+for field in ('event_type', 'object_kind', 'event_namespace', 'object_name', 'event_reason'):
+    assert f'attributes["{field}"]' in compose, (field, compose)
+for forbidden in ('message', 'note', 'annotations', 'metadata', 'body'):
+    assert f'"{forbidden}"' not in compose, compose
+keep = next(statement for statement in shape if statement.startswith('keep_keys'))
+assert 'body' not in keep and 'message' not in keep, keep
+
+# Optional parts must not be concatenated unconditionally: a missing component
+# or namespace would render as `<nil>` in the stored message.
+structured_shape = config['processors']['transform/otlp_shape']['log_statements'][0]['statements']
+compose = next(statement for statement in structured_shape if 'set(log.body' in statement)
+# The base body is built from the required field only.
+assert 'attributes["level"]' in compose, compose
+assert 'component' not in compose and 'k8s.namespace.name' not in compose, compose
+appends = {
+    statement for statement in structured_shape
+    if 'set(log.body' in statement and 'Concat([log.body' in statement
+}
+# `reason` is required, so it is appended unconditionally. The two optional
+# parts carry their own presence condition, which is what keeps `<nil>` and a
+# doubled separator out of the stored message.
+optional = sorted(
+    next(field for field in ('component', 'k8s.namespace.name') if field in statement)
+    for statement in appends if statement.endswith('!= nil')
+)
+assert optional == ['component', 'k8s.namespace.name'], appends
+required = [statement for statement in appends if not statement.endswith('!= nil')]
+assert len(required) == 1 and 'attributes["reason"]' in required[0], required
+assert not any('<nil>' in statement for statement in structured_shape)
+
+# The structured input requires an explicit level and reason, so an arbitrary
+# application body cannot enter the store by arriving without them.
+structured = config['processors']['filter/otlp_allowlist']['logs']['log_record']
+joined = '\n'.join(structured)
+assert 'attributes["reason"]' in joined and 'attributes["level"]' in joined
+assert 'resource.attributes["service.name"]' in joined
+print('[observability] rendered event collector: read-only Events RBAC, type guards before regex/range, nil-free body')
+PYLOG
+
+  yq -o=json '.' "$out" | jq -s '.' >"$docs"
+  uv run --quiet --locked --no-dev python - "$docs" <<'PYRBAC'
+import json
+import sys
+
+documents = [doc for doc in json.load(open(sys.argv[1])) if doc]
+role = next(doc for doc in documents if doc['kind'] == 'ClusterRole')
+binding = next(doc for doc in documents if doc['kind'] == 'ClusterRoleBinding')
+account = next(doc for doc in documents if doc['kind'] == 'ServiceAccount')
+assert binding['roleRef']['name'] == role['metadata']['name']
+assert binding['subjects'] == [{
+    'kind': 'ServiceAccount', 'name': account['metadata']['name'], 'namespace': 'observability'}]
+deployment = next(doc for doc in documents if doc['kind'] == 'Deployment')
+pod = deployment['spec']['template']['spec']
+assert pod['serviceAccountName'] == account['metadata']['name']
+assert not any(pod.get(key) for key in ('hostNetwork', 'hostPID', 'hostIPC'))
+container = pod['containers'][0]
+assert container['image'] == 'otel/opentelemetry-collector-contrib:0.140.1'
+assert not any(port.get('hostPort') for port in container.get('ports', []))
+assert {port['containerPort'] for port in container['ports']} == {4318, 8888}
+assert not any(doc['kind'] in ('PersistentVolumeClaim', 'StatefulSet', 'DaemonSet') for doc in documents)
+print('[observability] rendered event collector: SA binding, no host namespace or port, pinned image, ClusterIP only')
+PYRBAC
+
+  # The dashboard reads this collector's drop counter, so the metric must be
+  # one the pinned collector really exports.
+  grep -q 'otelcol_processor_filter_logs_filtered_total' \
+    "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    || die "the operational log dashboard does not read the collector's drop counter"
+  log "event collector: read-only Events, single watcher, allowlist-only body, drop counter wired"
+}
+
 check_default_off
 check_enabled_apps
 check_metric_store
+check_log_store
+check_event_collector
 check_status_dashboards
 check_workload_metrics
 check_wiring
 if [ "${1:-}" = --runtime ]; then
   : "${OTELCOL_BIN:?set OTELCOL_BIN to the pinned 0.140.1 release binary}"
   : "${VICTORIA_METRICS_BIN:?set VICTORIA_METRICS_BIN to the pinned v1.155.0 release binary}"
+  : "${VICTORIA_LOGS_BIN:?set VICTORIA_LOGS_BIN to the pinned v1.53.0 release binary}"
   yq -r '.data["nodes-workloads.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
     | jq '[.rows[].panels[].expr[]]' >"$scratch/workload-queries.json"
+  yq -r '.data["operational-logs.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    | jq '[.rows[].panels[].expr[]]' >"$scratch/log-queries.json"
+  # Decode the chart output the earlier checks already rendered, so the fixture
+  # asserts against the store's actual arguments, not the values file.
+  [ -s "$scratch/victoria-logs.yaml" ] || die "the log store chart output was not captured"
+  yq -o=json '.' "$scratch/victoria-logs.yaml" | jq -s '.' >"$scratch/victoria-logs.json"
+  [ -s "$scratch/rendered-events-collector.yaml" ] \
+    || die "the rendered event collector configuration was not captured"
+  [ -s "$scratch/log-queries.json" ] || die "the operational log dashboard has no queries"
   uv run --quiet --locked --no-dev python tests/ci/observability-runtime.py "$scratch"
+  # The same rendered collector configuration, with only loopback endpoints
+  # substituted, feeds the actual log store and is then queried.
+  uv run --quiet --locked --no-dev python tests/ci/operational-logs-runtime.py "$scratch"
 fi
 log "observability contracts passed"

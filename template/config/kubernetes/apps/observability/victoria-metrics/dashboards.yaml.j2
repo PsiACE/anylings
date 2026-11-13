@@ -223,6 +223,66 @@ data:
         }
       ]
     }
+  operational-logs.json: |
+    {
+      "title": "Operational logs",
+      "rows": [
+        {
+          "title": "Ingestion path",
+          "panels": [
+            {
+              "title": "Event records accepted (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_receiver_accepted_log_records_total[5m])) by (receiver)"],
+              "alias": ["{{receiver}}"]
+            },
+            {
+              "title": "Log records stored (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_exporter_sent_log_records_total[5m]))"]
+            },
+            {
+              "title": "Exporter failures (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_exporter_send_failed_log_records_total[5m]))"]
+            },
+            {
+              "title": "Store ingest requests (per second)",
+              "width": 6,
+              "expr": ["sum(rate(vl_http_requests_total{path=\"/insert/opentelemetry/v1/logs\"}[5m]))"]
+            }
+          ]
+        },
+        {
+          "title": "Privacy filters",
+          "panels": [
+            {
+              "title": "Records dropped before storage (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_processor_filter_logs_filtered_total[5m]))"]
+            },
+            {
+              "title": "Dropped share of accepted records",
+              "width": 6,
+              "unit": "percent",
+              "expr": ["100 * sum(rate(otelcol_processor_filter_logs_filtered_total[5m])) / clamp_min(sum(rate(otelcol_receiver_accepted_log_records_total[5m])), 0.001)"]
+            },
+            {
+              "title": "Store data size (MB)",
+              "width": 6,
+              "unit": "MB",
+              "expr": ["sum(vl_data_size_bytes) / 1024 / 1024"]
+            },
+            {
+              "title": "Store free disk (MB)",
+              "width": 6,
+              "unit": "MB",
+              "expr": ["min(vl_free_disk_space_bytes) / 1024 / 1024"]
+            }
+          ]
+        }
+      ]
+    }
   probe-status.json: |
     {
       "title": "Probe status",

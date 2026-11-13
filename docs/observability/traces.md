@@ -82,16 +82,18 @@ Accepted:
 
 Rejected whole:
 
-- free text, and names longer than 120 characters
+- any name containing a character outside that class, and any name longer than
+  120 characters
 
 Query delimiters (`?`, `=`) are **not** accepted in a name or route: a string
 carrying `?token=...` is a query string, not an operation identifier.
 
-This is a **syntactic** bound, and it is worth being precise about what it does
-not do. Text that fits the accepted class — a legal-looking statement, a word
-sequence, a dotted token — can still contain an arbitrary secret. The collector
-cannot detect that semantically and does not claim to; keeping secrets out of span
-names and attribute values is the sender's responsibility.
+This is a **syntactic** bound — length and character set. It rejects a query
+string because `?` and `=` are outside the class; it does **not** reject text that
+fits the class. A legal-looking statement, a word sequence or a dotted token can
+still be an arbitrary secret, and the collector cannot tell. Keeping secrets out
+of span names and attribute values is the sender's responsibility, and no
+configuration here claims otherwise.
 
 **The rejection is observable, not silent.** A rejected span is counted, not
 returned to the sender:

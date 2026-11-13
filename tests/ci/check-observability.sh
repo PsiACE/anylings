@@ -1198,12 +1198,6 @@ assert pipeline["processors"] == [
 # that cannot be allowlisted safely are cleared outright.
 shape = config["processors"]["transform/traces_privacy"]["trace_statements"]
 span_group = next(group for group in shape if group["context"] == "span")
-keep = next(s for s in span_group["statements"] if s.startswith("keep_keys(attributes, ["))
-kept = set(keep.split("[", 1)[1].rsplit("]", 1)[0].replace('"', "").split(", "))
-assert kept == {
-    "http.request.method", "http.response.status_code", "http.route",
-    "rpc.method", "error.type",
-}, kept
 assert 'set(status.message, "")' in span_group["statements"], span_group
 event_group = next(group for group in shape if group["context"] == "spanevent")
 assert "keep_keys(attributes, [])" in event_group["statements"], event_group
@@ -1212,12 +1206,6 @@ scope_group = next(group for group in shape if group["context"] == "scope")
 assert "keep_keys(scope.attributes, [])" in scope_group["statements"], scope_group
 assert any(s.startswith("set(scope.name,") for s in scope_group["statements"]), scope_group
 resource_group = next(group for group in shape if group["context"] == "resource")
-resource_keep = next(
-    s for s in resource_group["statements"] if s.startswith("keep_keys(attributes, ["))
-resource_kept = set(
-    resource_keep.split("[", 1)[1].rsplit("]", 1)[0].replace('"', "").split(", "))
-assert resource_kept == {
-    "service.name", "k8s.namespace.name", "deployment.environment.name"}, resource_kept
 # Nothing copies a caller map wholesale.
 assert not any(s.startswith("set(attributes,") for s in span_group["statements"]
                + resource_group["statements"])
@@ -1242,12 +1230,31 @@ assert "IsInt(" in status_filter and "< 100" in status_filter, status_filter
 assert any("Len(links) > 0" in s for s in filters), filters
 # Trace state is cleared on the span, not stored.
 assert 'set(trace_state, "")' in span_group["statements"], span_group
-# Retained resource values are bounds-checked with `delete_key`, which removes
-# the key; `set(..., nil)` was measured not to.
-resource_statements = resource_group["statements"]
-for key in ("service.name", "k8s.namespace.name", "deployment.environment.name"):
-    assert any(s.startswith(f'delete_key(attributes, "{key}")') for s in resource_statements), \
-        (key, resource_statements)
+# Retained maps are REBUILT, not filtered in place. `attributes[...]` reads the
+# first occurrence while the exporter keeps every one, so a valid-then-hostile
+# duplicate would pass an in-place check and still be exported. Both maps must
+# copy out, drop the originals, and write back only the checked copies.
+print("[observability] trace rebuild check running")
+for group, prefix in ((resource_group, "__trace_keep_"), (span_group, "__trace_keep_")):
+    statements = group["statements"]
+    copies = [s for s in statements if s.startswith(f'set(attributes["{prefix}')]
+    assert copies, (group["context"], statements)
+    for copy in copies:
+        assert " where " in copy and ("IsMatch" in copy or "IsInt" in copy), copy
+    keep = next(s for s in statements if s.startswith("keep_keys(attributes, ["))
+    assert prefix in keep, (group["context"], keep)
+    # Only scratch names survive the keep, so no original occurrence can escape.
+    import re as _re
+    kept_names = _re.findall(r'"([^"]+)"', keep)
+    assert kept_names, keep
+    for name in kept_names:
+        assert name.startswith(prefix), (group["context"], name)
+    # Each scratch key is removed after the write-back, or it would persist as
+    # a field of its own.
+    deletes = [s for s in statements if s.startswith("delete_key(attributes,")]
+    assert deletes, (group["context"], statements)
+    for name in kept_names:
+        assert f'delete_key(attributes, "{name}")' in deletes, (name, deletes)
 # Query delimiters are absent from the name/route classes: a query string is not
 # an operation identifier.
 for statement in (name_filter, *[s for s in filters if 'attributes["http.route"]' in s]):

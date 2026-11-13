@@ -401,21 +401,37 @@ alternateConfig:
       trace_statements:
         - context: resource
           statements:
-            # Retained resource values are caller-controlled too. A
-            # Bearer-shaped `service.name` or a free-text namespace would
-            # otherwise sit in the stream identity of every trace.
+            # CANONICAL REBUILD, not in-place filtering.
             #
-            # `delete_key` is used because `set(..., nil)` does NOT remove a key
-            # from a pcommon map -- measured against the pinned collector: the
-            # assignment silently left the value in place. These bounds are type
-            # + charset + length, which rejects credentials and prose; a
-            # legal-looking identifier can still be a secret, so the contract is
-            # "bounded identifier", not "guaranteed secret-free".
-            - delete_key(attributes, "service.name") where attributes["service.name"] != nil and (not IsString(attributes["service.name"]) or not IsMatch(attributes["service.name"], "^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$"))
-            - delete_key(attributes, "k8s.namespace.name") where attributes["k8s.namespace.name"] != nil and (not IsString(attributes["k8s.namespace.name"]) or not IsMatch(attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
-            - delete_key(attributes, "deployment.environment.name") where attributes["deployment.environment.name"] != nil and (not IsString(attributes["deployment.environment.name"]) or not IsMatch(attributes["deployment.environment.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
-            - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
-            - set(attributes["service.name"], attributes["service.name"]) where attributes["service.name"] != nil
+            # `attributes[...]` reads the FIRST occurrence of a key, while the
+            # collector exports and the store ingests ALL occurrences. An
+            # in-place check therefore validates one value and ships another:
+            # a valid `service.name` followed by a Bearer-shaped duplicate
+            # passes the check, and the duplicate then becomes trace identity
+            # and stream label. `keep_keys` and self-assignment both operate on
+            # that same duplicated map, so neither helps.
+            #
+            # So the retained values are copied out under scratch names, the map
+            # is emptied, and only the checked copies are written back. Nothing
+            # from the original map survives, which makes the checked value and
+            # the exported value the same one. This is the repository's existing
+            # log-pipeline pattern, applied to traces.
+            #
+            # The bounds are type + charset + length. A legal-looking identifier
+            # can still be a secret, so the contract is "bounded identifier",
+            # not "guaranteed secret-free".
+            - set(attributes["__trace_keep_service"], attributes["service.name"]) where attributes["service.name"] != nil and IsString(attributes["service.name"]) and IsMatch(attributes["service.name"], "^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$")
+            - set(attributes["__trace_keep_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil and IsString(attributes["k8s.namespace.name"]) and IsMatch(attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+            - set(attributes["__trace_keep_env"], attributes["deployment.environment.name"]) where attributes["deployment.environment.name"] != nil and IsString(attributes["deployment.environment.name"]) and IsMatch(attributes["deployment.environment.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+            # Keep only the scratch names, so every original occurrence -- valid
+            # or not -- is dropped.
+            - keep_keys(attributes, ["__trace_keep_service", "__trace_keep_ns", "__trace_keep_env"])
+            - set(attributes["service.name"], attributes["__trace_keep_service"]) where attributes["__trace_keep_service"] != nil
+            - set(attributes["k8s.namespace.name"], attributes["__trace_keep_ns"]) where attributes["__trace_keep_ns"] != nil
+            - set(attributes["deployment.environment.name"], attributes["__trace_keep_env"]) where attributes["__trace_keep_env"] != nil
+            - delete_key(attributes, "__trace_keep_service")
+            - delete_key(attributes, "__trace_keep_ns")
+            - delete_key(attributes, "__trace_keep_env")
             - set(resource.schema_url, "")
         - context: scope
           statements:
@@ -440,12 +456,26 @@ alternateConfig:
             # as `w3c.tracestate` in the Jaeger projection and as `trace_state`
             # in the store's own LogSQL projection.
             - set(trace_state, "")
-            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
-            - set(attributes["http.request.method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil
-            - set(attributes["http.response.status_code"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil
-            - set(attributes["http.route"], attributes["http.route"]) where attributes["http.route"] != nil
-            - set(attributes["rpc.method"], attributes["rpc.method"]) where attributes["rpc.method"] != nil
-            - set(attributes["error.type"], attributes["error.type"]) where attributes["error.type"] != nil
+            # Same canonical rebuild for the span map. A duplicated `http.route`
+            # whose first occurrence is `/checkout` and second is
+            # `/checkout?x=...` would otherwise pass the filter and export both.
+            # Copy the checked values out, drop the original map, write back.
+            - set(attributes["__trace_keep_method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil and IsString(attributes["http.request.method"]) and IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$")
+            - set(attributes["__trace_keep_status"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil and IsInt(attributes["http.response.status_code"]) and attributes["http.response.status_code"] >= 100 and attributes["http.response.status_code"] <= 599
+            - set(attributes["__trace_keep_route"], attributes["http.route"]) where attributes["http.route"] != nil and IsString(attributes["http.route"]) and IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$")
+            - set(attributes["__trace_keep_rpc"], attributes["rpc.method"]) where attributes["rpc.method"] != nil and IsString(attributes["rpc.method"]) and IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9 ./_:-]{0,119}$")
+            - set(attributes["__trace_keep_error"], attributes["error.type"]) where attributes["error.type"] != nil and IsString(attributes["error.type"]) and IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$")
+            - keep_keys(attributes, ["__trace_keep_method", "__trace_keep_status", "__trace_keep_route", "__trace_keep_rpc", "__trace_keep_error"])
+            - set(attributes["http.request.method"], attributes["__trace_keep_method"]) where attributes["__trace_keep_method"] != nil
+            - set(attributes["http.response.status_code"], attributes["__trace_keep_status"]) where attributes["__trace_keep_status"] != nil
+            - set(attributes["http.route"], attributes["__trace_keep_route"]) where attributes["__trace_keep_route"] != nil
+            - set(attributes["rpc.method"], attributes["__trace_keep_rpc"]) where attributes["__trace_keep_rpc"] != nil
+            - set(attributes["error.type"], attributes["__trace_keep_error"]) where attributes["__trace_keep_error"] != nil
+            - delete_key(attributes, "__trace_keep_method")
+            - delete_key(attributes, "__trace_keep_status")
+            - delete_key(attributes, "__trace_keep_route")
+            - delete_key(attributes, "__trace_keep_rpc")
+            - delete_key(attributes, "__trace_keep_error")
   exporters:
     otlphttp/victoria-traces:
       # OTLP/HTTP to VictoriaTraces' native ingest path. Separate from the log

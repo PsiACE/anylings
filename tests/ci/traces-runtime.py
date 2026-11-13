@@ -245,6 +245,43 @@ def spans_payload():
                          }]),
                 ],
             }],
+        }, {
+            # A second resource carries hostile values for the retained
+            # resource keys, and repeats keys so the FIRST occurrence is valid
+            # and the SECOND is hostile. `attributes[...]` reads the first, so
+            # an in-place check would pass while the exporter and store keep
+            # both -- which is exactly the bypass the canonical rebuild fixes.
+            # These are real duplicate entries in the wire list, not a collapsed
+            # dict.
+            "resource": {"attributes": [
+                {"key": "service.name", "value": string("bad-resource-api")},
+                {"key": "service.name",
+                 "value": string(HOSTILE_RESOURCE_VALUES["service.name"])},
+                {"key": "k8s.namespace.name", "value": string("agents")},
+                {"key": "k8s.namespace.name",
+                 "value": string(HOSTILE_RESOURCE_VALUES["k8s.namespace.name"])},
+                {"key": "deployment.environment.name", "value": string("dev")},
+                {"key": "deployment.environment.name",
+                 "value": string(f"Bearer {HOSTILE}-ENVCRED")},
+            ]},
+            "scopeSpans": [{"spans": [{
+                "traceId": trace_id,
+                "spanId": "9999999999999999",
+                "name": "DUPROUTE",
+                "kind": 2,
+                "startTimeUnixNano": str(now - 900_000),
+                "endTimeUnixNano": str(now - 500_000),
+                "status": {"code": 1},
+                # Duplicate `http.route`: valid first, query-string second.
+                "attributes": [
+                    {"key": "http.route", "value": string("/dup")},
+                    {"key": "http.route",
+                     "value": string(f"/dup?x={HOSTILE}-DUPROUTE")},
+                    {"key": "http.request.method", "value": string("GET")},
+                    {"key": "http.request.method",
+                     "value": string(f"Bearer {HOSTILE}-DUP-METHOD")},
+                ],
+            }]}],
         }],
     }
 
@@ -344,6 +381,24 @@ def run(scratch):
             wait_http(f"http://127.0.0.1:{metrics_port}/metrics", children)
 
             payload = spans_payload()
+            # Payload-presence guard. A canary that is listed and scanned but
+            # never emitted makes the scan pass vacuously -- exactly how the
+            # resource-value canaries went untested before. So every scanned
+            # canary must appear in the wire payload.
+            wire = json.dumps(payload)
+            for marker in ALL_CANARIES:
+                assert marker in wire, ("canary never emitted", marker)
+            # Duplicate keys must be real repeats in the OTLP attribute lists,
+            # not a collapsed mapping: the bypass is about ordering.
+            key_lists = []
+            for resource in payload["resourceSpans"]:
+                key_lists.append([a["key"] for a in resource["resource"]["attributes"]])
+                for scope in resource["scopeSpans"]:
+                    for span in scope["spans"]:
+                        key_lists.append([a["key"] for a in span["attributes"]])
+            assert any(len(keys) != len(set(keys)) for keys in key_lists), (
+                "the payload carries no duplicate attribute key, so the "
+                "duplicate-order regression cannot fail")
             request = Request(
                 f"http://127.0.0.1:{otlp_port}/v1/traces",
                 data=json.dumps(payload).encode(),
@@ -372,10 +427,16 @@ def run(scratch):
             # legitimate route-template name retained (the contract is bounded,
             # not maximally narrow).
             spans = {span["operationName"]: span for span in traces[0]["spans"]}
+            # DUPROUTE is the duplicate-key control: it is stored like any
+            # other span, and the point is that its hostile second occurrences
+            # do not survive.
             assert set(spans) == {
                 "GET /checkout", "SELECT cart", "/checkout/{cartId}", "CANARY",
-                "TRACESTATE",
+                "TRACESTATE", "DUPROUTE",
             }, spans.keys()
+            # The duplicate span keeps exactly one route, the valid one.
+            assert [tag["value"] for tag in spans["DUPROUTE"]["tags"]
+                    if tag["key"] == "http.route"] == ["/dup"], spans["DUPROUTE"]["tags"]
             # A span carrying a link is rejected whole, so it and its hostile
             # link attributes never reach either projection.
             assert "LINKPROBE" not in spans, spans.keys()

@@ -395,7 +395,7 @@ Other action-first commands:
 - `template/`: shared configuration sources, validation and rendering.
 - `infra/tofu/`: independent OpenTofu configurations for `k0s`, `doks`,
   `cloudflare` and `platform`, each with separate state. These are not four Argo roots.
-- `infra/platform/`: shared readiness; `infra/k0s/`: optional native storage manifests.
+- `infra/platform/`: shared readiness and read-only volume preflight; `infra/k0s/`: optional native storage manifests.
 - `tests/config/`: supported configuration inputs; `tests/ci/`: integration and safety checks.
 
 Publish **only `$ANYLINGS_OUTPUT_DIR/kubernetes/`**, retaining the `kubernetes/`
@@ -403,6 +403,13 @@ directory beneath `repository.path`. Bootstrap inputs, age identities, kubeconfi
 and state never belong in that Git publication. Inspection manifests live in a
 private sibling `bootstrap-manifests/` directory. Keep recovery keys outside Git
 and the cluster; encrypt whole sensitive files, not just Secret data fields.
+
+## Retained volume preflight
+
+A retained-PersistentVolume rebind has a read-only inspection step:
+`infra/platform/retained_pv.py` plus the `inspect-retained-pv.py` transport.
+It reports preconditions and never quiesces, rebinds or migrates anything. See
+[docs/how-to/rebind-retained-volume.md](docs/how-to/rebind-retained-volume.md).
 
 ## CI
 

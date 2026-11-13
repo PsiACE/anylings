@@ -1192,10 +1192,11 @@ assert "victoria-traces.observability.svc.cluster.local:10428" in exporter["trac
 # The processors must run in the order that makes the allowlist meaningful:
 # drop, then rebuild, then export.
 assert pipeline["processors"] == [
-    "memory_limiter", "filter/traces_attributes", "transform/traces_shape"], pipeline
+    "memory_limiter", "filter/traces_privacy", "transform/traces_privacy"], pipeline
 
-# The shape stage rebuilds both attribute maps from an explicit key set.
-shape = config["processors"]["transform/traces_shape"]["trace_statements"]
+# Every retained surface is rebuilt from an explicit key set, and the surfaces
+# that cannot be allowlisted safely are cleared outright.
+shape = config["processors"]["transform/traces_privacy"]["trace_statements"]
 span_group = next(group for group in shape if group["context"] == "span")
 keep = next(s for s in span_group["statements"] if s.startswith("keep_keys(attributes, ["))
 kept = set(keep.split("[", 1)[1].rsplit("]", 1)[0].replace('"', "").split(", "))
@@ -1203,6 +1204,13 @@ assert kept == {
     "http.request.method", "http.response.status_code", "http.route",
     "rpc.method", "error.type",
 }, kept
+assert 'set(status.message, "")' in span_group["statements"], span_group
+event_group = next(group for group in shape if group["context"] == "spanevent")
+assert "keep_keys(attributes, [])" in event_group["statements"], event_group
+assert any(s.startswith("set(name, ") for s in event_group["statements"]), event_group
+scope_group = next(group for group in shape if group["context"] == "scope")
+assert "keep_keys(scope.attributes, [])" in scope_group["statements"], scope_group
+assert any(s.startswith("set(scope.name,") for s in scope_group["statements"]), scope_group
 resource_group = next(group for group in shape if group["context"] == "resource")
 resource_keep = next(
     s for s in resource_group["statements"] if s.startswith("keep_keys(attributes, ["))
@@ -1210,13 +1218,25 @@ resource_kept = set(
     resource_keep.split("[", 1)[1].rsplit("]", 1)[0].replace('"', "").split(", "))
 assert resource_kept == {
     "service.name", "k8s.namespace.name", "deployment.environment.name"}, resource_kept
-# Every persisted field is named; nothing is copied from a caller map wholesale.
+# Nothing copies a caller map wholesale.
 assert not any(s.startswith("set(attributes,") for s in span_group["statements"]
                + resource_group["statements"])
-# Free-text span names are rejected, not truncated.
-filters = config["processors"]["filter/traces_attributes"]["traces"]["span"]
-assert len(filters) == 1 and "IsMatch(name" in filters[0], filters
-assert "not IsString(name)" in filters[0], filters
+
+# The name contract accepts the shapes real instrumentations emit, and the
+# allowed keys are value-checked too -- key filtering alone would store a
+# credential placed in an allowed key.
+filters = config["processors"]["filter/traces_privacy"]["traces"]["span"]
+# The name is type-checked and value-checked, in two statements.
+assert any("not IsString(name)" in s for s in filters), filters
+name_filter = next(s for s in filters if "IsMatch(name" in s)
+# Route templates (leading slash) and letter-initial operation names are the
+# accepted shapes; free text is not.
+assert name_filter.startswith("not IsMatch(name,"), name_filter
+assert "/" in name_filter.split("^(", 1)[1][:4], name_filter
+method_filter = next(s for s in filters if 'attributes["http.request.method"]' in s)
+assert "GET|HEAD|POST|PUT|PATCH|DELETE" in method_filter, method_filter
+status_filter = next(s for s in filters if 'attributes["http.response.status_code"]' in s)
+assert "IsInt(" in status_filter and "< 100" in status_filter, status_filter
 print("[observability] trace path: dedicated exporter, ordered drop-then-rebuild, closed attribute set")
 PYTRACES
   log "trace store: 7d + disk caps, non-root, ClusterIP, no claim, no cluster RBAC; collector has a dedicated trace pipeline"

@@ -62,6 +62,22 @@ HOSTILE_SPAN_ATTRIBUTES = {
 }
 # A resource attribute outside the allowlist.
 HOSTILE_RESOURCE_ATTRIBUTES = {"host.name": f"{HOSTILE}-HOST"}
+# Caller-controlled surfaces beyond the span attribute map. Each is a distinct
+# path into the stored record, so each gets its own canary.
+HOSTILE_SCOPE = {"name": f"{HOSTILE}-SCOPE", "attribute": f"{HOSTILE}-SCOPEATTR"}
+HOSTILE_EVENT = {"name": f"{HOSTILE}-EVENT", "attribute": f"{HOSTILE}-EVENTATTR"}
+HOSTILE_STATUS_MESSAGE = f"{HOSTILE}-STATUS"
+# A credential placed in an *allowed* attribute key: dropping keys alone would
+# not catch this, so the value contract must reject it.
+HOSTILE_ALLOWED_KEY_VALUE = f"Bearer {HOSTILE}-ALLOWEDKEY"
+
+ALL_CANARIES = sorted({
+    *HOSTILE_SPAN_ATTRIBUTES.values(),
+    *HOSTILE_RESOURCE_ATTRIBUTES.values(),
+    HOSTILE_SCOPE["name"], HOSTILE_SCOPE["attribute"],
+    HOSTILE_EVENT["name"], HOSTILE_EVENT["attribute"],
+    HOSTILE_STATUS_MESSAGE, HOSTILE_ALLOWED_KEY_VALUE,
+})
 
 
 def free_port():
@@ -106,12 +122,15 @@ def string(value):
 
 
 def spans_payload():
-    """One trace: a server span and a child database span under it."""
+    """One trace: a legitimate server span plus a hostile canary for every
+    caller-controlled surface the slice retains or must remove."""
     now = time.time_ns()
     root_id, child_id = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    probe_id, canary_id = "cccccccccccccccc", "dddddddddddddddd"
     trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
 
-    def span(span_id, parent, name, start, end, status, attributes, kind=2):
+    def span(span_id, parent, name, start, end, status, attributes, kind=2,
+             events=None):
         record = {
             "traceId": trace_id,
             "spanId": span_id,
@@ -127,6 +146,8 @@ def spans_payload():
         }
         if parent:
             record["parentSpanId"] = parent
+        if events:
+            record["events"] = events
         return record
 
     return {
@@ -138,19 +159,55 @@ def spans_payload():
                     for key, value in HOSTILE_RESOURCE_ATTRIBUTES.items()
                 ],
             ]},
-            "scopeSpans": [{"spans": [
-                span(root_id, None, "GET /checkout", now - 4_000_000, now,
-                     {"code": 1},
-                     {"http.request.method": string("GET"),
-                      "http.route": string("/checkout"),
-                      "http.response.status_code": {"intValue": "200"},
-                      **{key: string(value)
-                         for key, value in HOSTILE_SPAN_ATTRIBUTES.items()}}),
-                span(child_id, root_id, "SELECT cart", now - 2_500_000,
-                     now - 1_000_000, {"code": 2, "message": "timeout"},
-                     {"error.type": string("timeout"),
-                      "rpc.method": string("Cart.Get")}),
-            ]}],
+            "scopeSpans": [{
+                "scope": {
+                    "name": HOSTILE_SCOPE["name"],
+                    "version": "1.0",
+                    "attributes": [
+                        {"key": "scope.leak",
+                         "value": string(HOSTILE_SCOPE["attribute"])}
+                    ],
+                },
+                "spans": [
+                    # Legitimate control: must be stored with its context.
+                    span(root_id, None, "GET /checkout", now - 4_000_000, now,
+                         {"code": 1},
+                         {"http.request.method": string("GET"),
+                          "http.route": string("/checkout"),
+                          "http.response.status_code": {"intValue": "200"},
+                          **{key: string(value)
+                             for key, value in HOSTILE_SPAN_ATTRIBUTES.items()}}),
+                    span(child_id, root_id, "SELECT cart", now - 2_500_000,
+                         now - 1_000_000, {"code": 2, "message": "timeout"},
+                         {"error.type": string("timeout"),
+                          "rpc.method": string("Cart.Get")}),
+                    # A route template is a legitimate default span name and
+                    # must survive: the contract is bounded, not maximally narrow.
+                    span(probe_id, root_id, "/checkout/{cartId}",
+                         now - 2_000_000, now - 1_500_000, {"code": 1},
+                         {"http.route": string("/checkout/{cartId}")}),
+                    # A credential smuggled through an ALLOWED key. Key
+                    # filtering alone would keep the key, so the value contract
+                    # must reject this span; it is not expected to be stored.
+                    span("eeeeeeeeeeeeeeee", root_id, "SMUGGLED", now - 800_000,
+                         now - 400_000, {"code": 1},
+                         {"http.request.method": string(HOSTILE_ALLOWED_KEY_VALUE)}),
+                    # Canary: an event with a hostile name and attribute, plus
+                    # a hostile status message. The span must survive with both
+                    # neutralised, not be deleted.
+                    span(canary_id, root_id, "CANARY", now - 1_000_000, now,
+                         {"code": 2, "message": HOSTILE_STATUS_MESSAGE},
+                         {},
+                         events=[{
+                             "timeUnixNano": str(now),
+                             "name": HOSTILE_EVENT["name"],
+                             "attributes": [{
+                                 "key": "exception.message",
+                                 "value": string(HOSTILE_EVENT["attribute"]),
+                             }],
+                         }]),
+                ],
+            }],
         }],
     }
 
@@ -191,8 +248,8 @@ def run(scratch):
     # The trace path must not share the log exporter: a span cannot be stored as
     # a log line, and this is enforced rather than assumed.
     assert "otlphttp/victoria-logs" not in pipeline["exporters"], pipeline
-    assert "filter/traces_attributes" in pipeline["processors"], pipeline
-    assert "transform/traces_shape" in pipeline["processors"], pipeline
+    assert "filter/traces_privacy" in pipeline["processors"], pipeline
+    assert "transform/traces_privacy" in pipeline["processors"], pipeline
 
     store_port, otlp_port, metrics_port, health_port = (
         free_port(), free_port(), free_port(), free_port()
@@ -274,9 +331,13 @@ def run(scratch):
             else:
                 raise AssertionError("the trace store returned no trace for checkout-api")
 
-            # 3. A real trace, with real parenting and durations.
+            # 3. A real trace, with real parenting and durations, and the
+            # legitimate route-template name retained (the contract is bounded,
+            # not maximally narrow).
             spans = {span["operationName"]: span for span in traces[0]["spans"]}
-            assert set(spans) == {"GET /checkout", "SELECT cart"}, spans.keys()
+            assert set(spans) == {
+                "GET /checkout", "SELECT cart", "/checkout/{cartId}", "CANARY",
+            }, spans.keys()
             root, child = spans["GET /checkout"], spans["SELECT cart"]
             assert root["duration"] > 0 and child["duration"] > 0, (root, child)
             assert child["references"], "the child span lost its parent reference"
@@ -290,8 +351,15 @@ def run(scratch):
             root_tags = {tag["key"]: tag["value"] for tag in root["tags"]}
             assert root_tags.get("http.response.status_code") == "200", root_tags
 
-            # 4. Privacy: the allowlist survives, every hostile field is gone.
+            # 4. Privacy: every caller-controlled surface is checked against the
+            # whole stored response, not a grep of one field. The surfaces are
+            # span attributes, span events (name and attributes), the
+            # instrumentation scope (name and attributes), the status message,
+            # the resource attributes, and a credential placed in an *allowed*
+            # key -- which key filtering alone would not catch.
             stored = json.dumps(traces)
+            for marker in ALL_CANARIES:
+                assert marker not in stored, marker
             for marker in HOSTILE_SPAN_ATTRIBUTES.values():
                 assert marker not in stored, marker
             for marker in HOSTILE_RESOURCE_ATTRIBUTES.values():
@@ -304,12 +372,23 @@ def run(scratch):
             # Tags the STORE derives from the span itself, not from a caller
             # attribute: the span kind, an error boolean, and (for a failing
             # span) a status description.
-            derived = {"span.kind", "error", "otel.status_description"}
-            unexpected = {
-                key for tag in [*root["tags"], *child["tags"]]
-                for key in [tag["key"]]
-            } - ALLOWED_SPAN_ATTRIBUTES - derived
+            # `otel.scope.name`/`otel.scope.version` are the fixed values the
+            # collector writes (see transform/traces_privacy), not caller text.
+            derived = {"span.kind", "error", "otel.status_description",
+                       "otel.scope.name", "otel.scope.version"}
+            every_tag = [tag for span in spans.values() for tag in span["tags"]]
+            unexpected = {tag["key"] for tag in every_tag} - ALLOWED_SPAN_ATTRIBUTES - derived
             assert not unexpected, unexpected
+            # The canary span keeps its event, but neutrally: the name is
+            # replaced and its fields are empty. An event that still carried a
+            # caller name or field would fail the canary scan above, so this
+            # asserts the span was not simply deleted instead.
+            canary = spans["CANARY"]
+            assert canary["logs"], "the canary span lost its event entirely"
+            for event in canary["logs"]:
+                for field in event.get("fields") or []:
+                    assert field["key"] in {"event"}, field
+                    assert field["value"] == "event", field
             # A log record is not a span: the trace store must not have been fed
             # the log pipeline's output, and the fixture never posts logs here.
 

@@ -38,26 +38,68 @@ found.
 
 ## What is stored
 
-The collector keeps an explicit, closed set of fields and rebuilds the attribute
-maps from it, so an unlisted attribute is dropped rather than sanitized.
+The collector keeps an explicit, closed set of fields. Two things follow from
+that: keys outside the set are removed, and the values inside the set are
+type- and range-checked. Key filtering alone is not enough — a caller can put a
+credential into an _allowed_ key — so both are enforced.
 
 **Span attributes kept**
 
-| Attribute                   | Meaning                        |
-| --------------------------- | ------------------------------ |
-| `http.request.method`       | HTTP method                    |
-| `http.response.status_code` | HTTP status                    |
-| `http.route`                | route template, not a raw path |
-| `rpc.method`                | RPC method                     |
-| `error.type`                | error classification           |
+| Attribute                   | Accepted value                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------- |
+| `http.request.method`       | a standard method: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `TRACE`, `CONNECT` |
+| `http.response.status_code` | an integer `100`–`599`                                                                            |
+| `http.route`                | a short route pattern                                                                             |
+| `rpc.method`                | a short method name                                                                               |
+| `error.type`                | a short classifier                                                                                |
 
 **Resource attributes kept:** `service.name`, `k8s.namespace.name`,
 `deployment.environment.name`.
 
 **Everything else is dropped**, including authorization headers, cookies,
 session identifiers, prompts, tool output and arbitrary host or workload labels.
-The span _name_ is the one caller-controlled string that reaches the store, and
-it must match a bounded identifier pattern or the span is rejected whole.
+
+The following caller-controlled surfaces cannot be allowlisted usefully, so they
+are cleared rather than preserved:
+
+| Surface                                           | Handling                                         |
+| ------------------------------------------------- | ------------------------------------------------ |
+| span **events** (name and fields)                 | fields emptied, name replaced with a fixed label |
+| instrumentation **scope** name/version/attributes | replaced with fixed values, attributes emptied   |
+| **status message**                                | cleared                                          |
+| resource and scope **schema URL**                 | cleared                                          |
+
+The span _name_ is retained but bounded. This matters because it is the field
+most instrumentation sets automatically — see below.
+
+### Span names: what is accepted
+
+Accepted:
+
+- an HTTP method followed by a route — `GET /checkout`
+- a route template with a leading slash — `/checkout/{cartId}`
+- an operation name starting with a letter — `SELECT cart`, `Cart.Get`
+
+Rejected whole:
+
+- free text, and names longer than 120 characters
+
+Route templates and common database statement shapes are accepted **on purpose**;
+they are the default names emitted by the standard HTTP and database
+instrumentations, so rejecting them would discard the most common traces.
+
+**The rejection is observable, not silent.** A rejected span is counted, not
+returned to the sender:
+
+```bash
+# spans dropped by the name/value contract, per filter
+curl -sS http://otel-events.observability.svc.cluster.local:8888/metrics \
+  | grep otelcol_processor_filter_spans_filtered_total
+```
+
+The sender still receives HTTP 200 — the request was accepted, individual spans
+were not. If a trace is missing, compare that counter against the store's query
+result before assuming the exporter failed.
 
 ## Retention and limits
 
@@ -89,9 +131,8 @@ trace.
 
 ## Known limits
 
-- A span's `status.message` is free text and is **not** filtered by the
-  configured pipeline. It is carried by the store as its own status description
-  field. Treat it as untrusted text and do not put secrets there; use
-  `error.type` for classification.
+- A span's `status.message` is free text, so the pipeline **clears** it rather
+  than storing it. Use `error.type` for classification; a message you set there
+  will not appear in the trace.
 - This page describes the feature, not a running installation. Nothing here is
   evidence that a particular deployment is receiving traces.

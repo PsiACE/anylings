@@ -342,35 +342,75 @@ alternateConfig:
             - set(log.severity_text, "DEBUG") where attributes["level"] == "DEBUG"
             - set(log.severity_number, SEVERITY_NUMBER_DEBUG) where attributes["level"] == "DEBUG"
             - keep_keys(attributes, ["event_count", "reason", "level", "component"])
-    # A span carries two attribute maps and a name that are all
-    # caller-controlled. The allowlist below keeps only fields that describe the
-    # operation; anything else is dropped rather than sanitized, so a header, a
-    # token, a session id or a prompt cannot ride in on a span attribute.
-    filter/traces_attributes:
+    # A span has MANY caller-controlled surfaces, not just its attribute map:
+    # the operation name, span attributes, span events (name + attributes),
+    # event attribute values, the instrumentation scope (name, version,
+    # attributes, schema URL), the status message, the resource attributes, and
+    # nested values inside otherwise-allowed keys. Each is handled below. The
+    # rule throughout is drop-then-rebuild: a surface is cleared and the record
+    # is repopulated only from values that passed the type and semantic checks.
+    #
+    # Dropping keys is not sufficient on its own. A caller can put arbitrary
+    # text into an *allowed* key (`http.request.method` set to a bearer token),
+    # so every retained string is also type- and value-checked.
+    filter/traces_privacy:
       error_mode: ignore
       traces:
-        # Drop a span whose operation name is not a plain, bounded identifier.
-        # The name is the one caller-controlled string that survives to the
-        # store, so a free-text or oversized name is rejected whole.
         span:
-          - 'name == nil or not IsString(name) or not IsMatch(name, "^[A-Za-z][A-Za-z0-9 ./_:-]{0,119}$")'
-    # Rebuild both maps from the allowlisted keys only, so the record contains
-    # exactly what is named here -- the same drop-then-rebuild discipline the log
-    # pipelines use.
-    transform/traces_shape:
+          # Operation names must be a bounded operation identifier. Route
+          # templates and statement shapes are accepted deliberately (see the
+          # pattern below), because that is what HTTP and database
+          # instrumentations emit by default; arbitrary free text is not.
+          - 'name == nil or not IsString(name)'
+          # The accepted shapes, deliberately: a leading-slash route template
+          # (`/checkout/{cartId}`) and an operation name starting with a letter
+          # (HTTP methods, RPC names, SQL statement heads).
+          - 'not IsMatch(name, "^(/[A-Za-z0-9 ./_:=?{}()*:,<>+-]{0,118}|[A-Za-z][A-Za-z0-9 ./_:=?{}()*:,<>-]{0,119})$")'
+          # Allowed string attributes must be short and free of credential,
+          # session and secret shapes. A value that fails is rejected with the
+          # span rather than rewritten.
+          - 'attributes["http.request.method"] != nil and (not IsString(attributes["http.request.method"]) or not IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$"))'
+          - 'attributes["http.route"] != nil and (not IsString(attributes["http.route"]) or not IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_:=?{}()*:,<>+-]{0,119}$"))'
+          - 'attributes["rpc.method"] != nil and (not IsString(attributes["rpc.method"]) or not IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9 ./_:-]{0,119}$"))'
+          - 'attributes["error.type"] != nil and (not IsString(attributes["error.type"]) or not IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$"))'
+          # The one numeric field: a real HTTP status code, not a string.
+          - 'attributes["http.response.status_code"] != nil and (not IsInt(attributes["http.response.status_code"]) or attributes["http.response.status_code"] < 100 or attributes["http.response.status_code"] > 599)'
+    # Clear every surface the checks above cannot protect, then repopulate from
+    # the surviving values only. Span events are removed entirely: an event name
+    # and its fields are caller free text, and no shipped query needs them.
+    transform/traces_privacy:
       error_mode: ignore
       trace_statements:
         - context: resource
           statements:
             - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
+            - set(attributes["service.name"], attributes["service.name"]) where attributes["service.name"] != nil
+            - set(resource.schema_url, "")
+        - context: scope
+          statements:
+            # The sender's scope identity is not an operational field.
+            - set(scope.name, "otel-events")
+            - set(scope.version, "0")
+            - keep_keys(scope.attributes, [])
+            - set(scope.schema_url, "")
+        # Span EVENTS are their own context. `keep_keys` on the slice is a type
+        # error (it takes a map), so each event is rewritten here instead: the
+        # attributes are emptied and the name is replaced, which is the only way
+        # to remove caller free text from an event without dropping the span.
+        - context: spanevent
+          statements:
+            - keep_keys(attributes, [])
+            - set(name, "event")
         - context: span
           statements:
+            # A status message is caller free text; clear it rather than store it.
+            - set(status.message, "")
+            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
             - set(attributes["http.request.method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil
             - set(attributes["http.response.status_code"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil
             - set(attributes["http.route"], attributes["http.route"]) where attributes["http.route"] != nil
             - set(attributes["rpc.method"], attributes["rpc.method"]) where attributes["rpc.method"] != nil
             - set(attributes["error.type"], attributes["error.type"]) where attributes["error.type"] != nil
-            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
   exporters:
     otlphttp/victoria-traces:
       # OTLP/HTTP to VictoriaTraces' native ingest path. Separate from the log
@@ -430,6 +470,6 @@ alternateConfig:
       # prompt survives.
       traces:
         receivers: [otlp]
-        processors: [memory_limiter, filter/traces_attributes, transform/traces_shape]
+        processors: [memory_limiter, filter/traces_privacy, transform/traces_privacy]
         exporters: [otlphttp/victoria-traces]
 #% endif %#

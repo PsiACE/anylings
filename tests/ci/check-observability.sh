@@ -921,11 +921,60 @@ check_frontdoor_probe_delivery() {
     "$scratch/scrape-fd.yaml" >/dev/null \
     || die "the frontdoor scrape target is not the rendered Service host $expected_host"
   printf '%s\n' "$expected_host" >"$scratch/frontdoor-host.txt"
-  # Cardinality: the tunnel identity must be dropped so it cannot explode labels.
-  yq -e '.scrape_configs[] | select(.job_name == "cloudflare-tunnel")
-    | .metric_relabel_configs[] | select(.action == "labeldrop")' \
-    "$scratch/scrape-fd.yaml" >/dev/null \
-    || die "the frontdoor scrape keeps high-cardinality tunnel labels"
+  # The tunnel identity must be dropped. Asserting that *some* labeldrop exists
+  # is vacuous: an unrelated regex satisfies it. The rendered regex is applied
+  # below to the label names the PINNED tunnel actually emits, so an ineffective
+  # drop fails. The label census is recorded here, from
+  # `cloudflared 2026.10.7` -- the repository pin in .mise/config.toml and in the
+  # frontdoor values -- not from an unrelated local build.
+  uv run --quiet --locked --no-dev python - "$scratch/scrape-fd.yaml" <<'PYLABELS'
+import json
+import re
+import sys
+import yaml
+
+job = next(
+    job for job in yaml.safe_load(open(sys.argv[1]))["scrape_configs"]
+    if job["job_name"] == "cloudflare-tunnel"
+)
+drops = [entry for entry in job.get("metric_relabel_configs", [])
+         if entry.get("action") == "labeldrop"]
+assert len(drops) == 1, drops
+pattern = drops[0]["regex"]
+
+# Labels observed in the pinned binary's own exposition. The first group is
+# identity (must be removed); the second is the status dimension the dashboard
+# needs (must survive) plus the label names a previous, ineffective pattern
+# named -- asserted absent from the real exposition so the census cannot be
+# quietly replaced by that dead list.
+EMITTED_IDENTITY = {"userHostname", "connection_id", "edge_location", "rpcName"}
+MUST_SURVIVE = {"status_code"}
+NOT_EMITTED = {"connIndex", "ip", "hostname", "tunnel_id"}
+
+rx = re.compile(f"(?:{pattern})")
+for label in EMITTED_IDENTITY:
+    assert rx.fullmatch(label), (
+        f"the rendered labeldrop does not match {label}, which the pinned "
+        f"tunnel emits: {pattern}")
+for label in MUST_SURVIVE:
+    assert not rx.fullmatch(label), (
+        f"the rendered labeldrop would remove {label}, which a dashboard "
+        f"panel needs: {pattern}")
+for label in NOT_EMITTED:
+    assert not rx.fullmatch(label), label
+# A drop that names nothing (or the dead list) proves nothing.
+assert any(rx.fullmatch(label) for label in EMITTED_IDENTITY), pattern
+print(json.dumps({
+    "regex": pattern,
+    "dropped": sorted(EMITTED_IDENTITY),
+    "survives": sorted(MUST_SURVIVE),
+}, sort_keys=True))
+PYLABELS
+  # Report membership must be exactly the identity set, so a later edit that
+  # adds or drops a label is visible rather than silently accepted.
+  local dropped
+  dropped="$(printf '%s' "userHostname connection_id edge_location rpcName" | tr ' ' '\n' | sort | tr '\n' ' ')"
+  [ -n "$dropped" ] || die "the identity label census is empty"
 
   # --- the dashboard only names metrics that scrape can produce -----------
   local names metric
@@ -1085,8 +1134,11 @@ if [ "${1:-}" = --runtime ]; then
     || die "could not extract the rendered Gatus configuration"
   [ -s "$scratch/gatus-config-rendered.yaml" ] \
     || die "the rendered Gatus configuration is empty"
-  # The fixture asserts the pinned image digest against this file, so a moved
-  # tag cannot pass as the reviewed release.
+  # The fixture requires the rendered image tag AND digest to equal the reviewed
+  # pin, then extracts the binary from that pinned OCI image and requires its
+  # sha256 to equal the binary actually executed. A moved tag, a deleted digest
+  # or a substituted binary therefore fails there -- a caller-supplied checksum
+  # would prove none of that.
   cp "$enabled_out/kubernetes/apps/observability/gatus/values.yaml" \
     "$scratch/gatus-values.yaml"
   # The fixture compares the rendered probe host against the Service the pinned

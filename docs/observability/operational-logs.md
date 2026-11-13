@@ -209,7 +209,7 @@ A sibling slice covers the public frontdoor and the alerting path. It is the sam
 store and the same pinned components, no extra backend.
 
 **Frontdoor aggregates** come from the tunnel's own counters, scraped from
-`cf.network.svc.cluster.local:8080` as job `cloudflare-tunnel`:
+`cloudflare-tunnel.network.svc.cluster.local:8080` as job `cloudflare-tunnel`:
 
 | Metric                                                                    | Meaning                                    |
 | ------------------------------------------------------------------------- | ------------------------------------------ |
@@ -220,7 +220,11 @@ store and the same pinned components, no extra backend.
 
 These are bounded by construction: cloudflared exports no path, query, client
 address, user agent or body, so an aggregate cannot carry one and there is no
-field to leak them into.
+field to leak them into. The identity labels the pinned tunnel _does_ emit —
+`userHostname`, `connection_id`, `edge_location`, `rpcName` — are dropped by the
+scrape job; they are deployment identity rather than aggregate dimensions, and
+the counters and histograms every panel queries carry no labels of their own, so
+removing them cannot change a panel or merge two series.
 
 The scrape target and the probe URL name the Service the pinned chart actually
 renders for this app: `cloudflare-tunnel.network.svc.cluster.local:8080`, which
@@ -249,7 +253,7 @@ rendered `alerting.custom` block posts a closed JSON template:
     "endpoint": "[ENDPOINT_NAME]",
     "group": "[ENDPOINT_GROUP]",
     "alert": "[ALERT_DESCRIPTION]",
-    "status": "[ALERT_TYPE]"
+    "status": "[ALERT_TRIGGERED_OR_RESOLVED]"
 }
 ```
 

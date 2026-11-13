@@ -153,10 +153,27 @@ server:
             - targets: [cloudflare-tunnel.network.svc.cluster.local:8080]
           sample_limit: 2000
           metric_relabel_configs:
-            # The tunnel identity labels are high-cardinality deployment
-            # details, not aggregate dimensions. Keep only the status code.
+            # Drop the identity labels the PINNED tunnel actually emits.
+            #
+            # The previous pattern named four labels (connIndex, ip, hostname,
+            # tunnel_id) that appear nowhere in the exposition -- `connIndex` is
+            # only a Go field name and a log field -- so it removed nothing while
+            # reading as though it did. Measured against the repository pin
+            # (cloudflared 2026.10.7), the identity-bearing labels are:
+            #
+            #   userHostname   the operator's public frontdoor hostname
+            #   connection_id  one series per connector connection
+            #   edge_location  the Cloudflare edge serving it
+            #   rpcName        one series per registration RPC
+            #
+            # Each is deployment identity rather than an aggregate dimension, and
+            # connection_id/rpcName grow with connection churn. Dropping them
+            # cannot change any panel: the counters and histograms this slice
+            # queries (`total_requests`, `response_by_code`, `request_errors`,
+            # `ha_connections`, `concurrent_requests_per_tunnel`) carry no labels
+            # at all beyond the scrape target, which the store adds itself.
             - action: labeldrop
-              regex: (connIndex|ip|hostname|tunnel_id)
+              regex: (userHostname|connection_id|edge_location|rpcName)
 service:
   # ClusterIP only. The chart makes a StatefulSet service headless; this is a
   # Deployment and an ordinary Service, and nothing here creates an Ingress or

@@ -41,20 +41,17 @@ def snapshot() -> dict:
                 "storageClassName": "do-block-storage",
                 "accessModes": ["ReadWriteOnce"],
                 "volumeMode": "Filesystem",
+                "resources": {"requests": {"storage": "10Gi"}},
             },
             "status": {"phase": "Bound", "capacity": {"storage": "10Gi"}},
         },
         "target_namespace": {"metadata": {"name": "dst"}},
-        "target_pvc": {
-            "metadata": {"namespace": "dst", "name": "data"},
-            "spec": {},
-            "status": {"phase": "Pending"},
-        },
+        "target_pvc": None,
         "deployments": [
             {
-                "metadata": {"namespace": "src", "name": "app"},
+                "metadata": {"namespace": "src", "name": "app", "generation": 1},
                 "spec": {"replicas": 0},
-                "status": {"replicas": 0, "readyReplicas": 0, "availableReplicas": 0},
+                "status": {"replicas": 0, "readyReplicas": 0, "availableReplicas": 0, "observedGeneration": 1},
             }
         ],
         "pods": [],
@@ -73,6 +70,14 @@ def expected() -> dict:
         "target_namespace": "dst",
         "target_name": "data",
         "writers": [{"namespace": "src", "name": "app"}],
+    }
+
+
+def target_claim(volume: str | None = None, phase: str = "Pending") -> dict:
+    return {
+        "metadata": {"namespace": "dst", "name": "data", "uid": "unowned-uid"},
+        "spec": {"volumeName": volume} if volume else {},
+        "status": {"phase": phase},
     }
 
 
@@ -106,15 +111,15 @@ class InspectionTest(unittest.TestCase):
     def test_consistent_snapshot_is_ready(self):
         self.assertEqual(self.inspect(), {"ready": True, "issues": []})
 
-    def test_pending_destination_claim_before_rebind_is_ready(self):
-        # The destination claim exists but is unbound: nothing foreign yet.
-        self.assertTrue(self.inspect()["ready"])
-
-    def test_destination_claim_already_bound_to_expected_pv_is_ready(self):
+    def test_pending_destination_claim_is_not_implicitly_adopted(self):
         data = snapshot()
-        data["target_pvc"]["spec"]["volumeName"] = "pv-data"
-        data["target_pvc"]["status"]["phase"] = "Bound"
-        self.assertEqual(self.inspect(data), {"ready": True, "issues": []})
+        data["target_pvc"] = target_claim()
+        self.assert_fails_with("target-claim-foreign", data)
+
+    def test_same_volume_destination_still_requires_ownership_proof(self):
+        data = snapshot()
+        data["target_pvc"] = target_claim("pv-data", "Bound")
+        self.assert_fails_with("target-claim-foreign", data)
 
     # ------------------------------------------------- identity and CSI checks --
 
@@ -207,12 +212,12 @@ class InspectionTest(unittest.TestCase):
 
     def test_foreign_destination_claim_bound_to_other_pv(self):
         data = snapshot()
-        data["target_pvc"]["spec"]["volumeName"] = "pv-foreign"
-        data["target_pvc"]["status"]["phase"] = "Bound"
+        data["target_pvc"] = target_claim("pv-foreign", "Bound")
         self.assertEqual(self.issues(data), ["target-claim-foreign"])
 
     def test_destination_claim_in_wrong_namespace(self):
         data = snapshot()
+        data["target_pvc"] = target_claim()
         data["target_pvc"]["metadata"]["namespace"] = "elsewhere"
         self.assert_fails_with("target-claim-mismatch", data)
 
@@ -308,6 +313,89 @@ class InspectionTest(unittest.TestCase):
         self.assertIsInstance(report["ready"], bool)
         for code in report["issues"]:
             self.assertRegex(code, r"^[a-z]+(-[a-z]+)*$")
+
+
+
+    # Parent review regressions: missing agreement is not evidence of safety.
+    def test_missing_both_access_modes_is_not_agreement(self):
+        data = snapshot()
+        del data["pv"]["spec"]["accessModes"]
+        del data["source_pvc"]["spec"]["accessModes"]
+        self.assert_fails_with("access-modes-mismatch", data)
+
+    def test_invalid_access_mode_member_is_not_silently_dropped(self):
+        data = snapshot()
+        data["pv"]["spec"]["accessModes"].append(None)
+        self.assert_fails_with("access-modes-mismatch", data)
+
+    def test_missing_all_capacity_is_not_agreement(self):
+        data = snapshot()
+        del data["pv"]["spec"]["capacity"]
+        del data["source_pvc"]["status"]["capacity"]
+        del data["source_pvc"]["spec"]["resources"]
+        self.assert_fails_with("capacity-mismatch", data)
+
+    def test_resize_request_cannot_be_hidden_by_old_status_capacity(self):
+        data = snapshot()
+        data["source_pvc"]["spec"]["resources"]["requests"]["storage"] = "20Gi"
+        self.assert_fails_with("capacity-mismatch", data)
+
+    def test_invalid_volume_modes_do_not_default_to_filesystem(self):
+        data = snapshot()
+        data["pv"]["spec"]["volumeMode"] = False
+        data["source_pvc"]["spec"]["volumeMode"] = False
+        self.assert_fails_with("volume-mode-mismatch", data)
+
+    def test_omitted_volume_modes_use_kubernetes_filesystem_default(self):
+        data = snapshot()
+        del data["pv"]["spec"]["volumeMode"]
+        del data["source_pvc"]["spec"]["volumeMode"]
+        self.assertTrue(self.inspect(data)["ready"])
+
+    def test_pod_missing_namespace_cannot_evade_claim_check(self):
+        data = snapshot()
+        holder = pod("src", "data")
+        del holder["metadata"]["namespace"]
+        data["pods"] = [holder]
+        self.assert_fails_with("pod-malformed", data)
+
+    def test_valid_pod_without_volumes_is_not_a_claim_holder(self):
+        data = snapshot()
+        data["pods"] = [{"metadata": {"name": "no-volume", "namespace": "other"}, "spec": {}}]
+        self.assertTrue(self.inspect(data)["ready"])
+
+    def test_non_object_volume_is_not_silently_ignored(self):
+        data = snapshot()
+        data["pods"] = [{"metadata": {"name": "bad", "namespace": "src"}, "spec": {"volumes": [42]}}]
+        self.assert_fails_with("pod-malformed", data)
+
+    def test_missing_writer_status_is_not_evidence_of_quiescence(self):
+        data = snapshot()
+        data["deployments"][0]["status"] = None
+        self.assert_fails_with("writer-malformed", data)
+
+    def test_writer_must_observe_current_generation(self):
+        data = snapshot()
+        data["deployments"][0]["metadata"]["generation"] = 2
+        self.assert_fails_with("writer-unobserved", data)
+
+    def test_missing_observed_generation_is_not_quiescence(self):
+        data = snapshot()
+        del data["deployments"][0]["status"]["observedGeneration"]
+        self.assert_fails_with("writer-unobserved", data)
+
+    def test_duplicate_writer_cannot_overwrite_active_state(self):
+        data = snapshot()
+        running = copy.deepcopy(data["deployments"][0])
+        running["status"]["replicas"] = 1
+        data["deployments"].insert(0, running)
+        self.assert_fails_with("writer-malformed", data)
+
+    def test_source_and_destination_must_be_distinct(self):
+        wanted = expected()
+        wanted["target_namespace"] = wanted["source_namespace"]
+        wanted["target_name"] = wanted["source_name"]
+        self.assert_fails_with("expected-invalid", expected_data=wanted)
 
 
 if __name__ == "__main__":

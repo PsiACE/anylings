@@ -2,8 +2,8 @@
 
 An operator transport collects plain Kubernetes JSON and passes it here; this
 module performs no I/O and never mutates its inputs. It answers one question:
-is the snapshot consistent with the expected identity and quiet enough that a
-later quiesce step could be justified? It does not execute, journal, roll back
+is the snapshot consistent with the expected identity after the writers have
+quiesced? It does not execute, journal, roll back
 or decide a migration, and it is not evidence about a live CSI driver.
 
 ``inspect_snapshot(snapshot, expected)`` returns ``{"ready": bool, "issues":
@@ -30,11 +30,12 @@ marker or a provider message.
 ``target-namespace-mismatch``   destination namespace name differs
 ``target-claim-malformed``      destination PVC object is unusable
 ``target-claim-mismatch``       destination PVC namespace/name differ
-``target-claim-foreign``        destination PVC is not bound to the expected PV
+``target-claim-foreign``        destination PVC exists without proven ownership
 ``writers-unproven``            expected writer set is empty
 ``writer-malformed``            a Deployment or its replica counts is unusable
 ``writer-missing``              an expected writer Deployment is absent
 ``writer-not-quiesced``         a writer Deployment has non-zero replicas
+``writer-unobserved``           a writer has not observed its current generation
 ``pod-malformed``               a Pod or its volume list is unusable
 ``pod-references-claim``        a Pod (even a terminating one) uses a claim
 
@@ -74,14 +75,19 @@ def _identity(value: object, flat: bool = False) -> tuple[object, ...]:
     return tuple(_text(_dig(value, key) if flat else _dig(value, "metadata", key)) for key in fields)
 
 
-def _mode(value: object) -> str:
-    """An omitted volume mode means the Kubernetes default, Filesystem."""
-    return _text(value) or "Filesystem"
+def _mode(value: object) -> str | None:
+    """Only an omitted mode uses the Kubernetes default, not malformed values."""
+    if value is None:
+        return "Filesystem"
+    return value if isinstance(value, str) and value in {"Filesystem", "Block"} else None
 
 
 def _modes(value: object) -> frozenset[str] | None:
-    items = {_text(item) for item in value} if isinstance(value, list) else set()
-    return frozenset(items - {None}) or None
+    if not isinstance(value, list) or not value:
+        return None
+    modes = [_text(item) for item in value]
+    allowed = {"ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"}
+    return frozenset(modes) if all(mode in allowed for mode in modes) else None
 
 
 def _count(value: object, default: int) -> int | None:
@@ -110,6 +116,8 @@ def _expectation(expected: object) -> tuple[dict[str, str], list[tuple[str, str]
     members = [_writer(item) for item in writers] if isinstance(writers, list) else [None]
     if any(name is None for name in names.values()) or None in members:
         return None
+    if (names["source_namespace"], names["source_name"]) == (names["target_namespace"], names["target_name"]):
+        return None
     return names, members
 
 
@@ -121,9 +129,8 @@ def _check_volume(snapshot: dict, names: dict[str, str], issues: set[str]) -> No
         return
     spec, claim_spec = _map(pv.get("spec")), _map(claim.get("spec"))
     source = (names["source_namespace"], names["source_name"], names["source_uid"])
-    capacity = _text(_dig(claim, "status", "capacity", "storage")) or _text(
-        _dig(claim_spec, "resources", "requests", "storage")
-    )
+    capacity = _text(_dig(claim_spec, "resources", "requests", "storage"))
+    status_capacity = _text(_dig(claim, "status", "capacity", "storage"))
     declared = (
         ("pv-name-mismatch", _identity(pv)[1], names["pv_name"]),
         ("pv-uid-mismatch", _identity(pv)[2], names["pv_uid"]),
@@ -139,7 +146,12 @@ def _check_volume(snapshot: dict, names: dict[str, str], issues: set[str]) -> No
         ("volume-mode-mismatch", _mode(spec.get("volumeMode")), _mode(claim_spec.get("volumeMode"))),
         ("capacity-mismatch", _text(_dig(spec, "capacity", "storage")), capacity),
     )
-    issues.update(code for code, actual, wanted in declared if actual != wanted)
+    required = {"access-modes-mismatch", "volume-mode-mismatch", "capacity-mismatch"}
+    for code, actual, wanted in declared:
+        if actual != wanted or (code in required and (actual is None or wanted is None)):
+            issues.add(code)
+    if status_capacity is not None and status_capacity != _text(_dig(spec, "capacity", "storage")):
+        issues.add("capacity-mismatch")
 
 
 def _check_destination(snapshot: dict, names: dict[str, str], issues: set[str]) -> None:
@@ -157,10 +169,9 @@ def _check_destination(snapshot: dict, names: dict[str, str], issues: set[str]) 
         return
     if _identity(claim)[:2] != (names["target_namespace"], names["target_name"]):
         issues.add("target-claim-mismatch")
-    volume = _text(_dig(claim, "spec", "volumeName"))
-    bound = _text(_dig(claim, "status", "phase")) == "Bound"
-    if volume != names["pv_name"] and (volume is not None or bound):
-        issues.add("target-claim-foreign")
+    # This initial inspection has no journal-owned target UID. Even a matching
+    # volumeName is not permission to adopt an existing claim. Resume is separate.
+    issues.add("target-claim-foreign")
 
 
 def _check_writers(snapshot: dict, writers: list[tuple[str, str]], issues: set[str]) -> None:
@@ -178,13 +189,22 @@ def _check_writers(snapshot: dict, writers: list[tuple[str, str]], issues: set[s
         if not isinstance(deployment, dict) or None in key:
             issues.add("writer-malformed")
         else:
+            if key in found:
+                issues.add("writer-malformed")
             found[key] = deployment
     for key in writers:
         deployment = found.get(key)
         if deployment is None:
             issues.add("writer-missing")
             continue
-        status = _map(deployment.get("status"))
+        if not isinstance(deployment.get("spec"), dict) or not isinstance(deployment.get("status"), dict):
+            issues.add("writer-malformed")
+            continue
+        status = deployment["status"]
+        generation = _count(_dig(deployment, "metadata", "generation"), 0)
+        observed = _count(status.get("observedGeneration"), 0)
+        if generation is None or generation < 1 or observed != generation:
+            issues.add("writer-unobserved")
         counts = [_count(_dig(deployment, "spec", "replicas"), 1)] + [
             _count(status.get(key), 0) for key in ("replicas", "readyReplicas", "availableReplicas")
         ]
@@ -205,11 +225,19 @@ def _check_pods(snapshot: dict, names: dict[str, str], issues: set[str]) -> None
         (names["target_namespace"], names["target_name"]),
     }
     for pod in pods:
-        volumes = _dig(pod, "spec", "volumes")
-        if not isinstance(pod, dict) or not isinstance(volumes, list):
+        spec = _dig(pod, "spec")
+        namespace = _text(_dig(pod, "metadata", "namespace"))
+        if not isinstance(spec, dict) or namespace is None:
+            issues.add("pod-malformed")
+            continue
+        volumes = spec.get("volumes", [])
+        if not isinstance(volumes, list):
             issues.add("pod-malformed")
             continue
         for volume in volumes:
+            if not isinstance(volume, dict):
+                issues.add("pod-malformed")
+                continue
             reference = _dig(volume, "persistentVolumeClaim")
             if reference is None:
                 continue

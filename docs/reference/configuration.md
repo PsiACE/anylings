@@ -128,6 +128,22 @@ structured OTLP record; see [operational
 logs](../observability/operational-logs.md) for the field contract rather than
 assuming container or node log collection.
 
+### Optional alert delivery
+
+Probes and alerts are rendered with the slice, but delivery is opt-in through
+Secrets you create in the `observability` namespace. Neither is required: the
+Pod starts without them.
+
+| Secret           | Keys required                            | When absent                                                                                    |
+| ---------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `gatus-telegram` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Gatus starts, does not validate the Telegram provider, and its Telegram alerts deliver nothing |
+| `gatus-webhook`  | `GATUS_WEBHOOK_URL`                      | The generic HTTP provider has no URL and sends nothing                                         |
+
+Supply the values with your own secret tooling; this repository carries no
+token, chat identifier or URL, and defining a provider alone does not deliver
+anything — an alert also has to select it by type. Notification delivery against
+a real endpoint is not verified here.
+
 ## Published runtime image
 
 A published runtime image exists so a cluster can run the agent workload without
@@ -149,13 +165,21 @@ and defines no registry-credential input.
 
 The k0s backend optionally installs a local-path provisioner on the cluster with
 `just apply k0s-storage`. It needs an explicit kubeconfig and context, and
-`ANYLINGS_STORAGE_PATH` set to an absolute, dedicated node-local directory — a
-system, kubelet or home path is rejected. The provisioner installs a
-`local-path` StorageClass deliberately **not** made the cluster default; a claim
-must name that class explicitly. Node-local storage is a single-node feature: it
-is not replicated, not HA and not a replacement for a StorageClass your CSI
-driver provides. Nothing in this repository creates a claim for it; you choose
-the class in each application's values/PVC.
+`ANYLINGS_STORAGE_PATH` set to an absolute node-local directory.
+
+Choosing a directory dedicated to this purpose is your responsibility, not
+something the command classifies for you. Its guard is a fixed denylist: it
+refuses the filesystem root, `/etc`, `/usr`, `/var`, `/home`, `/tmp`, and the k0s
+and kubelet directories together with everything below them. Paths under the
+other listed roots are **not** refused — for example a subdirectory of `/var` or
+of a home directory is accepted — so pick a dedicated directory deliberately
+rather than relying on that refusal to catch a mistake.
+
+The provisioner installs a `local-path` StorageClass deliberately **not** made
+the cluster default; a claim must name that class explicitly. Node-local storage
+is a single-node feature: it is not replicated, not HA and not a replacement for
+a StorageClass your CSI driver provides. Nothing in this repository creates a
+claim for it; you choose the class in each application's values/PVC.
 
 ## Runtime authentication
 

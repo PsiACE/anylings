@@ -17,7 +17,7 @@ useLegacyNaming: false
 rbac:
   # The chart would otherwise create a cluster-scoped ClusterRole that may read
   # Nodes, Services, Endpoints, Pods and Ingresses. This deployment only scrapes
-  # statically configured in-cluster targets, so it needs no Kubernetes API
+  # static and DNS-discovered in-cluster targets, so it needs no Kubernetes API
   # access and creates no cluster RBAC.
   create: false
 serviceAccount:
@@ -69,12 +69,12 @@ server:
     loggerFormat: json
     # Lets vmui and /metrics show this instance's own health.
     selfScrapeInterval: 30s
-    memory.allowedBytes: 256Mi
+    memory.allowedBytes: "268435456"
     # Bounded label and churn budgets: over-budget series are counted in
     # vm_rows_ignored_total instead of growing the store without limit.
     maxLabelsPerTimeseries: 30
-    storage.maxHourlySeries: 2000
-    storage.maxDailySeries: 5000
+    storage.maxHourlySeries: 10000
+    storage.maxDailySeries: 20000
     storage.minFreeDiskSpaceBytes: 256MiB
     search.maxQueryDuration: 30s
     # Serve the platform dashboards from the ConfigMap mounted below. Without
@@ -105,6 +105,27 @@ server:
           static_configs:
             - targets:
                 - gatus.observability.svc.cluster.local:8080
+        - job_name: kubelet
+          # Resolve every ready Pod IP from the headless Service, not a single
+          # load-balanced ClusterIP. No Kubernetes API token/RBAC in the store.
+          dns_sd_configs:
+            - names: [otel-kubelet.observability.svc.cluster.local]
+              type: A
+              port: 8889
+          sample_limit: 5000
+          metric_relabel_configs:
+            - action: labelmap
+              regex: k8s_(namespace|pod|container|node|volume)_name
+              replacement: $1
+            - action: labeldrop
+              regex: k8s_.*|service_.*|telemetry_.*
+        - job_name: kube-state-metrics
+          static_configs:
+            - targets: [kube-state-metrics.observability.svc.cluster.local:8080]
+          sample_limit: 5000
+          metric_relabel_configs:
+            - action: labeldrop
+              regex: uid
 service:
   # ClusterIP only. The chart makes a StatefulSet service headless; this is a
   # Deployment and an ordinary Service, and nothing here creates an Ingress or

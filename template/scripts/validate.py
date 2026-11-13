@@ -226,7 +226,8 @@ class Magpie(Model):
 class Observability(Model):
     # Off by default: the slice needs ClusterIP-only access and its own
     # monitoring decision, so it never appears in a cluster that did not ask
-    # for it. Enabling it deploys VictoriaMetrics single-node and Gatus.
+    # for it. Enabling it deploys VictoriaMetrics, Gatus, per-node kubelet
+    # usage collectors and kube-state-metrics.
     enabled: bool = False
 
 

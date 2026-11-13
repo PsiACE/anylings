@@ -138,6 +138,25 @@ server:
           static_configs:
             - targets: [victoria-logs.observability.svc.cluster.local:9428]
           sample_limit: 2000
+        - job_name: cloudflare-tunnel
+          # The public frontdoor's own counters, from cloudflared's metrics
+          # listener. These are real request aggregates: every request the
+          # tunnel proxies increments `cloudflared_tunnel_total_requests`, and
+          # `cloudflared_tunnel_response_by_code` counts them per status class.
+          #
+          # What this does NOT give you: request paths, queries, client
+          # addresses, user agents or bodies. cloudflared never exports them, so
+          # the aggregate is bounded by construction -- there is no field to
+          # leak them into. `request_errors` counts proxy-to-origin failures,
+          # which is the closest thing to a 5xx-class signal on this path.
+          static_configs:
+            - targets: [cf.network.svc.cluster.local:8080]
+          sample_limit: 2000
+          metric_relabel_configs:
+            # The tunnel identity labels are high-cardinality deployment
+            # details, not aggregate dimensions. Keep only the status code.
+            - action: labeldrop
+              regex: (connIndex|ip|hostname|tunnel_id)
 service:
   # ClusterIP only. The chart makes a StatefulSet service headless; this is a
   # Deployment and an ordinary Service, and nothing here creates an Ingress or

@@ -870,6 +870,118 @@ PYRBAC
   log "event collector: read-only Events, single watcher, allowlist-only body, drop counter wired"
 }
 
+# ------------------------------------------------- frontdoor probes/delivery --
+
+# The frontdoor aggregate comes from the tunnel's own counters, the probes name
+# fixed operator-owned targets, and the notifier body is a closed template.
+check_frontdoor_probe_delivery() {
+  local vm="$scratch/victoria-metrics.yaml" gatus="$scratch/gatus.yaml" args config
+  chart_render "$enabled_out/kubernetes/apps/observability/victoria-metrics" "$vm"
+  chart_render "$enabled_out/kubernetes/apps/observability/gatus" "$gatus"
+
+  # --- the scrape job that produces the aggregate -------------------------
+  yq -r 'select(.kind == "ConfigMap") | .data["scrape.yml"] // ""' "$vm" >"$scratch/scrape-fd.yaml"
+  grep -q 'job_name: cloudflare-tunnel' "$scratch/scrape-fd.yaml" \
+    || die "the metric store does not scrape the frontdoor tunnel"
+  yq -e '.scrape_configs[] | select(.job_name == "cloudflare-tunnel")
+    | .static_configs[].targets[] | select(. == "cf.network.svc.cluster.local:8080")' \
+    "$scratch/scrape-fd.yaml" >/dev/null \
+    || die "the frontdoor scrape target is not the tunnel metrics Service"
+  # Cardinality: the tunnel identity must be dropped so it cannot explode labels.
+  yq -e '.scrape_configs[] | select(.job_name == "cloudflare-tunnel")
+    | .metric_relabel_configs[] | select(.action == "labeldrop")' \
+    "$scratch/scrape-fd.yaml" >/dev/null \
+    || die "the frontdoor scrape keeps high-cardinality tunnel labels"
+
+  # --- the dashboard only names metrics that scrape can produce -----------
+  local names metric
+  names="$(sed -n 's/^ *- *job_name: *\(.*\)$/\1/p' "$scratch/scrape-fd.yaml")"
+  grep -qx 'cloudflare-tunnel' <<<"$names" \
+    || die "the frontdoor scrape job is not visible to the dashboard check"
+  local queries
+  queries="$(yq -r '.data["frontdoor-access.json"]' \
+    "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    | jq -r '.rows[].panels[].expr[]')"
+  [ -n "$queries" ] || die "the frontdoor dashboard has no queries"
+  for metric in $(grep -oE 'cloudflared_[a-z_]+' <<<"$queries" | sort -u); do
+    case "$metric" in
+      cloudflared_tunnel_total_requests|cloudflared_tunnel_response_by_code|\
+      cloudflared_tunnel_request_errors|cloudflared_tunnel_ha_connections|\
+      cloudflared_tunnel_concurrent_requests_per_tunnel) ;;
+      *) die "the frontdoor dashboard queries $metric, which the tunnel does not export" ;;
+    esac
+  done
+  # No path, query or client address may appear in a frontdoor query: the
+  # tunnel exports none, and asserting it here stops one being invented later.
+  if grep -qE '/request|user_agent|client_ip|request_uri|hostname=' <<<"$queries"; then
+    die "the frontdoor dashboard queries a per-request dimension"
+  fi
+
+  # --- probes: fixed targets, real success and failure conditions ---------
+  config="$(yq -r 'select(.kind == "ConfigMap") | .data["config.yaml"] // ""' "$gatus")"
+  [ -n "$config" ] || die "gatus rendered no configuration"
+  printf '%s\n' "$config" >"$scratch/gatus-config.yaml"
+  uv run --quiet --locked --no-dev python - "$scratch/gatus-config.yaml" <<'PYPROBE'
+import sys
+import yaml
+
+config = yaml.safe_load(open(sys.argv[1]))
+
+endpoints = {endpoint["name"]: endpoint for endpoint in config["endpoints"]}
+# A frontdoor probe exists, targets the tunnel metrics Service, and carries a
+# readiness condition rather than only a status check.
+tunnel = endpoints["cloudflare-tunnel"]
+assert tunnel["url"] == "http://cf.network.svc.cluster.local:8080/ready", tunnel
+conditions = " ".join(tunnel["conditions"])
+assert "[STATUS] == 200" in conditions, tunnel
+assert "readyConnections > 0" in conditions, tunnel
+assert tunnel["interval"] == "60s", tunnel
+# Every endpoint is a fixed, operator-owned target; no caller-supplied URL.
+for name, endpoint in endpoints.items():
+    assert endpoint["url"].startswith("http://"), (name, endpoint["url"])
+    assert "${" not in endpoint["url"], (name, endpoint["url"])
+    assert "/" in endpoint["url"].split("://", 1)[1], (name, endpoint["url"])
+# Failing behaviour is real: every endpoint declares a failure path with a
+# bounded threshold and a resolve, so a fault is reported and then cleared.
+for name, endpoint in endpoints.items():
+    assert endpoint.get("alerts"), name
+    for alert in endpoint["alerts"]:
+        assert alert["failure-threshold"] >= 1, (name, alert)
+        assert alert["success-threshold"] >= 1, (name, alert)
+        assert alert["send-on-resolved"] is True, (name, alert)
+
+# --- notification delivery is configured, not merely referenced ----------
+alerting = config["alerting"]
+assert "telegram" in alerting, alerting
+custom = alerting["custom"]
+assert custom["method"] == "POST", custom
+assert custom["url"] == "${GATUS_WEBHOOK_URL}", custom
+assert custom["headers"]["Content-Type"] == "application/json", custom
+body = " ".join(str(custom["body"]).split())
+for placeholder in ("[ENDPOINT_NAME]", "[ENDPOINT_GROUP]", "[ALERT_DESCRIPTION]",
+                    "[ALERT_TYPE]"):
+    assert placeholder in body, (placeholder, body)
+# The body is a closed template: no error text, response body, header or URL.
+for forbidden in ("[RESULT_ERRORS]", "[RESULT_BODY]", "[RESULT_HTTP]",
+                  "[RESPONSE_BODY]", "[RESULT_DNS_RCODE]", "[RESULT_CONDITIONS]"):
+    assert forbidden not in body, (forbidden, body)
+# No credential literal is rendered into the config.
+for secret in ("TELEGRAM_BOT_TOKEN", "GATUS_WEBHOOK_URL"):
+    assert f'"{secret}"' not in body, secret
+print("[observability] frontdoor aggregate, probe targets and notification body are closed contracts")
+PYPROBE
+
+  # The optional webhook Secret is referenced, never required, so a cluster
+  # without it still starts and simply sends nothing.
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.containers[].envFrom[]
+    | select(.secretRef.name == "gatus-webhook") | .secretRef.optional == true' \
+    "$gatus" >/dev/null \
+    || die "the webhook Secret reference is required or absent"
+  assert_no_public_exposure "$gatus" "gatus"
+  log "frontdoor aggregates, probe success/failure and webhook delivery configured"
+}
+
 check_default_off
 check_enabled_apps
 check_metric_store
@@ -878,6 +990,7 @@ check_event_collector
 check_status_dashboards
 check_workload_metrics
 check_wiring
+check_frontdoor_probe_delivery
 if [ "${1:-}" = --runtime ]; then
   : "${OTELCOL_BIN:?set OTELCOL_BIN to the pinned 0.140.1 release binary}"
   : "${VICTORIA_METRICS_BIN:?set VICTORIA_METRICS_BIN to the pinned v1.155.0 release binary}"
@@ -893,6 +1006,21 @@ if [ "${1:-}" = --runtime ]; then
   [ -s "$scratch/rendered-events-collector.yaml" ] \
     || die "the rendered event collector configuration was not captured"
   [ -s "$scratch/log-queries.json" ] || die "the operational log dashboard has no queries"
+  # The frontdoor-access, probe and delivery paths need the same rendered
+  # artifacts plus the pinned Gatus and cloudflared binaries.
+  : "${GATUS_BIN:?set GATUS_BIN to the pinned Gatus v5.38.0 release binary}"
+  yq -r 'select(.kind == "ConfigMap") | .data["config.yaml"] // ""' "$scratch/gatus.yaml" \
+    >"$scratch/gatus-config-rendered.yaml" \
+    || die "could not extract the rendered Gatus configuration"
+  [ -s "$scratch/gatus-config-rendered.yaml" ] \
+    || die "the rendered Gatus configuration is empty"
+  # The fixture asserts the pinned image digest against this file, so a moved
+  # tag cannot pass as the reviewed release.
+  cp "$enabled_out/kubernetes/apps/observability/gatus/values.yaml" \
+    "$scratch/gatus-values.yaml"
+  yq -r '.data["frontdoor-access.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    | jq '[.rows[].panels[].expr[]]' >"$scratch/frontdoor-queries.json"
+  uv run --quiet --locked --no-dev python tests/ci/frontdoor-probe-delivery-runtime.py "$scratch"
   uv run --quiet --locked --no-dev python tests/ci/observability-runtime.py "$scratch"
   # The same rendered collector configuration, with only loopback endpoints
   # substituted, feeds the actual log store and is then queried.

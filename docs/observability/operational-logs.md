@@ -203,6 +203,63 @@ That fixture also runs a guard-less control of the same configuration, which
 must leak. If it ever stops leaking, the fixture no longer proves the guards do
 anything and the check fails.
 
+## Frontdoor access aggregates and notification delivery
+
+A sibling slice covers the public frontdoor and the alerting path. It is the same
+store and the same pinned components, no extra backend.
+
+**Frontdoor aggregates** come from the tunnel's own counters, scraped from
+`cf.network.svc.cluster.local:8080` as job `cloudflare-tunnel`:
+
+| Metric                                                                    | Meaning                                    |
+| ------------------------------------------------------------------------- | ------------------------------------------ |
+| `cloudflared_tunnel_total_requests`                                       | requests the tunnel proxied                |
+| `cloudflared_tunnel_response_by_code{status_code}`                        | responses by status class, from the origin |
+| `cloudflared_tunnel_request_errors`                                       | proxy-to-origin failures                   |
+| `cloudflared_tunnel_ha_connections`, `..._concurrent_requests_per_tunnel` | tunnel health                              |
+
+These are bounded by construction: cloudflared exports no path, query, client
+address, user agent or body, so an aggregate cannot carry one and there is no
+field to leak them into. The **Frontdoor access** dashboard queries only the
+metrics above, and the offline check rejects any panel that names another.
+
+One measured caveat: cosmetically the `--hello-world` flag makes cloudflared run
+its own built-in server and ignore `--url`, so every request answers 200 and the
+status counter never shows a failure. The deployment does not use that flag, and
+the runtime fixture drives a real origin so both `status_code="200"` and
+`status_code="503"` are observed.
+
+**Probes** are Gatus endpoints with fixed, operator-owned URLs. Each declares a
+failure threshold and `send-on-resolved`, so a fault is reported and then
+cleared. The `cloudflare-tunnel` probe targets the tunnel's `/ready` and requires
+`readyConnections > 0`, not merely HTTP 200 — the endpoint answers 200 with a JSON
+body, so a status-only check would pass without a registered connector.
+
+**Notification delivery** is a real HTTP POST, not just a contact-point entry. The
+rendered `alerting.custom` block posts a closed JSON template:
+
+```json
+{
+    "endpoint": "[ENDPOINT_NAME]",
+    "group": "[ENDPOINT_GROUP]",
+    "alert": "[ALERT_DESCRIPTION]",
+    "status": "[ALERT_TYPE]"
+}
+```
+
+It carries only those four allowlisted substitutions. `[RESULT_ERRORS]`,
+`[RESULT_BODY]` and response headers are deliberately excluded: error strings can
+embed the probed URL, so they stay out of the notification. The URL comes from
+an optional `gatus-webhook` Secret (`GATUS_WEBHOOK_URL`); without it the provider
+is inert and nothing is sent.
+
+The runtime fixture proves trigger **and** resolve delivery against an owned
+loopback receiver, asserts the payload fields, rejects a URL/body/credential in
+the notification, and asserts exactly one delivery per transition (no storm).
+That is local delivery evidence. **Production delivery** to an operator's webhook
+or Telegram chat needs an activated deployment with real credentials, and is not
+claimed here.
+
 ## Known gaps
 
 - Synthetic Event payloads in the fixture are not proof of a live Kubernetes

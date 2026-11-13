@@ -283,6 +283,59 @@ data:
         }
       ]
     }
+  frontdoor-access.json: |
+    {
+      "title": "Frontdoor access",
+      "rows": [
+        {
+          "title": "Requests through the public frontdoor",
+          "panels": [
+            {
+              "title": "Requests per second",
+              "width": 6,
+              "expr": ["sum(rate(cloudflared_tunnel_total_requests[5m]))"]
+            },
+            {
+              "title": "Responses by status code (per second)",
+              "width": 6,
+              "expr": ["sum(rate(cloudflared_tunnel_response_by_code[5m])) by (status_code)"],
+              "alias": ["{{status_code}}"]
+            },
+            {
+              "title": "Proxy-to-origin errors (per second)",
+              "width": 6,
+              "expr": ["sum(rate(cloudflared_tunnel_request_errors[5m]))"]
+            },
+            {
+              "title": "Error share of proxied requests",
+              "width": 6,
+              "unit": "percent",
+              "expr": ["100 * sum(rate(cloudflared_tunnel_request_errors[5m])) / clamp_min(sum(rate(cloudflared_tunnel_total_requests[5m])), 0.001)"]
+            }
+          ]
+        },
+        {
+          "title": "Tunnel health",
+          "panels": [
+            {
+              "title": "Active HA connections",
+              "width": 6,
+              "expr": ["max(cloudflared_tunnel_ha_connections)"]
+            },
+            {
+              "title": "Concurrent proxied requests",
+              "width": 6,
+              "expr": ["max(cloudflared_tunnel_concurrent_requests_per_tunnel)"]
+            },
+            {
+              "title": "Tunnel scrape up",
+              "width": 6,
+              "expr": ["up{job=\"cloudflare-tunnel\"}"]
+            }
+          ]
+        }
+      ]
+    }
   probe-status.json: |
     {
       "title": "Probe status",

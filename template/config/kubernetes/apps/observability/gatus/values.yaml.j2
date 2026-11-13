@@ -30,6 +30,14 @@ controllers:
           - secretRef:
               name: gatus-telegram
               optional: true
+          # Optional webhook delivery. An operator who wants HTTP notifications
+          # creates this Secret with GATUS_WEBHOOK_URL; without it the `custom`
+          # provider has an empty URL and sends nothing. The value is a URL the
+          # operator owns -- this repository never carries a token, a default
+          # endpoint or a generated credential.
+          - secretRef:
+              name: gatus-webhook
+              optional: true
         probes:
           # The image's own /health endpoint. Gatus still serves it when every
           # monitored endpoint is failing, so a probe failure means the process
@@ -97,6 +105,29 @@ configMaps:
           telegram:
             token: "${TELEGRAM_BOT_TOKEN}"
             id: "${TELEGRAM_CHAT_ID}"
+          # A generic webhook for operators who do not want Telegram. It posts a
+          # bounded JSON body built from allowlisted substitutions: the endpoint
+          # name, the fixed alert description and the result. It never carries a
+          # response body, a request path, query, header, credential or any log
+          # content -- only the fields this file names.
+          #
+          # `custom` is the only generic HTTP provider in this pinned image
+          # (v5.38.0 has no `webhook` type); it is a plain POST with a
+          # caller-supplied template, so the body below is the entire payload
+          # contract. `GATUS_WEBHOOK_URL` is optional: without it the provider
+          # is inert and no alert is sent.
+          custom:
+            url: "${GATUS_WEBHOOK_URL}"
+            method: POST
+            headers:
+              Content-Type: application/json
+            # Only the endpoint identity, the fixed description and the alert
+            # transition. Deliberately not [RESULT_ERRORS] or [RESULT_BODY]:
+            # error strings can embed the probed URL, so they stay out of the
+            # notification.
+            body: >-
+              {"endpoint":"[ENDPOINT_NAME]","group":"[ENDPOINT_GROUP]",
+              "alert":"[ALERT_DESCRIPTION]","status":"[ALERT_TYPE]"}
         endpoints:
           # One probe per platform dependency, each a real request or
           # connection. The gateway is expected to refuse an unkeyed remote
@@ -122,6 +153,24 @@ configMaps:
             alerts:
               - type: telegram
                 description: "argocd-server health endpoint is failing"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
+          - name: cloudflare-tunnel
+            group: frontdoor
+            # The tunnel's own metrics listener. It answers on /ready only when
+            # the connector is registered; a refused connection or a non-200 is
+            # a real frontdoor fault, not a probe artefact.
+            url: "http://cf.network.svc.cluster.local:8080/ready"
+            interval: 60s
+            conditions:
+              - "[STATUS] == 200"
+              # `/ready` answers a JSON body with the connector count, so the
+              # readiness signal is that field rather than the body text.
+              - "[BODY].readyConnections > 0"
+            alerts:
+              - type: telegram
+                description: "the public frontdoor tunnel is not ready"
                 failure-threshold: 3
                 success-threshold: 2
                 send-on-resolved: true

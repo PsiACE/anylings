@@ -18,31 +18,40 @@ umask 077
 log() { printf '[magpie-claim] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
-# Render one config input into its own output tree.
+# shellcheck source=tests/ci/fixture-input.sh
+. tests/ci/fixture-input.sh
+
+# Render one fixture input into its own output tree. The fixture is copied to a
+# private directory with the synthetic baseline tunnel token beside it, so a
+# check never writes into the checkout.
+input_case=0
 render() {
-  local config="$1" out="$2" log="$scratch/render.log"
+  local fixture="$1" out="$2" log="$scratch/render.log" config
+  input_case=$((input_case + 1))
+  config="$(prepare_platform_input "$fixture" "$scratch/input-$input_case")" \
+    || die "could not prepare the input for $fixture"
   if ! ANYLINGS_CONFIG="$config" ANYLINGS_OUTPUT_DIR="$out" \
     SOPS_AGE_KEY_FILE="$scratch/age.key" just template render >"$log" 2>&1; then
     cat "$log" >&2
-    die "rendering failed for $config"
+    die "rendering failed for $fixture"
   fi
-  [ -f "$out/kubernetes/apps/default/magpie/values.sops.yaml" ] \
-    || die "magpie values were not rendered for $config"
+  [ -f "$out/kubernetes/apps/gateways/magpie/values.sops.yaml" ] \
+    || die "magpie values were not rendered for $fixture"
 }
 
 # Render that tree with the chart coordinates the platform itself publishes, so
 # this check follows the pinned chart instead of restating it.
 template() {
   local rendered="$1" config chart_repo chart chart_version chart_file
-  config="$rendered/kubernetes/apps/default/magpie/config.json"
+  config="$rendered/kubernetes/apps/gateways/magpie/config.json"
   chart_repo="$(jq -r '.chartRepo' "$config")"
   chart="$(jq -r '.chart' "$config")"
   chart_version="$(jq -r '.chartVersion' "$config")"
   chart_file="$scratch/${chart}-${chart_version}.tgz"
   [ -f "$chart_file" ] \
     || helm pull "oci://${chart_repo}/${chart}" --version "$chart_version" -d "$scratch" >/dev/null
-  helm template magpie "$chart_file" --namespace default \
-    --values "$rendered/kubernetes/apps/default/magpie/values.sops.yaml"
+  helm template magpie "$chart_file" --namespace gateways \
+    --values "$rendered/kubernetes/apps/gateways/magpie/values.sops.yaml"
 }
 
 age-keygen --output "$scratch/age.key" >/dev/null 2>&1
@@ -89,7 +98,7 @@ fi
 long_name="$(printf 'a%.0s' {1..254})"
 for invalid in "Upper-Case" "bad_name" "-leading-dash" "trailing-" "leading.dot-" "dot..dot" "$long_name"; do
   config="$scratch/invalid.toml"
-  printf '[repository]\nurl = "git://git.example.test/platform.git"\n[magpie]\nconfig_claim = "%s"\n' \
+  printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[magpie]\nconfig_claim = "%s"\n' \
     "$invalid" >"$config"
   if ANYLINGS_CONFIG="$config" just check config >/dev/null 2>&1; then
     die "the config validator accepted the invalid claim name '${invalid:0:40}'"

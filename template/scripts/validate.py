@@ -9,7 +9,7 @@ config is invalid.
 """
 
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 import json
 import re
@@ -38,6 +38,9 @@ NAMESPACE_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
 # Magpie and the agent runtime both reference an existing claim, so both use
 # this one rule rather than a second approximation of it.
 PVC_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+# The default image tag. Both component versions are part of the identity of a
+# combined image, so the tag names both rather than either alone.
+DEFAULT_IMAGE_TAG = "bub0.6.1-t3web0.1.8"
 # A container image repository without a tag or digest: the tag is separate so
 # the rendered values never carry two sources for the same version.
 IMAGE_REPOSITORY_PATTERN = r"^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$"
@@ -96,32 +99,30 @@ class Argocd(Model):
 
 
 class Ingress(Model):
-    # "none" keeps the cluster credential-free and reachable only inside the
-    # cluster; "cloudflare-tunnel" runs cloudflared with a token file.
-    mode: Literal["none", "cloudflare-tunnel"] = "none"
-    # Path to the tunnel token, resolved relative to the config file. The
-    # token itself is never a TOML value.
-    tunnel_token_file: str = ""
+    # The Cloudflare Tunnel connector is part of the baseline: every cluster
+    # runs cloudflared, and the cloudflare OpenTofu root owns DNS and routes.
+    # Only the token's location is configurable; the token itself is never a
+    # TOML value, and no credential path is invented by a default.
+    tunnel_token_file: str
 
-    @model_validator(mode="after")
-    def check(self) -> Self:
-        if self.mode == "cloudflare-tunnel" and not self.tunnel_token_file:
-            raise ValueError(
-                "tunnel_token_file is required when ingress.mode is 'cloudflare-tunnel'"
-            )
-        if self.mode == "none" and self.tunnel_token_file:
-            raise ValueError(
-                "tunnel_token_file must be empty when ingress.mode is 'none'"
-            )
-        return self
+    @field_validator("tunnel_token_file")
+    @classmethod
+    def check_token_file(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("tunnel_token_file must name the Cloudflare tunnel token file")
+        return value
 
 
 class Agents(Model):
-    # The T3 Code runtime image is built from this repository but published to
+    # The Bub agent runtime image is built from this repository but published to
     # a registry this template must not guess: an operator names it, so no
     # private registry or vendor path is baked into the rendered tree.
     image_repository: str = Field(pattern=IMAGE_REPOSITORY_PATTERN)
-    image_tag: str = Field(default="0.1.8", pattern=IMAGE_TAG_PATTERN)
+    # The image carries two independently versioned components (Bub and the T3
+    # Code web server), so the publisher tags it `bub<version>-t3web<version>`.
+    # The default must therefore name both; a bare T3 release here would label
+    # the runtime with the version of its browser shell.
+    image_tag: str = Field(default=DEFAULT_IMAGE_TAG, pattern=IMAGE_TAG_PATTERN)
     # An immutable pin. A tag can be moved; the registry digest the publisher
     # records cannot, so a deployment that must not drift sets this. Empty
     # leaves the tag as the only reference.
@@ -158,6 +159,11 @@ class Agents(Model):
         default="",
         json_schema_extra={"pattern": EMPTY_OR_PVC_NAME_PATTERN},
     )
+    # File holding the gateway key the runtime presents to Magpie. Naming it
+    # makes the render emit the `bub-magpie-gateway` Secret, its KSOPS
+    # generator and a `secretKeyRef`; leaving it empty renders none of them,
+    # so an instance without a shared gateway keeps no dead secret.
+    gateway_secret: str = ""
 
     @field_validator("storage_existing_claim")
     @classmethod
@@ -185,6 +191,12 @@ class Magpie(Model):
     # into an existing claim in the application's own namespace; the platform
     # never creates that claim, so removing the app cannot delete its data.
     config_claim: str = ""
+    # Directory holding `providers.json` and `caller-keys.json`, the gateway's
+    # own two stores. Naming it makes the render emit the `magpie-seed` Secret
+    # and the init container that copies those files into `/config/magpie`
+    # only when absent. Empty renders neither, so an instance that configures
+    # its providers at runtime keeps the ephemeral-volume default.
+    seed_dir: str = ""
 
     @field_validator("config_claim")
     @classmethod
@@ -197,13 +209,27 @@ class Magpie(Model):
                 "(lowercase DNS subdomain, at most 253 characters)"
             )
         return value
+
+    @field_validator("seed_dir")
+    @classmethod
+    def check_seed_dir(cls, value: str) -> str:
+        # The render reads exactly two files from here and encrypts their
+        # contents; an empty path would make the resolution silently read the
+        # config directory instead.
+        if not value:
+            return value
+        if not value.strip():
+            raise ValueError("seed_dir must be empty or a directory path")
         return value
 
 
 class Observability(Model):
     # Off by default: the slice needs ClusterIP-only access and its own
     # monitoring decision, so it never appears in a cluster that did not ask
-    # for it. Enabling it deploys VictoriaMetrics single-node and Gatus.
+    # for it. Enabling it deploys VictoriaMetrics, Gatus, per-node kubelet
+    # usage collectors, kube-state-metrics, VictoriaLogs and the event
+    # collector. Log coverage is operational Events plus structured OTLP; it
+    # is not application or node container log collection.
     enabled: bool = False
 
 
@@ -221,7 +247,10 @@ class Config(Model):
 
     repository: Repository
     argocd: Argocd = Argocd()
-    ingress: Ingress = Ingress()
+    # Required: the connector is baseline, so its token location is not
+    # optional. A config without [ingress] is rejected instead of silently
+    # rendering a cluster with no ingress path.
+    ingress: Ingress
     magpie: Magpie = Magpie()
     observability: Observability = Observability()
     spinkube: Spinkube = Spinkube()
@@ -229,6 +258,18 @@ class Config(Model):
     # agent runtime. Making it required would block every existing deployment
     # and the native rehearsal on a registry that does not exist there.
     agents: Agents | None = None
+
+    @model_validator(mode="after")
+    def check_gateway_wiring(self) -> Self:
+        # A gateway key the gateway never learned only produces 401s, and the
+        # agent runtime is then unusable in a way that looks like an outage.
+        # Both halves are seeded from one snapshot, so require them together.
+        if self.agents and self.agents.gateway_secret and not self.magpie.seed_dir:
+            raise ValueError(
+                "agents.gateway_secret requires magpie.seed_dir: the gateway key "
+                "must be one Magpie's caller-keys.json already records"
+            )
+        return self
 
 
 def format_errors(error: ValidationError) -> str:
@@ -261,6 +302,17 @@ def parse(config_file: str | Path) -> tuple[Config, Path]:
         raise ConfigError(f"{path}: file not found") from None
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: invalid TOML: {e}") from None
+
+    # The connector used to be opt-in through `ingress.mode`. A config that
+    # still carries it is the normal case during migration, so name the edit
+    # instead of leaving the reader with "extra inputs are not permitted".
+    ingress = raw.get("ingress")
+    if isinstance(ingress, dict) and "mode" in ingress:
+        raise ConfigError(
+            f"ingress.mode: the Cloudflare Tunnel connector is part of the "
+            f"baseline, so remove it and keep only ingress.tunnel_token_file "
+            f"in {path}"
+        )
 
     try:
         return Config.model_validate(raw), path.resolve()

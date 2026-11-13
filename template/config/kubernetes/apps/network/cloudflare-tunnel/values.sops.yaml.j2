@@ -1,6 +1,5 @@
-#% if ingress.mode == 'cloudflare-tunnel' %#
 ---
-# Optional egress-only ingress. Routes and DNS records are owned by the
+# Baseline egress-only ingress. Routes and DNS records are owned by the
 # OpenTofu cloudflare root, so this file only runs cloudflared with the tunnel
 # token read from the configured file; no ingress rules are rendered here.
 controllers:
@@ -53,4 +52,3 @@ service:
     ports:
       http:
         port: *port
-#% endif %#

@@ -45,9 +45,11 @@ OpenTofu k0s root              OpenTofu DOKS root
 - Initial Git access and the age key are seeded before reconciliation. The
   AppProject is applied before its ApplicationSet. Bootstrap health does not
   imply generated workload health; those reconcile asynchronously.
-- The optional Cloudflare root uses its official provider for Access, Tunnel,
-  DNS and R2. Access precedes route activation and DNS; the cluster runs only
-  the connector. R2 retention/backups remain an explicit operational concern.
+- The Cloudflare root uses its official provider for Access, Tunnel, DNS and
+  R2. Tunnel, routes, Access and DNS are baseline responsibilities, applied for
+  every deployment without a toggle; R2 buckets are optional. Access precedes
+  route activation and DNS; the cluster runs only the connector. R2
+  retention/backups remain an explicit operational concern.
 
 ## Use
 
@@ -75,7 +77,8 @@ export ANYLINGS_CONTEXT="$(kubectl --kubeconfig "$KUBECONFIG" config current-con
 just wait cluster
 
 just init platform
-# Edit cluster.toml: repository URL, branch/prefix, ingress and chart settings.
+# Edit cluster.toml: repository URL, branch/prefix, tunnel token file and chart
+# settings.
 just configure platform
 # Review and publish only rendered/kubernetes/ to the configured Git location.
 just bootstrap platform      # first install only; existing Argo is rejected
@@ -96,7 +99,8 @@ ApplicationSet discovers `kubernetes/apps/*/*/config.json` in the published Git
 repository. Each config supplies the app name, namespace, chart coordinates,
 values path and optional manifest path; it contains no credentials. The Git
 source carries values only unless `manifestPath` is set (the tunnel's KSOPS
-Secret). Argo self-management stays outside this generated workload set.
+Secret). Argo self-management stays outside this generated workload set. The
+`cloudflare-tunnel` connector is part of that baseline set, not an add-on.
 
 The applications in that set are the platform's real workloads. `magpie` is the
 shared model gateway and the first of them; `reloader` and, where the configured
@@ -119,7 +123,7 @@ write bootstrap/projects/app configs, which control deployment and deletion.
 ## Magpie
 
 [Magpie](https://github.com/yetone/magpie) is the first real workload:
-`kubernetes/apps/default/magpie/` in the rendered tree. It runs the upstream
+`kubernetes/apps/gateways/magpie/` in the rendered tree. It runs the upstream
 container image rather than a local rebuild.
 
 - Image `ghcr.io/yetone/magpie:0.1.3078`, pinned to its multi-arch index digest.
@@ -150,8 +154,8 @@ before publishing it.
     config_claim = "magpie-config"
     ```
 
-    That names an **existing** `PersistentVolumeClaim` in the application's own
-    namespace (`default`). Prerequisites, all outside this repository:
+    That names an **existing** `PersistentVolumeClaim` in the gateway's own
+    namespace (`gateways`). Prerequisites, all outside this repository:
 
     - Create the claim before syncing the Application, with the StorageClass and
       size you want. The platform mounts it and never creates it.
@@ -174,9 +178,32 @@ before publishing it.
 3. **Gateway keys.** Mint one per client with `magpie gateway-key add <name>`
    inside the pod and give it to that client as `Authorization: Bearer <key>`.
    Upstream generates the value, so it is never committed.
-4. **Reaching the gateway.** The Service is cluster-internal. Publishing it
+4. **A rendered seed, instead of hand edits.** Naming a directory that holds the
+   gateway's own two stores makes the render produce them:
+
+    ```toml
+    [magpie]
+    seed_dir = "secret-inputs" # providers.json, caller-keys.json
+    ```
+
+    That renders the `magpie-seed` Secret, the KSOPS generator that decrypts it,
+    a `kustomization.yaml` carrying it, and `manifestPath` in the Application's
+    `config.json` — without which the Secret would be published but never
+    applied. An init container copies each file into `/config/magpie` **only when
+    absent**, so a restart never overwrites keys or providers the running gateway
+    has since changed. Leaving `seed_dir` empty renders none of it.
+
+    The same input is what lets an agent runtime reach the gateway without a
+    provider credential of its own: `agents.gateway_secret` names a file holding
+    one issued gateway key, and the render emits the `bub-magpie-gateway`
+    Secret plus a `secretKeyRef` for it. Setting one without the other is
+    rejected, because a key the gateway never learned only yields 401s.
+
+5. **Reaching the gateway.** The Service is cluster-internal. Publishing it
    beyond the cluster is an ingress decision made elsewhere, and any public route
-   must keep gateway-key authentication on.
+   must keep gateway-key authentication on. Upstream serves its management page
+   on a separate port (`3430`) which also forwards the gateway's client routes,
+   so one proxied hostname can serve both — but that port is not rendered here.
 
 The rehearsal covers rendering, reconciliation and gateway-key enforcement. It
 does not cover vendor access, durable storage or public exposure. The
@@ -184,23 +211,28 @@ existing-claim rendering is covered; a pod replacement or re-mount on real CSI
 storage is not tested, and moving data onto a claim does not by itself show that
 a replaced volume keeps it.
 
-## Agent runtime
+## Bub agent runtime
 
-`kubernetes/apps/agents/t3-code/` in the rendered tree runs the [T3 Code](https://github.com/pingdotgg/t3code)
-web server, with the [Bub](https://github.com/bubbuild/bub) ACP executable on its
-`PATH` as the provider T3 can launch. It is **opt-in**: without an `[agents]`
-section in `cluster.toml` nothing is rendered, so a cluster with no published
-runtime image stays deployable.
+`kubernetes/apps/agents/bub/` in the rendered tree runs the [Bub](https://github.com/bubbuild/bub)
+ACP executable, together with the [T3 Code](https://github.com/pingdotgg/t3code)
+web server that launches it as a provider. One image carries both, because the
+browser surface and the agent are one runtime; the image tag names both
+components. It is **opt-in**: without an `[agents]` section in `cluster.toml`
+nothing is rendered, so a cluster with no published runtime image stays
+deployable.
 
-The image is built here from `images/t3-code/Containerfile` rather than pulled:
+The image is built here from `images/bub/Containerfile` rather than pulled:
 
+- Bub `0.6.1` from PyPI, installed with its `app` extra and hash-verified from
+  `images/bub/requirements.txt`, plus `bub-acp-server` for `bub acp`.
 - T3 Code `0.1.8`, the upstream self-contained release binary, verified against
   that release's published `SHA256SUMS` during the build and pinned for both
   `linux/amd64` and `linux/arm64`.
-- Bub `0.6.1` from PyPI, installed with its `app` extra and hash-verified from
-  `images/t3-code/requirements.txt`.
-- Runs as uid/gid `65532` with a read-only root filesystem; T3's database and
+- Runs as uid/gid `65532` with a read-only root filesystem; the database and
   project checkouts live under the writable `/home/t3`, and `/tmp` is scratch.
+  `/home/t3`, `T3CODE_HOME` and the `T3CODE_*` variables stay as upstream and
+  the existing claim define them: they are the web server's contract, not a
+  platform name.
 
 The server is reachable only through a cluster-internal `ClusterIP` Service on
 port `3773`. Its own authentication is never disabled: a caller that is not the
@@ -210,7 +242,7 @@ pod's own loopback needs a pairing token or a bearer token, minted with
 ### Operator inputs and prerequisites
 
 1. **Publish the image.** Use the trusted-main publisher below, or build and
-   push `images/t3-code/` to a registry of your choice, then set
+   push `images/bub/` to a registry of your choice, then set
    `agents.image_repository`. Rendering the template never publishes an image.
 2. **Persistent state.** `agents.storage_existing_claim` names a claim you
    created, mounted at `/home/t3`. Empty means `emptyDir`, which loses the
@@ -234,7 +266,7 @@ integration rather than a fake adapter.
 
 ### Checking the runtime
 
-`bash tests/runtime/check-t3-code.sh` checks the image definition and the
+`bash tests/runtime/check-bub.sh` checks the image definition and the
 entrypoint against a synthetic `HOME`, renders both volume branches from
 `tests/config/agents.toml` and an explicit-empty variant, and validates each
 through the pinned `app-template` chart. It fails if that chart cannot be
@@ -263,13 +295,18 @@ arm64 pins for an operator-built image, but this workflow does not publish a
 multi-architecture manifest; do not deploy its tags on arm64 nodes.
 
 It pushes two tags to a path derived from the repository, not configured in the
-workflow — `ghcr.io/<owner>/<repo>/t3-code` — and records the registry digest in
+workflow — `ghcr.io/<owner>/<repo>/bub` — and records the registry digest in
 the run summary:
 
-| tag            | meaning                                                      |
-| -------------- | ------------------------------------------------------------ |
-| `sha-<commit>` | the commit this image was built from; immutable in practice  |
-| `<T3_VERSION>` | the T3 Code release from the Containerfile, a moving pointer |
+| tag                           | meaning                                                     |
+| ----------------------------- | ----------------------------------------------------------- |
+| `sha-<commit>`                | the commit this image was built from; immutable in practice |
+| `bub<version>-t3web<version>` | both component pins from `images/bub/`, a moving pointer    |
+
+The moving tag names both components. A tag equal to one component's release
+would describe a combined image by its web shell or by its CLI alone, so the
+publisher reads both pins and combines them; `tests/runtime/check-bub.sh`
+asserts the derived tag matches the rendered default.
 
 The image is checked with the same script as the gate before it is pushed, so a
 build that cannot start never becomes a published tag. The workflow runs only on
@@ -288,17 +325,90 @@ cannot change what the cluster runs; leaving it empty deploys the tag alone.
 
 ## Observability
 
-Opt in with `[observability] enabled = true`. That publishes two applications
+Opt in with `[observability] enabled = true`. That publishes six applications
 into the `observability` namespace; leaving it disabled publishes nothing, adds
 no namespace and allows no extra chart registry.
 
 - **victoria-metrics** — single-node VictoriaMetrics (`victoria-metrics-single`
-  chart), the only metric store. It scrapes its own `/metrics` and Gatus, and
+  chart), the only metric store. It scrapes its own `/metrics`, Gatus, every kubelet collector Pod and KSM, and
   serves queries and dashboards through vmui on `/vmui/`. No Prometheus operator,
   vmagent, Loki or database is deployed with it.
 - **gatus** — probe-based status and alerting. Its dashboard is a status page;
   it also exports `gatus_results_*` metrics that VictoriaMetrics scrapes, so
   probe history that outlives the status page is read from metrics.
+
+- **otel-kubelet** — pinned OpenTelemetry contrib `0.140.1` on collector chart
+  `0.140.0`, one unprivileged DaemonSet Pod per node (including tainted nodes).
+  Reads numeric node, Pod, container and volume usage from kubelet
+  `/stats/summary` every 30 seconds. Uses the projected service-account token,
+  `get nodes/stats` only, HTTPS and CA/hostname verification. No `nodes/proxy`,
+  host filesystem mounts, host ports or application telemetry receivers.
+- **kube-state-metrics** — pinned chart `9.0.1`, image `v2.20.0`, one replica.
+  Watches only nodes, Pods, Deployments, ReplicaSets, DaemonSets, StatefulSets,
+  Jobs and CronJobs. Its explicit metric allowlist covers restarts, last OOM
+  termination, readiness, scheduling, requests/limits, ownership and replica
+  availability. It cannot read Secrets or ConfigMaps and exports no arbitrary
+  workload annotations or labels.
+- **victoria-logs** — single-node VictoriaLogs (`victoria-logs-single` chart
+  `0.13.12`, image `v1.53.0`), the operational log store. Ingest is OTLP over
+  HTTP from the collector below; it tails no file and reads no Kubernetes
+  object itself. Contract and limits:
+  [operational logs how-to](docs/observability/operational-logs.md).
+- **otel-events** — pinned OpenTelemetry contrib `0.140.1` on collector chart
+  `0.140.0`, a single replica. Watches Kubernetes Events read-only and accepts
+  structured OTLP records on port `4318`. See the
+  [operational logs how-to](docs/observability/operational-logs.md) for the
+  field contract.
+
+### Operational logs
+
+Log coverage is **Kubernetes Events plus a structured OTLP input only**. It is
+not application or node container log collection, and reading it as "full logs"
+would be wrong.
+
+- **Kubernetes Events** — one read-only grant (`get, list, watch` on `events`).
+- **Structured OTLP** — a workload sends an allowlisted operational record to
+  `http://otel-events.observability.svc.cluster.local:4318/v1/logs`. A free-text
+  log line is not accepted; the body is never read.
+
+Both pipelines **drop** a record that is missing a field or carries the wrong
+type, then compose the stored body from the surviving fields alone. Event
+messages, notes, annotations, prompts, sessions and tool output are never
+copied, and rejected records are counted rather than echoed.
+
+See **[Operational logs how-to](docs/observability/operational-logs.md)** for the
+exact field contract, the per-field type rules, retention and its limits, and the
+verification commands. The store keeps `3d` and 1GiB in a bounded `emptyDir`; its
+added requests are **50m / 128Mi** (limits **500m / 512Mi**) and the collector's
+are **30m / 96Mi** (limits **300m / 256Mi**).
+
+The vmui **Nodes and workloads** dashboard includes actual usage, requested
+resources (not measured utilization), restarts/OOM/scheduling, controller usage,
+Deployment-attributed working sets through ReplicaSet ownership, and volume
+headroom. For example, `sum by (node) (k8s_node_cpu_usage)` is CPU in cores;
+`sum by (namespace,pod) (k8s_pod_memory_working_set_bytes)` is Pod working-set
+memory in bytes. The volume name is retained so two volumes cannot collapse
+onto one series; Pod UIDs, backend disk identifiers, paths and arbitrary resource
+attributes are not retained as metric labels in VM. Workload names are operational metadata, not an
+anonymous dataset. No prompts, sessions or tool output enter these pipelines.
+VM resolves all ready collector Pod IPs through a headless Service and DNS A
+discovery; a load-balanced ClusterIP would silently miss nodes. KSM's single
+replica uses an ordinary stable ClusterIP.
+
+Before any future deployment, verify that each node name resolves from a Pod
+and its kubelet serving certificate chains to the service-account CA with that
+node name in its SAN. Failure is **closed**; do not disable TLS verification to
+make a provider work. Real cluster DNS, certificate trust, projected token
+rotation and kubelet webhook authorization still need native/provider evidence.
+
+The added requests are **20m / 48Mi** for KSM plus **30m / 64Mi per node**
+for the collector. Limits are **100m / 128Mi** and **200m / 160Mi per node**.
+VM bounds each metrics job to 5,000 samples per scrape and the store to 10,000
+hourly / 20,000 daily series, 30 labels per series, 768Mi container memory and a
+2Gi ephemeral data volume. These are caps, not an assertion that the existing
+single node has enough actual headroom. Over-budget scrapes/series may be
+rejected; inspect `/targets`, `up` and VM's ignored-row metrics. No new capacity
+or deployment is authorized by these templates.
 
 Read these as operational facts, not guarantees:
 
@@ -311,12 +421,17 @@ Read these as operational facts, not guarantees:
 - **Gatus history is bounded memory, not a seven-day archive.** It runs with
   `storage.type: memory`, so its own results and events are capped by count and
   lost on restart. Longer probe history means querying the scraped metrics.
-- **Nothing survives a reschedule by default.** VictoriaMetrics uses a bounded
-  `emptyDir`, and no `PersistentVolumeClaim` is provisioned for either
-  application, so no cloud volume is created or billed implicitly. To keep
-  metrics across a pod replacement, create a claim yourself and point
+- **The log store is an operational window, not an audit trail.** VictoriaLogs
+  keeps `3d` and 1GiB of allowlisted operational records. It drops whole per-day
+  partitions, so the window is a query bound, not proof of deletion. It holds no
+  application container or node logs, and no session, prompt or tool output. See
+  the [operational logs how-to](docs/observability/operational-logs.md).
+- **Nothing survives a reschedule by default.** VictoriaMetrics and VictoriaLogs
+  both use a bounded `emptyDir`, and no `PersistentVolumeClaim` is provisioned
+  for any application, so no cloud volume is created or billed implicitly. To
+  keep data across a pod replacement, create a claim yourself and point
   `server.persistentVolume.existingClaim` at it.
-- **Access is in-cluster.** Both Services are `ClusterIP`; no Ingress, route,
+- **Access is in-cluster.** All Services are `ClusterIP`; no Ingress, route,
   LoadBalancer or NodePort is rendered. Reaching vmui or Gatus from outside is a
   separate ingress decision, and it must keep authentication in front of them.
 
@@ -333,14 +448,16 @@ kubectl --namespace observability create secret generic gatus-telegram \
 ```
 
 The rendered values do not carry resource sizing for your environment: the
-committed limits (`768Mi` for the metric store, `128Mi` for Gatus) are a small
-default, and ingestion is additionally capped by series and label budgets.
+committed limits (`768Mi` for the metric store, `512Mi` for the log store,
+`256Mi` for the event collector, `128Mi` for Gatus) are a small default, and
+ingestion is additionally capped by series, label and record budgets.
 Dashboards live in the published `victoria-metrics-dashboards` ConfigMap and are
 loaded by vmui, not by a separate dashboard server.
 
-Web analytics and access-log analysis are not part of this slice. Aggregate
-usage reporting would need its own store; until then, treat web analytics as
-pending rather than inferring it from these metrics.
+Web analytics and access-log analysis are not part of this slice, and neither
+are distributed traces. Aggregate usage reporting and traces each need their
+own store and source; until then, treat them as pending rather than inferring
+them from these metrics or from the operational log records.
 
 Other action-first commands:
 
@@ -358,7 +475,7 @@ Other action-first commands:
 - `template/`: shared configuration sources, validation and rendering.
 - `infra/tofu/`: independent OpenTofu configurations for `k0s`, `doks`,
   `cloudflare` and `platform`, each with separate state. These are not four Argo roots.
-- `infra/platform/`: shared readiness; `infra/k0s/`: optional native storage manifests.
+- `infra/platform/`: shared readiness and read-only volume preflight; `infra/k0s/`: optional native storage manifests.
 - `tests/config/`: supported configuration inputs; `tests/ci/`: integration and safety checks.
 
 Publish **only `$ANYLINGS_OUTPUT_DIR/kubernetes/`**, retaining the `kubernetes/`
@@ -367,24 +484,40 @@ and state never belong in that Git publication. Inspection manifests live in a
 private sibling `bootstrap-manifests/` directory. Keep recovery keys outside Git
 and the cluster; encrypt whole sensitive files, not just Secret data fields.
 
+## Retained volume preflight
+
+A retained-PersistentVolume rebind has a read-only inspection step:
+`infra/platform/retained_pv.py` plus the `inspect-retained-pv.py` transport.
+It reports preconditions and never quiesces, rebinds or migrates anything. See
+[docs/how-to/rebind-retained-volume.md](docs/how-to/rebind-retained-volume.md).
+
 ## CI
 
-The shared platform renderer is exercised with two inputs: `tests/config/base.toml`
-(defaults, no ingress) and `tests/config/cloudflare-tunnel.toml` (encrypted tunnel
-credentials, a Git subdirectory and a custom Argo namespace). They are
-configuration cases, not k0s/DOKS implementations. Infrastructure validation
-checks the independent OpenTofu configurations; the native integration run uses
-the same base input.
+The shared platform renderer is exercised with two inputs:
+`tests/config/base.toml` (defaults) and `tests/config/repository-prefix.toml`
+(a Git subdirectory and a custom Argo namespace). Both supply only a synthetic
+tunnel token file, because the connector is baseline. They are configuration
+cases, not k0s/DOKS implementations. Infrastructure validation checks the
+independent OpenTofu configurations; the native integration run uses the same
+base input.
 
 The optional application slices add focused checks rather than more shared
 render cases, because each needs its own pinned chart:
 `tests/ci/check-magpie-config-claim.sh` (the Magpie `/config` claim),
-`tests/ci/check-observability.sh` (the disabled-by-default slice) and
-`tests/runtime/check-t3-code.sh` (the agent runtime). Each renders its own
-`tests/config/` fixture through `just configure platform`, so `base` still
-covers a cluster with every optional slice omitted.
+`tests/ci/check-gateway-wiring.sh` (the rendered gateway Secrets and the
+runtime's gateway env), `tests/ci/check-observability.sh` (the
+disabled-by-default slice) and `tests/runtime/check-bub.sh` (the agent
+runtime). Each renders its own `tests/config/` fixture through
+`just configure platform`, so `base` still covers a cluster with every optional
+slice omitted.
 
-`tests/runtime/check-t3-code.sh` covers both agent-runtime volume branches
+`tests/ci/check-gateway-wiring.sh` asserts the property those Secrets exist for:
+a re-render reproduces them, both Applications render their kustomize
+directory, the runtime reads its key from a `secretKeyRef`, the seed copies only
+when absent, and an input without a gateway publishes neither Secret nor a
+`manifestPath`. It fails if any of that is hand-edited back into the tree.
+
+`tests/runtime/check-bub.sh` covers both agent-runtime volume branches
 (`emptyDir` and an existing claim) and fails when the pinned chart cannot be
 pulled; it never reports a chart check it did not run. With `--image <ref>` it
 also checks a built image, and that is what the CI `agent runtime` job does
@@ -428,12 +561,29 @@ checked against real artifacts rather than against the values file's intent. It
 asserts that the default input publishes nothing, then on the enabled render:
 explicit 7d retention, resource limits, non-root and read-only root filesystems,
 ClusterIP-only Services with no route or LoadBalancer, no automatically
-provisioned claim, no cluster-scoped metrics RBAC, an optional notification
+provisioned claim, no store RBAC and minimal read-only collector RBAC, an optional notification
 Secret reference rather than embedded credentials, and that the vmui dashboard
 flag, its mount, the ConfigMap, the scrape target and the probe Services all name
 things that render actually creates, with no empty dashboard panel. The
 contracts job and `tests/ci/local-gate.sh` both call it, before any native run
-exists.
+exists. The same script accepts `--runtime` when `OTELCOL_BIN` (0.140.1) and
+`VICTORIA_METRICS_BIN` (v1.155.0) point at disposable release binaries. It starts
+two actual collectors, synthetic HTTPS/mTLS kubelets and VictoriaMetrics, then
+asserts all workload dashboard queries are nonempty, numerical sample values,
+multi-volume identities, both node identities and privacy. Exact owned processes
+are terminated and waited and server threads joined in the same foreground run;
+`OBSERVABILITY_RUNTIME_LOG_DIR` optionally preserves full sanitized logs. There
+are no downloads, installs, background services or extra CI workflow in that
+mode. KSM exposition is synthetic, TLS client certificates replace the fixed
+in-Pod SA token path, and loopback targets replace cluster DNS: this proves
+collection/ingestion/query behavior, not live KSM watches, SA auth or cluster DNS.
+
+**Remaining mandatory observability slices:** operational logs with redaction
+and bounded retention, traces without prompt/session/tool payloads, aggregate
+API/web analytics, expanded probes and end-to-end notification delivery.
+Existing Gatus templates and an optional Telegram Secret reference are not
+notification-delivery evidence. These are follow-ups, not optional omissions or
+a claim that this metrics PR completes observability.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through
@@ -454,8 +604,10 @@ recorded cluster before deleting its disposable volume data; only sanitized
 diagnostics are uploaded.
 
 Single-host CI does not prove multi-host upgrades, HA, database-consistent recovery,
-DOKS CSI recovery, Cloudflare Access propagation or R2 permissions. Those require
-separate authorization and environment-specific validation. No workstation cluster
+DOKS CSI recovery, Cloudflare Access propagation or R2 permissions. Its
+credential-free runner has no Cloudflare account, so the connector is verified as
+published and Synced from Git, not as edge-connected. Those require separate
+authorization and environment-specific validation. No workstation cluster
 installation or cloud apply is implied by rendering/static checks.
 
 ## Migration and review
@@ -466,7 +618,28 @@ The single entrypoint is `kubernetes/bootstrap.yaml`; its source is
 `kubernetes/bootstrap/`, and the project root reads `kubernetes/projects/`.
 The repository Secret remains `platform-repository`.
 Remove the unused `cluster.storage_class` input; it never affected generated PVCs.
-Retain backend/state when renaming the former `edge` root to `cloudflare`.
+Remove `ingress.mode` from existing `cluster.toml` files: the Cloudflare Tunnel
+connector is baseline, so only `ingress.tunnel_token_file` remains and configs
+that still set a mode are rejected. This is a **normal input migration, applied
+before you render the current revision**, not something the deployment does for
+you:
+
+1. Provision or locate the tunnel token. It is the `tunnel_token` output of the
+   `cloudflare` root, written to a file outside Git.
+2. In the operator's own `cluster.toml`, delete the `mode` line and point
+   `tunnel_token_file` at that file. A config that still carries `mode` is
+   rejected with a message naming that edit, so a stale input cannot silently
+   render a cluster with no connector.
+3. Re-render and review the diff: the only expected additions are the
+   `network/cloudflare-tunnel` Application, its KSOPS Secret source and its
+   `network` namespace destination. Publish and sync as usual.
+
+Nothing rewrites a live input automatically, and the renderer never invents a
+token path: a deployment that has no tunnel token has to supply one before it
+can render.
+
+Retain backend/state when renaming the former
+`edge` root to `cloudflare`.
 
 This is deliberately not a generic cloud module: DOKS keeps one fixed, non-HA
 worker pool whose size and count are its only pool inputs, and Cloudflare does

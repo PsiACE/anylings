@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Contract for the shared-gateway wiring: does the render itself produce the
+# two Secrets and the env that the published DOKS tree contains?
+#
+# Before this check existed the two KSOPS Secrets and the runtime's gateway env
+# were hand edits, so the next `just configure platform` silently dropped them.
+# The check therefore asserts the property that matters — a re-render reproduces
+# them — rather than matching template text.
+#
+# Offline: synthetic files in a scratch directory, the pinned public chart, no
+# cluster, no provider credential, no real key.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+umask 077
+log() { printf '[gateway] %s\n' "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+# shellcheck source=tests/ci/fixture-input.sh
+. tests/ci/fixture-input.sh
+
+age-keygen --output "$scratch/age.key" >/dev/null 2>&1
+# Fixture inputs live beside the copied config so its relative paths resolve;
+# the helper also supplies the synthetic baseline tunnel token.
+mkdir -p "$scratch/input/secret-inputs"
+prepare_platform_input tests/config/gateway.toml "$scratch/input" >/dev/null
+printf '{"providers": [], "groups": [], "order": [], "groupOrder": [], "noAutoGroups": false}\n' \
+  >"$scratch/input/secret-inputs/providers.json"
+printf '[{"id": "synthetic", "name": "fixture", "secret": "sk-magpie-key-synthetic-fixture"}]\n' \
+  >"$scratch/input/secret-inputs/caller-keys.json"
+printf 'sk-magpie-key-synthetic-fixture\n' >"$scratch/input/secret-inputs/magpie-gateway-key"
+
+gateway="$scratch/gateway"
+if ! ANYLINGS_CONFIG="$scratch/input/cluster.toml" ANYLINGS_OUTPUT_DIR="$gateway" \
+  SOPS_AGE_KEY_FILE="$scratch/age.key" just template configure \
+  >"$scratch/render.log" 2>&1; then
+  cat "$scratch/render.log" >&2
+  die "rendering failed for the gateway input"
+fi
+
+root="$gateway/kubernetes/apps"
+for f in gateways/magpie/seed.sops.yaml gateways/magpie/secret-generator.yaml \
+  gateways/magpie/kustomization.yaml agents/bub/secret.sops.yaml \
+  agents/bub/secret-generator.yaml agents/bub/kustomization.yaml; do
+  [ -f "$root/$f" ] || die "the gateway input did not render $f"
+done
+
+# Both Applications must render their kustomize directory, or the Secrets above
+# are published but never applied.
+for app in gateways/magpie agents/bub; do
+  [ "$(jq -r '.manifestPath' "$root/$app/config.json")" = "kubernetes/apps/$app" ] \
+    || die "$app does not set manifestPath, so its Secrets would never be rendered"
+done
+
+# The runtime authenticates with a secretKeyRef; a literal value here would be a
+# committed credential.
+values="$root/agents/bub/values.yaml"
+[ "$(yq '.controllers.["bub"].containers.app.env["BUB_MAGPIE_API_KEY"]
+  .valueFrom.secretKeyRef.key' "$values")" = gateway-key ] \
+  || die "the runtime does not read its gateway key from a secretKeyRef"
+[ "$(yq '.controllers.["bub"].containers.app.env["BUB_MODEL"]' "$values")" = "magpie:group/deepseek-flash" ] \
+  || die "the runtime no longer selects the accepted model group"
+if grep -q 'sk-magpie-key-synthetic-fixture' "$values"; then
+  die "the runtime values contain the gateway key in plaintext"
+fi
+
+# The seed is copied into /config only when absent, so a restart cannot
+# overwrite stores the running gateway has since changed.
+if ! SOPS_AGE_KEY_FILE="$scratch/age.key" \
+  sops --config "$gateway/.sops.yaml" --decrypt \
+    "$root/gateways/magpie/values.sops.yaml" \
+  | grep -q 'if \[ ! -e /config/magpie/\$f \]'; then
+  die "the seed init container would overwrite an existing /config/magpie store"
+fi
+
+# Nothing in the rendered tree may carry the fixture secret in plaintext.
+if grep -rq 'sk-magpie-key-synthetic-fixture' "$gateway/kubernetes"; then
+  die "the rendered tree carries a plaintext gateway key"
+fi
+
+# Defaults must stay inert: the base input publishes neither Secret.
+base="$scratch/base"
+prepare_platform_input tests/config/base.toml "$scratch/base-input" >/dev/null
+if ! ANYLINGS_CONFIG="$scratch/base-input/cluster.toml" ANYLINGS_OUTPUT_DIR="$base" \
+  SOPS_AGE_KEY_FILE="$scratch/age.key" just template configure \
+  >"$scratch/base.log" 2>&1; then
+  cat "$scratch/base.log" >&2
+  die "rendering failed for the default input"
+fi
+for f in gateways/magpie/seed.sops.yaml agents/bub/secret.sops.yaml; do
+  [ ! -e "$base/kubernetes/apps/$f" ] \
+    || die "the default input renders $f without a configured gateway"
+done
+[ "$(jq -r '.manifestPath' "$base/kubernetes/apps/gateways/magpie/config.json")" = "" ] \
+  || die "the default input sets manifestPath without a rendered manifest"
+
+# A gateway key that the gateway itself never learned only yields 401s, so the
+# validator must refuse that half-configured input.
+printf '[repository]\nurl = "git://git.example.test/platform.git"\n[ingress]\ntunnel_token_file = ".local/tunnel.token"\n[agents]\nimage_repository = "registry.example.test/anylings/bub"\ngateway_secret = "k"\n' \
+  >"$scratch/half.toml"
+if ANYLINGS_CONFIG="$scratch/half.toml" just check config >/dev/null 2>&1; then
+  die "the validator accepted agents.gateway_secret without magpie.seed_dir"
+fi
+
+log "a re-render reproduces both gateway Secrets; defaults stay inert"

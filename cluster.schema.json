@@ -10,7 +10,7 @@
           "type": "string"
         },
         "image_tag": {
-          "default": "0.1.8",
+          "default": "bub0.6.1-t3web0.1.8",
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$",
           "title": "Image Tag",
           "type": "string"
@@ -25,6 +25,11 @@
           "default": "",
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "title": "Storage Existing Claim",
+          "type": "string"
+        },
+        "gateway_secret": {
+          "default": "",
+          "title": "Gateway Secret",
           "type": "string"
         }
       },
@@ -54,18 +59,12 @@
     "Ingress": {
       "additionalProperties": false,
       "properties": {
-        "mode": {
-          "default": "none",
-          "enum": ["none", "cloudflare-tunnel"],
-          "title": "Mode",
-          "type": "string"
-        },
         "tunnel_token_file": {
-          "default": "",
           "title": "Tunnel Token File",
           "type": "string"
         }
       },
+      "required": ["tunnel_token_file"],
       "title": "Ingress",
       "type": "object"
     },
@@ -75,6 +74,11 @@
         "config_claim": {
           "default": "",
           "title": "Config Claim",
+          "type": "string"
+        },
+        "seed_dir": {
+          "default": "",
+          "title": "Seed Dir",
           "type": "string"
         }
       },
@@ -148,16 +152,13 @@
       }
     },
     "ingress": {
-      "$ref": "#/$defs/Ingress",
-      "default": {
-        "mode": "none",
-        "tunnel_token_file": ""
-      }
+      "$ref": "#/$defs/Ingress"
     },
     "magpie": {
       "$ref": "#/$defs/Magpie",
       "default": {
-        "config_claim": ""
+        "config_claim": "",
+        "seed_dir": ""
       }
     },
     "observability": {
@@ -184,7 +185,7 @@
       "default": null
     }
   },
-  "required": ["repository"],
+  "required": ["repository", "ingress"],
   "title": "cluster.toml",
   "type": "object"
 }

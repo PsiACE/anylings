@@ -1,0 +1,124 @@
+# Encrypted Helm values for the Magpie workload. This file is the carrier for
+# any application secret; it is encrypted as a whole file (values, not keys)
+# and rendered through the helm-secrets wrapper in the Argo CD repo-server.
+#
+# Image and runtime facts below come from the upstream project (yetone/magpie):
+# the image's own config (user 65532, /magpie entrypoint, `serve` by default,
+# MAGPIE_ADDR 0.0.0.0:3425, volume /config, exposed 3425/3430) and its
+# documented `magpie healthcheck`, which exits 0 only while the gateway answers.
+# Digest is the linux/amd64+arm64 index for the pinned release tag.
+controllers:
+  magpie:
+    # One gateway, one state volume: never run two copies side by side.
+    strategy: Recreate
+    containers:
+      app:
+        image:
+          repository: ghcr.io/yetone/magpie
+          tag: "0.1.3078"
+          digest: "sha256:5ee98578b060c36aad54167a68447375329c6470d7b000e945739910e3f2707a"
+        env:
+          # Non-loopback bind makes every caller that is not the pod itself
+          # remote, and remote callers need an enabled gateway key: an unkeyed
+          # request is refused with 401 rather than served.
+          MAGPIE_ADDR: 0.0.0.0:3425
+          # Upstream's documented opt-out of its daily usage ping. Remove it
+          # only if you deliberately want that telemetry.
+          DO_NOT_TRACK: "1"
+        ports:
+          - name: gateway
+            containerPort: 3425
+            protocol: TCP
+        probes:
+          # Upstream healthcheck: exits 0 while the gateway answers on
+          # MAGPIE_ADDR. It needs no key from inside the container.
+          liveness: &probes
+            enabled: true
+            custom: true
+            spec:
+              exec:
+                command: ["/magpie", "healthcheck"]
+              initialDelaySeconds: 10
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 3
+          readiness: *probes
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            # Placeholder sizing, not an upstream figure: raising it is a
+            # deployment decision, for example when plugins run in the image.
+            memory: 1Gi
+#% if magpie.seed_dir %#
+    initContainers:
+      seed:
+        image:
+          repository: ghcr.io/yetone/magpie
+          tag: "0.1.3078"
+          digest: "sha256:5ee98578b060c36aad54167a68447375329c6470d7b000e945739910e3f2707a"
+        command:
+          - /bin/sh
+          - -ec
+        args:
+          - for f in providers.json caller-keys.json; do if [ ! -e /config/magpie/$f ]; then mkdir -p /config/magpie; cp /seed/$f /config/magpie/$f; chmod 600 /config/magpie/$f; fi; done; chown -R 65532:65532 /config/magpie 2>/dev/null || true
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+#% endif %#
+defaultPodOptions:
+  securityContext:
+    # The image's own nonroot account.
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    # The volumes below are created by the kubelet, so they belong to root
+    # unless fsGroup says otherwise, and Magpie could not write /config.
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+persistence:
+  # Magpie keeps providers, gateway keys and sign-ins under /config. Without
+  # magpie.config_claim this is an emptyDir: writable, but lost on pod
+  # replacement, without inventing a StorageClass this deployment has not
+  # chosen. With a claim name it mounts that existing claim instead.
+  config:
+    #% if magpie.config_claim %#
+    # The claim is owned outside this Application: the chart mounts an
+    # existingClaim and renders no PVC, so Git removal cannot delete its data.
+    type: persistentVolumeClaim
+    existingClaim: #{ magpie.config_claim | tojson }#
+    #% else %#
+    type: emptyDir
+    #% endif %#
+    globalMounts:
+      - path: /config
+  tmp:
+    type: emptyDir
+    globalMounts:
+      - path: /tmp
+#% if magpie.seed_dir %#
+  # Read-only seed input. The init container copies out of it; the app container
+  # never sees it, so no provider file is exposed to the gateway process.
+  seed:
+    type: secret
+    name: magpie-seed
+    defaultMode: 0400
+    advancedMounts:
+      magpie:
+        seed:
+          - path: /seed
+            readOnly: true
+#% endif %#
+service:
+  app:
+    ports:
+      http:
+        port: 3425
+        primary: true

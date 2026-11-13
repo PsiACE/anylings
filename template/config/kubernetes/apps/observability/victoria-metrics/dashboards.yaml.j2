@@ -4,8 +4,8 @@
 # this ConfigMap with the VictoriaMetrics application, and
 # -vmui.customDashboardsPath=/dashboards reads it at page load.
 #
-# Every panel queries a metric this deployment actually ingests: VictoriaMetrics
-# self-scrapes itself, and the same instance scrapes Gatus. None of these are
+# Every panel queries a metric ingested by this slice: VictoriaMetrics, Gatus,
+# the per-node kubelet collectors and kube-state-metrics. None of these are
 # placeholders, and none depend on a sample that only appears under load
 # (error counters are read as rates, which return 0 rather than nothing).
 apiVersion: v1
@@ -19,6 +19,130 @@ metadata:
     # so the pod never starts against a missing dashboard volume.
     argocd.argoproj.io/sync-wave: "-1"
 data:
+  nodes-workloads.json: |
+    {
+      "title": "Nodes and workloads",
+      "rows": [
+        {
+          "title": "Usage and workload state",
+          "panels": [
+            {
+              "title": "Node CPU (cores)",
+              "width": 6,
+              "expr": [
+                "sum by (node) (k8s_node_cpu_usage)"
+              ]
+            },
+            {
+              "title": "Node working set (bytes)",
+              "width": 6,
+              "expr": [
+                "sum by (node) (k8s_node_memory_working_set_bytes)"
+              ]
+            },
+            {
+              "title": "Node filesystem used (bytes)",
+              "width": 6,
+              "expr": [
+                "max by (node) (k8s_node_filesystem_usage_bytes)"
+              ]
+            },
+            {
+              "title": "Pod CPU (cores)",
+              "width": 6,
+              "expr": [
+                "sum by (namespace,pod) (k8s_pod_cpu_usage)"
+              ]
+            },
+            {
+              "title": "Pod working set (bytes)",
+              "width": 6,
+              "expr": [
+                "sum by (namespace,pod) (k8s_pod_memory_working_set_bytes)"
+              ]
+            },
+            {
+              "title": "Container working set (bytes)",
+              "width": 6,
+              "expr": [
+                "sum by (namespace,pod,container) (container_memory_working_set_bytes)"
+              ]
+            },
+            {
+              "title": "Pod working set / requested memory",
+              "width": 6,
+              "expr": [
+                "sum by (namespace,pod) (k8s_pod_memory_working_set_bytes) / on(namespace,pod) sum by (namespace,pod) (kube_pod_container_resource_requests{resource=\"memory\"})"
+              ]
+            },
+            {
+              "title": "Controller working set (bytes)",
+              "width": 6,
+              "expr": [
+                "sum by (namespace,owner_kind,owner_name) (sum by (namespace,pod) (k8s_pod_memory_working_set_bytes) * on(namespace,pod) group_left(owner_kind,owner_name) kube_pod_owner{owner_is_controller=\"true\"})"
+              ]
+            },
+            {
+              "title": "Container restarts (cumulative)",
+              "width": 6,
+              "expr": [
+                "sum by (namespace,pod) (kube_pod_container_status_restarts_total)"
+              ]
+            },
+            {
+              "title": "Last termination was OOM (1=yes)",
+              "width": 6,
+              "expr": [
+                "max by (namespace,pod) (kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"})"
+              ]
+            },
+            {
+              "title": "Unscheduled Pods (1=yes)",
+              "width": 6,
+              "expr": [
+                "max by (namespace,pod) (kube_pod_status_scheduled{condition=\"false\"})"
+              ]
+            },
+            {
+              "title": "Ready Pods (1=yes)",
+              "width": 6,
+              "expr": [
+                "max by (namespace,pod) (kube_pod_status_ready{condition=\"true\"})"
+              ]
+            },
+            {
+              "title": "Deployment unavailable replicas",
+              "width": 6,
+              "expr": [
+                "kube_deployment_spec_replicas - on(namespace,deployment) kube_deployment_status_replicas_available"
+              ]
+            },
+            {
+              "title": "Requested CPU (cores)",
+              "width": 6,
+              "expr": [
+                "sum by (namespace) (kube_pod_container_resource_requests{resource=\"cpu\"})"
+              ]
+            },
+            {
+              "title": "Pod volume available fraction",
+              "width": 6,
+              "expr": [
+                "max by (namespace,pod,volume) (k8s_volume_available_bytes) / max by (namespace,pod,volume) (k8s_volume_capacity_bytes)"
+              ],
+              "description": "Available fraction of each volume; not provisioned disk headroom."
+            },
+            {
+              "title": "Deployment working set (bytes)",
+              "width": 6,
+              "expr": [
+                "sum by (namespace,workload) (sum by (namespace,pod) (k8s_pod_memory_working_set_bytes) * on(namespace,pod) group_left(replicaset) label_replace(kube_pod_owner{owner_kind=\"ReplicaSet\",owner_is_controller=\"true\"}, \"replicaset\", \"$1\", \"owner_name\", \"(.+)\") * on(namespace,replicaset) group_left(workload) label_replace(kube_replicaset_owner{owner_kind=\"Deployment\",owner_is_controller=\"true\"}, \"workload\", \"$1\", \"owner_name\", \"(.+)\"))"
+              ]
+            }
+          ]
+        }
+      ]
+    }
   platform-overview.json: |
     {
       "title": "Platform overview",
@@ -94,6 +218,119 @@ data:
               "width": 6,
               "unit": "MB",
               "expr": ["process_resident_memory_bytes{job=\"victoria-metrics\"} / 1024 / 1024"]
+            }
+          ]
+        }
+      ]
+    }
+  operational-logs.json: |
+    {
+      "title": "Operational logs",
+      "rows": [
+        {
+          "title": "Ingestion path",
+          "panels": [
+            {
+              "title": "Event records accepted (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_receiver_accepted_log_records_total[5m])) by (receiver)"],
+              "alias": ["{{receiver}}"]
+            },
+            {
+              "title": "Log records stored (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_exporter_sent_log_records_total[5m]))"]
+            },
+            {
+              "title": "Exporter failures (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_exporter_send_failed_log_records_total[5m]))"]
+            },
+            {
+              "title": "Store ingest requests (per second)",
+              "width": 6,
+              "expr": ["sum(rate(vl_http_requests_total{path=\"/insert/opentelemetry/v1/logs\"}[5m]))"]
+            }
+          ]
+        },
+        {
+          "title": "Privacy filters",
+          "panels": [
+            {
+              "title": "Records dropped before storage (per second)",
+              "width": 6,
+              "expr": ["sum(rate(otelcol_processor_filter_logs_filtered_total[5m]))"]
+            },
+            {
+              "title": "Dropped share of accepted records",
+              "width": 6,
+              "unit": "percent",
+              "expr": ["100 * sum(rate(otelcol_processor_filter_logs_filtered_total[5m])) / clamp_min(sum(rate(otelcol_receiver_accepted_log_records_total[5m])), 0.001)"]
+            },
+            {
+              "title": "Store data size (MB)",
+              "width": 6,
+              "unit": "MB",
+              "expr": ["sum(vl_data_size_bytes) / 1024 / 1024"]
+            },
+            {
+              "title": "Store free disk (MB)",
+              "width": 6,
+              "unit": "MB",
+              "expr": ["min(vl_free_disk_space_bytes) / 1024 / 1024"]
+            }
+          ]
+        }
+      ]
+    }
+  frontdoor-access.json: |
+    {
+      "title": "Frontdoor access",
+      "rows": [
+        {
+          "title": "Requests through the public frontdoor",
+          "panels": [
+            {
+              "title": "Requests per second",
+              "width": 6,
+              "expr": ["sum(rate(cloudflared_tunnel_total_requests[5m]))"]
+            },
+            {
+              "title": "Responses by status code (per second)",
+              "width": 6,
+              "expr": ["sum(rate(cloudflared_tunnel_response_by_code[5m])) by (status_code)"],
+              "alias": ["{{status_code}}"]
+            },
+            {
+              "title": "Proxy-to-origin errors (per second)",
+              "width": 6,
+              "expr": ["sum(rate(cloudflared_tunnel_request_errors[5m]))"]
+            },
+            {
+              "title": "Error share of proxied requests",
+              "width": 6,
+              "unit": "percent",
+              "expr": ["100 * sum(rate(cloudflared_tunnel_request_errors[5m])) / clamp_min(sum(rate(cloudflared_tunnel_total_requests[5m])), 0.001)"]
+            }
+          ]
+        },
+        {
+          "title": "Tunnel health",
+          "panels": [
+            {
+              "title": "Active HA connections",
+              "width": 6,
+              "expr": ["max(cloudflared_tunnel_ha_connections)"]
+            },
+            {
+              "title": "Concurrent proxied requests",
+              "width": 6,
+              "expr": ["max(cloudflared_tunnel_concurrent_requests_per_tunnel)"]
+            },
+            {
+              "title": "Tunnel scrape up",
+              "width": 6,
+              "expr": ["up{job=\"cloudflare-tunnel\"}"]
             }
           ]
         }

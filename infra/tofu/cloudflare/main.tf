@@ -1,4 +1,5 @@
-# Official Cloudflare resources: protected host routes and optional buckets.
+# Official Cloudflare resources: the tunnel, protected host routes and DNS are
+# baseline capabilities of the platform. R2 buckets are the only optional part.
 #
 # Every route selects an existing zone, either explicitly or through the default
 # zone_name. Each distinct zone is looked up once in the configured account; DNS

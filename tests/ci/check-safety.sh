@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Public fixture entrypoint, with the cluster/privilege boundary stubbed.
+# Public fixture entrypoint, with the cluster/privilege boundary stubbed, plus
+# the offline unit tests for the retained-PV inspection core and its
+# read-only operator preflight. Nothing here reaches a cluster: the CLI tests
+# replace the kubectl process seam, so no kubeconfig or credential is read.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 just_bin="$(command -v just)"
@@ -71,3 +74,9 @@ if ANYLINGS_STORAGE_PATH=/var/lib/k0s/../k0s/volume \
   echo 'storage accepted a protected k0s path' >&2; exit 1
 fi
 printf 'Dotted storage paths accepted; protected-path aliases rejected\n'
+
+# The retained-PV inspection core is pure and its preflight transport is mocked,
+# so this stays offline: synthetic dicts only, no cluster, no kubeconfig.
+uv run --quiet --locked --no-dev python -m unittest \
+  tests.ci.test_retained_pv tests.ci.test_inspect_retained_pv
+printf 'Retained-PV inspection core and read-only preflight tests passed\n'

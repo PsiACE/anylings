@@ -96,12 +96,25 @@ class Plugin(makejinja.plugin.Plugin):
         # A relative tunnel token path is resolved against the config file,
         # which is what the rehearsal and CI pass in.
         ingress = data['ingress']
-        if ingress['mode'] == 'cloudflare-tunnel':
-            ingress['tunnel_token_path'] = str(
-                validate.resolve_relative(self._config_file, ingress['tunnel_token_file'])
+        ingress['tunnel_token_path'] = str(
+            validate.resolve_relative(self._config_file, ingress['tunnel_token_file'])
+        )
+        # Both app secret directories are resolved once, against the config
+        # file, so a relative path in cluster.toml means the same thing during
+        # a render as it did when the operator wrote it.
+        magpie = data['magpie']
+        magpie['seed_dir_path'] = (
+            str(validate.resolve_relative(self._config_file, magpie['seed_dir']))
+            if magpie['seed_dir']
+            else ''
+        )
+        agents = data.get('agents')
+        if agents is not None:
+            agents['gateway_secret_file'] = (
+                str(validate.resolve_relative(self._config_file, agents['gateway_secret']))
+                if agents['gateway_secret']
+                else ''
             )
-        else:
-            ingress['tunnel_token_path'] = ''
         return data
 
     def functions(self) -> makejinja.plugin.Functions:
@@ -113,9 +126,20 @@ class Plugin(makejinja.plugin.Plugin):
 
         def tunnel_token(file_path: str | None = None) -> str:
             """Read the cloudflare tunnel token from its configured file."""
-            path = file_path or self._load()['ingress']['tunnel_token_path']
+            return _read_stripped(file_path or self._load()['ingress']['tunnel_token_path'])
+
+        def seed_file(name: str) -> str:
+            """Read one of Magpie's own stores from magpie.seed_dir."""
+            directory = self._load()['magpie']['seed_dir_path']
+            if not directory:
+                raise ValueError('magpie.seed_dir is not configured')
+            return _read_stripped(Path(directory) / name)
+
+        def gateway_key() -> str:
+            """Read the gateway key from agents.gateway_secret."""
+            path = (self._load().get('agents') or {}).get('gateway_secret_file', '')
             if not path:
-                raise ValueError('ingress.tunnel_token_file is not configured')
+                raise ValueError('agents.gateway_secret is not configured')
             return _read_stripped(path)
 
         return [
@@ -123,6 +147,8 @@ class Plugin(makejinja.plugin.Plugin):
             deploy_key,
             repository_path,
             tunnel_token,
+            seed_file,
+            gateway_key,
         ]
 
     def path_filters(self) -> makejinja.plugin.PathFilters:

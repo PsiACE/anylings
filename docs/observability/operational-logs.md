@@ -203,6 +203,96 @@ That fixture also runs a guard-less control of the same configuration, which
 must leak. If it ever stops leaking, the fixture no longer proves the guards do
 anything and the check fails.
 
+## Frontdoor access aggregates and notification delivery
+
+A sibling slice covers the public frontdoor and the alerting path. It is the same
+store and the same pinned components, no extra backend.
+
+**Frontdoor aggregates** come from the tunnel's own counters, scraped from
+`cloudflare-tunnel.network.svc.cluster.local:8080` as job `cloudflare-tunnel`:
+
+| Metric                                                                    | Meaning                                    |
+| ------------------------------------------------------------------------- | ------------------------------------------ |
+| `cloudflared_tunnel_total_requests`                                       | requests the tunnel proxied                |
+| `cloudflared_tunnel_response_by_code{status_code}`                        | responses by status class, from the origin |
+| `cloudflared_tunnel_request_errors`                                       | proxy-to-origin failures                   |
+| `cloudflared_tunnel_ha_connections`, `..._concurrent_requests_per_tunnel` | tunnel health                              |
+
+These are bounded by construction: cloudflared exports no path, query, client
+address, user agent or body, so an aggregate cannot carry one and there is no
+field to leak them into. The identity labels the pinned tunnel _does_ emit —
+`userHostname`, `connection_id`, `edge_location`, `rpcName` — are dropped by the
+scrape job as deployment identity rather than aggregate dimensions.
+
+**What that drop costs.** Two of the pinned gauges are _identity-only_: every
+series is distinguished solely by the label being removed —
+`cloudflared_tunnel_server_locations` (by `connection_id`, `edge_location`) and
+`cloudflared_tunnel_user_hostnames_counts` (by `userHostname`). Removing the label
+collapses their children into a single series, and the value that survives is an
+**arbitrary child**, not a sum or a max. Measured against the pin: 4 children
+become 1, and 2 become 1. Those residual values are therefore **not valid
+aggregates** and must not be read as totals.
+
+This is acceptable only because **no shipped panel consumes either gauge**: all
+frontdoor panel expressions query the label-free counters and histograms
+(`total_requests`, `response_by_code`, `request_errors`, `ha_connections`,
+`concurrent_requests_per_tunnel`), which carry no labels beyond the scrape target
+the store adds itself — so their values cannot be merged or double-counted by the
+drop. If you ever add a panel over either identity gauge, replace the `labeldrop`
+with a metric-name drop for that gauge (deleting the series) or keep the label
+deliberately; do not read the collapsed child as an aggregate.
+
+The scrape target and the probe URL name the Service the pinned chart actually
+renders for this app: `cloudflare-tunnel.network.svc.cluster.local:8080`, which
+is the release name from the application's `config.json`. The offline check
+derives that host by rendering the chart under that release name and comparing,
+so a wrong host fails instead of matching itself. The **Frontdoor access** dashboard queries only the
+metrics above, and the offline check rejects any panel that names another.
+
+One measured caveat: cosmetically the `--hello-world` flag makes cloudflared run
+its own built-in server and ignore `--url`, so every request answers 200 and the
+status counter never shows a failure. The deployment does not use that flag, and
+the runtime fixture drives a real origin so both `status_code="200"` and
+`status_code="503"` are observed.
+
+**Probes** are Gatus endpoints with fixed, operator-owned URLs. Each declares a
+failure threshold and `send-on-resolved`, so a fault is reported and then
+cleared. The `cloudflare-tunnel` probe targets the tunnel's `/ready` and requires
+`readyConnections > 0`, not merely HTTP 200 — the endpoint answers 200 with a JSON
+body, so a status-only check would pass without a registered connector.
+
+**Notification delivery** is a real HTTP POST, not just a contact-point entry. The
+rendered `alerting.custom` block posts a closed JSON template:
+
+```json
+{
+    "endpoint": "[ENDPOINT_NAME]",
+    "group": "[ENDPOINT_GROUP]",
+    "alert": "[ALERT_DESCRIPTION]",
+    "status": "[ALERT_TRIGGERED_OR_RESOLVED]"
+}
+```
+
+`[ALERT_TRIGGERED_OR_RESOLVED]` is the placeholder this Gatus release actually
+substitutes — it renders `TRIGGERED` or `RESOLVED`. `[ALERT_TYPE]` is **not**
+supported and is emitted literally, which would make the two payloads identical;
+it is rejected by the check. The custom provider must also be _selected_ by each
+endpoint's alert list: configuring `alerting.custom` alone delivers nothing,
+because Gatus routes by the alert's own `type`.
+
+It carries only those four allowlisted substitutions. `[RESULT_ERRORS]`,
+`[RESULT_BODY]` and response headers are deliberately excluded: error strings can
+embed the probed URL, so they stay out of the notification. The URL comes from
+an optional `gatus-webhook` Secret (`GATUS_WEBHOOK_URL`); without it the provider
+is inert and nothing is sent.
+
+The runtime fixture proves trigger **and** resolve delivery against an owned
+loopback receiver, asserts the payload fields, rejects a URL/body/credential in
+the notification, and asserts exactly one delivery per transition (no storm).
+That is local delivery evidence. **Production delivery** to an operator's webhook
+or Telegram chat needs an activated deployment with real credentials, and is not
+claimed here.
+
 ## Known gaps
 
 - Synthetic Event payloads in the fixture are not proof of a live Kubernetes

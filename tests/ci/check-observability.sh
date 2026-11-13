@@ -870,6 +870,250 @@ PYRBAC
   log "event collector: read-only Events, single watcher, allowlist-only body, drop counter wired"
 }
 
+# ------------------------------------------------- frontdoor probes/delivery --
+
+# The frontdoor aggregate comes from the tunnel's own counters, the probes name
+# fixed operator-owned targets, and the notifier body is a closed template.
+check_frontdoor_probe_delivery() {
+  local vm="$scratch/victoria-metrics.yaml" gatus="$scratch/gatus.yaml" args config
+  chart_render "$enabled_out/kubernetes/apps/observability/victoria-metrics" "$vm"
+  chart_render "$enabled_out/kubernetes/apps/observability/gatus" "$gatus"
+
+  # --- the scrape job that produces the aggregate -------------------------
+  yq -r 'select(.kind == "ConfigMap") | .data["scrape.yml"] // ""' "$vm" >"$scratch/scrape-fd.yaml"
+  grep -q 'job_name: cloudflare-tunnel' "$scratch/scrape-fd.yaml" \
+    || die "the metric store does not scrape the frontdoor tunnel"
+  # Derive the intended host from the ACTUAL platform render, not from a string
+  # this check also asserts: the frontdoor app's config.json names the Argo
+  # release, the pinned chart renders a Service of that name, and only then is
+  # the scrape target compared against it. `helm template cf` would have
+  # produced a Service called `cf` and "verified" nothing.
+  local frontdoor_app="$enabled_out/kubernetes/apps/network/cloudflare-tunnel"
+  [ -f "$frontdoor_app/config.json" ] \
+    || die "the frontdoor application was not published"
+  local release namespace chart_version expected_host
+  release="$(jq -r '.appName' "$frontdoor_app/config.json")"
+  namespace="$(jq -r '.namespace' "$frontdoor_app/config.json")"
+  chart_version="$(jq -r '.chartVersion' "$frontdoor_app/config.json")"
+  # The published values are SOPS-encrypted, so they are not readable here.
+  # Render the chart from the PLAINTEXT source template instead -- the same
+  # values, before encryption -- with the release name the ApplicationSet uses.
+  local source_values="$REPO_ROOT/template/config/kubernetes/apps/network/cloudflare-tunnel/values.sops.yaml.j2"
+  [ -f "$source_values" ] || die "the frontdoor values source template is missing"
+  mise exec -- helm template "$release" \
+    "oci://$(jq -r '.chartRepo' "$frontdoor_app/config.json")/$(jq -r '.chart' "$frontdoor_app/config.json")" \
+    --version "$chart_version" --namespace "$namespace" \
+    --values "$source_values" >"$scratch/frontdoor-chart.yaml" 2>"$scratch/frontdoor-chart.log" \
+    || die "could not render the frontdoor chart: $(tail -3 "$scratch/frontdoor-chart.log")"
+  local service port
+  service="$(yq -r 'select(.kind == "Service") | .metadata.name' "$scratch/frontdoor-chart.yaml")"
+  [ -n "$service" ] || die "the frontdoor chart rendered no Service"
+  port="$(yq -r 'select(.kind == "Service") | .spec.ports[0].port' "$scratch/frontdoor-chart.yaml")"
+  [ -n "$port" ] || die "the frontdoor Service exposes no port"
+  # The rendered Service must be the one the release name implies; if the chart
+  # ever renames it, this fails rather than silently matching a stale host.
+  [ "$service" = "$release" ] \
+    || die "the frontdoor Service is $service but the release is $release"
+  expected_host="$service.$namespace.svc.cluster.local:$port"
+
+  yq -e ".scrape_configs[] | select(.job_name == \"cloudflare-tunnel\")
+    | .static_configs[].targets[] | select(. == \"$expected_host\")" \
+    "$scratch/scrape-fd.yaml" >/dev/null \
+    || die "the frontdoor scrape target is not the rendered Service host $expected_host"
+  printf '%s\n' "$expected_host" >"$scratch/frontdoor-host.txt"
+  # The tunnel identity must be dropped. Asserting that *some* labeldrop exists
+  # is vacuous: an unrelated regex satisfies it. The rendered regex is applied
+  # below to a CURATED census of label names, so an ineffective drop fails.
+  #
+  # Provenance of that census, stated precisely: the set below is checked in and
+  # was measured once from `cloudflared 2026.10.7` -- the repository pin in
+  # .mise/config.toml and in the frontdoor values. This block does NOT read the
+  # binary or a live exposition at run time, so it cannot detect a future tunnel
+  # release renaming a label. What it does enforce is the mutation that actually
+  # shipped wrong once: the rendered regex must match the identity names and must
+  # not match the status dimension.
+  uv run --quiet --locked --no-dev python - "$scratch/scrape-fd.yaml" <<'PYLABELS'
+import json
+import re
+import sys
+import yaml
+
+job = next(
+    job for job in yaml.safe_load(open(sys.argv[1]))["scrape_configs"]
+    if job["job_name"] == "cloudflare-tunnel"
+)
+drops = [entry for entry in job.get("metric_relabel_configs", [])
+         if entry.get("action") == "labeldrop"]
+assert len(drops) == 1, drops
+pattern = drops[0]["regex"]
+
+# Labels observed in the pinned binary's own exposition. The first group is
+# identity (must be removed); the second is the status dimension the dashboard
+# needs (must survive) plus the label names a previous, ineffective pattern
+# named -- asserted absent from the real exposition so the census cannot be
+# quietly replaced by that dead list.
+# Measured from the pinned binary's exposition; curated here, not re-measured.
+EMITTED_IDENTITY = {"userHostname", "connection_id", "edge_location", "rpcName"}
+MUST_SURVIVE = {"status_code"}
+NOT_EMITTED = {"connIndex", "ip", "hostname", "tunnel_id"}
+
+rx = re.compile(f"(?:{pattern})")
+for label in EMITTED_IDENTITY:
+    assert rx.fullmatch(label), (
+        f"the rendered labeldrop does not match {label}, which the pinned "
+        f"tunnel emits: {pattern}")
+for label in MUST_SURVIVE:
+    assert not rx.fullmatch(label), (
+        f"the rendered labeldrop would remove {label}, which a dashboard "
+        f"panel needs: {pattern}")
+for label in NOT_EMITTED:
+    assert not rx.fullmatch(label), label
+# A drop that names nothing (or the dead list) proves nothing.
+assert any(rx.fullmatch(label) for label in EMITTED_IDENTITY), pattern
+print(json.dumps({
+    "regex": pattern,
+    "dropped": sorted(EMITTED_IDENTITY),
+    "survives": sorted(MUST_SURVIVE),
+}, sort_keys=True))
+PYLABELS
+  # --- the dashboard only names metrics that scrape can produce -----------
+  local names metric
+  names="$(sed -n 's/^ *- *job_name: *\(.*\)$/\1/p' "$scratch/scrape-fd.yaml")"
+  grep -qx 'cloudflare-tunnel' <<<"$names" \
+    || die "the frontdoor scrape job is not visible to the dashboard check"
+  local queries
+  queries="$(yq -r '.data["frontdoor-access.json"]' \
+    "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    | jq -r '.rows[].panels[].expr[]')"
+  [ -n "$queries" ] || die "the frontdoor dashboard has no queries"
+  for metric in $(grep -oE 'cloudflared_[a-z_]+' <<<"$queries" | sort -u); do
+    case "$metric" in
+      cloudflared_tunnel_total_requests|cloudflared_tunnel_response_by_code|\
+      cloudflared_tunnel_request_errors|cloudflared_tunnel_ha_connections|\
+      cloudflared_tunnel_concurrent_requests_per_tunnel) ;;
+      *) die "the frontdoor dashboard queries $metric, which the tunnel does not export" ;;
+    esac
+  done
+  # The drop collapses the two identity-only gauges to an arbitrary child, so
+  # their residual value is not a valid aggregate. That is only safe while no
+  # panel reads them: this makes the dependency explicit instead of leaving it as
+  # a claim in a comment. If a panel is ever added over either gauge, this fails
+  # and the author must choose between deleting the series and keeping the label.
+  for identity_gauge in cloudflared_tunnel_server_locations \
+                        cloudflared_tunnel_user_hostnames_counts; do
+    if grep -q "$identity_gauge" <<<"$queries"; then
+      die "the frontdoor dashboard reads $identity_gauge, whose children the rendered labeldrop collapses to an arbitrary child; that residue is not a valid aggregate"
+    fi
+  done
+
+  # No path, query or client address may appear in a frontdoor query: the
+  # tunnel exports none, and asserting it here stops one being invented later.
+  if grep -qE '/request|user_agent|client_ip|request_uri|hostname=' <<<"$queries"; then
+    die "the frontdoor dashboard queries a per-request dimension"
+  fi
+
+  # --- probes: fixed targets, real success and failure conditions ---------
+  config="$(yq -r 'select(.kind == "ConfigMap") | .data["config.yaml"] // ""' "$gatus")"
+  [ -n "$config" ] || die "gatus rendered no configuration"
+  printf '%s\n' "$config" >"$scratch/gatus-config.yaml"
+  uv run --quiet --locked --no-dev python - \
+    "$scratch/gatus-config.yaml" "$(cat "$scratch/frontdoor-host.txt")" <<'PYPROBE'
+import sys
+import yaml
+
+config = yaml.safe_load(open(sys.argv[1]))
+frontdoor_host = sys.argv[2]
+
+endpoints = {endpoint["name"]: endpoint for endpoint in config["endpoints"]}
+# A frontdoor probe exists, targets the tunnel metrics Service, and carries a
+# readiness condition rather than only a status check.
+tunnel = endpoints["cloudflare-tunnel"]
+# Compared against the host derived from the platform render and the pinned
+# chart, never against a literal this same file chose.
+assert tunnel["url"] == f"http://{frontdoor_host}/ready", (tunnel["url"], frontdoor_host)
+conditions = " ".join(tunnel["conditions"])
+assert "[STATUS] == 200" in conditions, tunnel
+assert "readyConnections > 0" in conditions, tunnel
+assert tunnel["interval"] == "60s", tunnel
+# Every endpoint is a fixed, operator-owned target; no caller-supplied URL.
+for name, endpoint in endpoints.items():
+    assert endpoint["url"].startswith("http://"), (name, endpoint["url"])
+    assert "${" not in endpoint["url"], (name, endpoint["url"])
+    assert "/" in endpoint["url"].split("://", 1)[1], (name, endpoint["url"])
+# Failing behaviour is real: every endpoint declares a failure path with a
+# bounded threshold and a resolve, so a fault is reported and then cleared.
+for name, endpoint in endpoints.items():
+    assert endpoint.get("alerts"), name
+    for alert in endpoint["alerts"]:
+        assert alert["failure-threshold"] >= 1, (name, alert)
+        assert alert["success-threshold"] >= 1, (name, alert)
+        assert alert["send-on-resolved"] is True, (name, alert)
+
+# Provider selection is what actually routes an alert. Configuring
+# `alerting.custom` and never naming it on an endpoint delivers NOTHING, so
+# every endpoint must select the custom provider explicitly, with the same
+# thresholds and resolve as its telegram sibling.
+for name, endpoint in endpoints.items():
+    types = [alert["type"] for alert in endpoint["alerts"]]
+    assert "custom" in types, (name, types)
+    custom_alert = next(a for a in endpoint["alerts"] if a["type"] == "custom")
+    telegram_alert = next((a for a in endpoint["alerts"] if a["type"] == "telegram"), None)
+    if telegram_alert is not None:
+        for field in ("failure-threshold", "success-threshold", "send-on-resolved",
+                      "description"):
+            assert custom_alert[field] == telegram_alert[field], (name, field)
+# At least one endpoint must select it; the notifier is not decorative.
+assert any(a["type"] == "custom" for e in endpoints.values() for a in e["alerts"])
+
+# --- notification delivery is configured, not merely referenced ----------
+alerting = config["alerting"]
+assert "telegram" in alerting, alerting
+custom = alerting["custom"]
+assert custom["method"] == "POST", custom
+assert custom["url"] == "${GATUS_WEBHOOK_URL}", custom
+assert custom["headers"]["Content-Type"] == "application/json", custom
+body = " ".join(str(custom["body"]).split())
+# Placeholders that this pinned Gatus release actually substitutes. A template
+# naming a placeholder the binary does not know renders it literally, so the
+# trigger and resolve payloads would be byte-identical -- asserting only that
+# the text is present would pass on that defect. The set is checked exactly, and
+# the runtime fixture proves the substituted values differ.
+GATUS_PLACEHOLDERS = {
+    "[ENDPOINT_NAME]", "[ENDPOINT_GROUP]", "[ALERT_DESCRIPTION]",
+    "[ALERT_TRIGGERED_OR_RESOLVED]",
+}
+import re as _re
+used = set(_re.findall(r"\[[A-Z][A-Z_]+\]", body))
+assert used == GATUS_PLACEHOLDERS, (sorted(used), sorted(GATUS_PLACEHOLDERS))
+# Unsupported placeholders observed in this project: [ALERT_TYPE] is emitted
+# literally, and the RESULT_* family can carry the probed URL or body.
+for forbidden in ("[ALERT_TYPE]", "[RESULT_ERRORS]", "[RESULT_BODY]",
+                  "[RESULT_HTTP]", "[RESPONSE_BODY]", "[RESULT_DNS_RCODE]",
+                  "[RESULT_CONDITIONS]", "[ENDPOINT_URL]"):
+    assert forbidden not in body, (forbidden, body)
+# The rendered body must parse as JSON once placeholders are neutralised, so a
+# stray quote or trailing comma cannot turn delivery into a parse failure.
+import json as _json
+_json.loads(body.translate(str.maketrans("", "", "[]")).replace(
+    "ALERT_TRIGGERED_OR_RESOLVED", "x").replace("ENDPOINT_NAME", "x").replace(
+    "ENDPOINT_GROUP", "x").replace("ALERT_DESCRIPTION", "x"))
+# No credential literal is rendered into the config.
+for secret in ("TELEGRAM_BOT_TOKEN", "GATUS_WEBHOOK_URL"):
+    assert f'"{secret}"' not in body, secret
+print("[observability] frontdoor aggregate, probe targets and notification body are closed contracts")
+PYPROBE
+
+  # The optional webhook Secret is referenced, never required, so a cluster
+  # without it still starts and simply sends nothing.
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.containers[].envFrom[]
+    | select(.secretRef.name == "gatus-webhook") | .secretRef.optional == true' \
+    "$gatus" >/dev/null \
+    || die "the webhook Secret reference is required or absent"
+  assert_no_public_exposure "$gatus" "gatus"
+  log "frontdoor aggregates, probe success/failure and webhook delivery configured"
+}
+
 check_default_off
 check_enabled_apps
 check_metric_store
@@ -878,6 +1122,7 @@ check_event_collector
 check_status_dashboards
 check_workload_metrics
 check_wiring
+check_frontdoor_probe_delivery
 if [ "${1:-}" = --runtime ]; then
   : "${OTELCOL_BIN:?set OTELCOL_BIN to the pinned 0.140.1 release binary}"
   : "${VICTORIA_METRICS_BIN:?set VICTORIA_METRICS_BIN to the pinned v1.155.0 release binary}"
@@ -893,6 +1138,37 @@ if [ "${1:-}" = --runtime ]; then
   [ -s "$scratch/rendered-events-collector.yaml" ] \
     || die "the rendered event collector configuration was not captured"
   [ -s "$scratch/log-queries.json" ] || die "the operational log dashboard has no queries"
+  # The frontdoor-access, probe and delivery paths need the same rendered
+  # artifacts plus the pinned Gatus and cloudflared binaries.
+  : "${GATUS_BIN:?set GATUS_BIN to the pinned Gatus v5.38.0 release binary}"
+  yq -r 'select(.kind == "ConfigMap") | .data["config.yaml"] // ""' "$scratch/gatus.yaml" \
+    >"$scratch/gatus-config-rendered.yaml" \
+    || die "could not extract the rendered Gatus configuration"
+  [ -s "$scratch/gatus-config-rendered.yaml" ] \
+    || die "the rendered Gatus configuration is empty"
+  # The fixture requires the rendered image tag AND digest to equal the reviewed
+  # pin, then extracts the binary from that pinned OCI image and requires its
+  # sha256 to equal the binary actually executed. A moved tag, a deleted digest
+  # or a substituted binary therefore fails there -- a caller-supplied checksum
+  # would prove none of that.
+  cp "$enabled_out/kubernetes/apps/observability/gatus/values.yaml" \
+    "$scratch/gatus-values.yaml"
+  # The fixture compares the rendered probe host against the Service the pinned
+  # chart actually renders under the Argo release name, so the runtime check
+  # cannot pass on a self-consistent but wrong host.
+  [ -s "$scratch/frontdoor-host.txt" ] \
+    || die "the derived frontdoor host was not captured"
+  # A scrape config the pinned store can parse strictly, pointing the frontdoor
+  # job at the loopback exposition the fixture runs. Every other job is dropped:
+  # the point is the frontdoor aggregate, not the whole platform.
+  yq '.scrape_configs |= map(select(.job_name == "cloudflare-tunnel"))' \
+    "$scratch/scrape-fd.yaml" >"$scratch/frontdoor-scrape.yml" \
+    || die "could not build the frontdoor scrape config"
+  [ -s "$scratch/frontdoor-scrape.yml" ] \
+    || die "the frontdoor scrape config is empty"
+  yq -r '.data["frontdoor-access.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    | jq '[.rows[].panels[].expr[]]' >"$scratch/frontdoor-queries.json"
+  uv run --quiet --locked --no-dev python tests/ci/frontdoor-probe-delivery-runtime.py "$scratch"
   uv run --quiet --locked --no-dev python tests/ci/observability-runtime.py "$scratch"
   # The same rendered collector configuration, with only loopback endpoints
   # substituted, feeds the actual log store and is then queried.

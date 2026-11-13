@@ -69,6 +69,39 @@ value can reach the store.
 are sent as real OTLP `intValue`, not `doubleValue`, because a double is exactly
 what the guard exists to reject.
 
+## The envelope is not an input
+
+A log record is more than its attributes. An OTLP request also carries an
+instrumentation scope (name, version, attributes), resource and scope schema
+URLs, and each record can carry a caller-supplied severity text, event name,
+trace and span IDs and flags. VictoriaLogs stores every one of those as its own
+field — `scope.name`, `scope.attributes.<key>`, `event_name`, `trace_id`,
+`span_id` — so an attributes allowlist alone does not bound what reaches the
+store.
+
+`transform/purge_envelope` therefore runs **first** in both pipelines and clears
+them:
+
+| Envelope part                        | Handling                                                            |
+| ------------------------------------ | ------------------------------------------------------------------- |
+| resource schema URL                  | cleared                                                             |
+| scope name, version                  | replaced with the fixed `otel-events` / `0`                         |
+| scope attributes                     | removed (`keep_keys(..., [])`)                                      |
+| scope schema URL                     | cleared                                                             |
+| caller severity text                 | cleared, then written from the allowlisted `level`/`event_severity` |
+| event name, trace ID, span ID, flags | cleared                                                             |
+
+The scope name stays present because VictoriaLogs always emits it; its value is
+a repository constant, so it can never echo a sender's string. Trace
+correlation is a separate future requirement — the IDs are cleared rather than
+assumed to be secret-free.
+
+This is why the runtime fixture sends hostile scope metadata, schema URLs and
+per-record severity/event-name/trace values on **every** request: the guard is
+exercised by every case, not by a case that opts in. The fixture also asserts a
+regression control reproduces the original leak, so the check cannot pass
+vacuously.
+
 ## The stored body
 
 Shape appends only the parts that exist, so an absent optional `component` or

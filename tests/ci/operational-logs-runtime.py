@@ -58,6 +58,7 @@ JSON_FUNCTIONS = frozenset({"sum", "rate", "min", "max", "by", "clamp_min", "rec
 # was added deliberately or a nested value was flattened into the record.
 EVENT_KEYS = {
     "_msg", "_stream", "_stream_id", "_time", "severity_number", "severity_text",
+    # Fixed repository values, asserted below to be exactly these.
     "scope.name", "scope.version", "k8s.namespace.name",
     "event_type", "event_severity", "event_reason", "event_count",
     "object_kind", "object_name", "event_namespace",
@@ -203,10 +204,43 @@ def structured_record(reason, level, component=None, count=None, extra=None):
 
 
 def envelope(records, resource):
+    """One OTLP request, always carrying hostile envelope metadata.
+
+    A log record is not just its attributes. The envelope also carries an
+    instrumentation scope (name, version, attributes), resource and scope
+    schema URLs, and each record can carry a caller-supplied severity text,
+    event name, trace/span IDs and flags. VictoriaLogs stores every one of
+    those as its own field, so a hostile value there is exactly as dangerous as
+    one in a record attribute. Sending them on every request means the guard is
+    exercised by every case, not only by a case that opts in.
+
+    The signature stays two-argument on purpose: an external probe wraps this
+    function to substitute its own scope, and must keep working.
+    """
+    scope_logs = {
+        "scope": {
+            "name": f"{HOSTILE}-SCOPE-NAME",
+            "version": f"{HOSTILE}-SCOPE-VERSION",
+            "attributes": [
+                {"key": "prompt", "value": string(f"{HOSTILE}-SCOPE-PROMPT")},
+                {"key": "tool_output", "value": string_map({"k": f"{HOSTILE}-SCOPE-MAP"}).value},
+                {"key": "session_id", "value": string_list([f"{HOSTILE}-SCOPE-ARR"]).value},
+            ],
+        },
+        "schemaUrl": f"{HOSTILE}-SCOPE-SCHEMA",
+        "logRecords": records,
+    }
+    for record in records:
+        record.setdefault("severityText", f"{HOSTILE}-SEVERITY-TEXT")
+        record.setdefault("eventName", f"{HOSTILE}-EVENT-NAME")
+        record.setdefault("traceId", "1" * 32)
+        record.setdefault("spanId", "2" * 16)
+        record.setdefault("flags", 1)
     return {
         "resourceLogs": [{
             "resource": {"attributes": attributes(resource)},
-            "scopeLogs": [{"scope": {"name": "runtime-fixture"}, "logRecords": records}],
+            "schemaUrl": f"{HOSTILE}-RESOURCE-SCHEMA",
+            "scopeLogs": [scope_logs],
         }],
     }
 
@@ -400,11 +434,12 @@ def collector_config(rendered, store_base, ports, with_guards):
         # same config without the type filters and with the old body that
         # concatenated the optional parts unconditionally. It must leak, or
         # this fixture no longer proves the guards do anything.
-        for key in ("filter/events_types", "filter/otlp_types"):
+        for key in ("filter/events_types", "filter/otlp_types", "transform/purge_envelope"):
             relay["processors"].pop(key, None)
         for pipeline in relay["service"]["pipelines"].values():
             pipeline["processors"] = [
-                name for name in pipeline["processors"] if not name.endswith("_types")
+                name for name in pipeline["processors"]
+                if not name.endswith("_types") and name != "transform/purge_envelope"
             ]
         relay["processors"]["transform/otlp_shape"] = {
             "error_mode": "ignore",
@@ -468,8 +503,14 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
 
         records = payloads()
         resource = {"k8s.namespace.name": "agents"}
-        post(f"http://127.0.0.1:{events_port}/v1/logs", envelope(records["events_good"], resource))
-        post(f"http://127.0.0.1:{events_port}/v1/logs", envelope(records["events_hostile"], resource))
+        # Every send carries a hostile instrumentation scope, hostile schema
+        # URLs and caller-controlled severity/event-name/trace metadata. The
+        # records themselves are unchanged, so a passing run still stores
+        # exactly the well-formed ones -- and nothing from the envelope.
+        post(f"http://127.0.0.1:{events_port}/v1/logs", envelope(
+            records["events_good"], resource))
+        post(f"http://127.0.0.1:{events_port}/v1/logs", envelope(
+            records["events_hostile"], resource))
         post(f"http://127.0.0.1:{structured_port}/v1/logs", envelope(
             records["structured_good"],
             {**resource, "service.name": "gateway"},
@@ -571,6 +612,21 @@ def run(scratch):
         "the guard-less control rendered no nil placeholder; the omission check "
         "below would then not be measuring the shape fix"
     )
+    # And it stored caller envelope metadata verbatim: scope, schema, event
+    # name and trace/span identifiers. These were the reported leak.
+    control_keys = {key for record in control_records for key in record}
+    for envelope_key in ("scope.name", "scope.version", "scope.attributes.prompt",
+                         "event_name", "trace_id", "span_id"):
+        assert envelope_key in control_keys, (
+            f"the control did not store {envelope_key}; the envelope negatives "
+            "would then not be measuring the purge stage"
+        )
+    # The control kept the caller's scope name verbatim, which is the reported
+    # leak; the fixed run replaces it with a repository constant.
+    assert any(record.get("scope.name") == f"{HOSTILE}-SCOPE-NAME" for record in control_records)
+    assert f"{HOSTILE}-SCOPE-NAME" in leaked and f"{HOSTILE}-SCOPE-PROMPT" in leaked, (
+        "the control did not store hostile scope values"
+    )
     print(
         "[observability] runtime: regression control without type guards leaks "
         f"{len(control_records)} records and flattened keys {sorted(leaked_keys)}"
@@ -620,8 +676,40 @@ def run(scratch):
         assert "  " not in record["_msg"], record["_msg"]
         assert record["_msg"] == record["_msg"].strip(), record["_msg"]
 
+    # Envelope metadata is caller text that this slice never approved, so it
+    # must be absent from the actual store and query response -- not merely
+    # renamed. Each of these was observed to persist before the purge stage.
+    assert HOSTILE not in fixed["stored"], (
+        "a hostile marker reached the store: "
+        f"{[line for line in fixed['stored'].splitlines() if HOSTILE in line][:1]}"
+    )
+    # Key-level, not substring-level: `event_namespace` is an approved
+    # operational field and contains `event_name` as a substring.
+    stored_keys = {key for record in records for key in record}
+    for envelope_key in ("event_name", "trace_id", "span_id", "schema_url",
+                         "dropped_attributes_count"):
+        assert envelope_key not in stored_keys, envelope_key
+    assert not any(key.startswith(("scope.attributes", "resource.")) for key in stored_keys), (
+        sorted(key for key in stored_keys if key.startswith(("scope.", "resource.")))
+    )
+    assert "11111111111111111111111111111111" not in fixed["stored"], "raw trace id stored"
+    assert "2222222222222222" not in fixed["stored"], "raw span id stored"
+    # The severity text that survives is the one the shape stage wrote from the
+    # allowlisted field, never the caller's string.
+    for record in records:
+        assert record["severity_text"] in {"INFO", "WARN", "ERROR", "DEBUG"}, record["severity_text"]
+    # VictoriaLogs always emits `scope.name`/`scope.version`, so the guarantee is
+    # not that the field is absent but that its value is the fixed one this
+    # repository wrote. A caller's string can therefore never appear there.
+    assert {(record["scope.name"], record["scope.version"]) for record in records} == {
+        ("otel-events", "0")
+    }, sorted({(record["scope.name"], record["scope.version"]) for record in records})
+    # Structured records name their component explicitly; no scope key may be
+    # used as a second, unvalidated channel for it.
+    assert all("scope." not in key or key in {"scope.name", "scope.version"}
+               for record in records for key in record)
+
     # Negatives: no marker, no raw value, no flattened key, no unknown key.
-    assert HOSTILE not in fixed["stored"], "a hostile marker reached the store"
     for forbidden in ("prompt", "authorization", "session_id", "tool_output",
                       "message", "note", "annotations", "metadata"):
         assert all(forbidden not in record for record in records), forbidden

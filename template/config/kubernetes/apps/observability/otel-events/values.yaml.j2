@@ -115,6 +115,41 @@ alternateConfig:
       check_interval: 5s
       limit_mib: 200
       spike_limit_mib: 50
+    # A log record carries far more than its attributes: an instrumentation
+    # scope with a caller-chosen name, version, attributes and schema URL, a
+    # resource schema URL, a caller-supplied severity text, an event name, trace
+    # and span IDs, and flags. VictoriaLogs stores every one of those it
+    # receives, as `scope.name`, `scope.version`, `scope.attributes.<key>`,
+    # `event_name`, `severity_text`, `trace_id` and `span_id` -- so an
+    # allowlist over record attributes alone leaves them wide open. This stage
+    # clears them for BOTH pipelines before anything else reads the record.
+    #
+    # Nothing here is caller text this slice needs: the scope is `unknown` and
+    # the severity is set from the validated `level`/`event_severity` field in
+    # the shape stage. Trace correlation is a separate future requirement, not
+    # something to carry blind, so the IDs are cleared rather than assumed safe.
+    transform/purge_envelope:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            - set(resource.schema_url, "")
+        - context: scope
+          statements:
+            # A fixed value this repository owns, never the caller's string.
+            - set(scope.name, "otel-events")
+            - set(scope.version, "0")
+            - keep_keys(scope.attributes, [])
+            - set(scope.schema_url, "")
+        - context: log
+          statements:
+            - set(log.event_name, "")
+            - set(log.trace_id, TraceID(0x00000000000000000000000000000000))
+            - set(log.span_id, SpanID(0x0000000000000000))
+            - set(log.flags, 0)
+            # The caller's severity text is free text; the shape stage writes
+            # the severity from the allowlisted field immediately after.
+            - set(log.severity_text, "")
     # Kubernetes Events arrive as a body kvlist: {type, object:{...}}. This
     # reads only the fields below out of it. Nothing else survives the record,
     # and the compose step writes a new body from those fields alone.
@@ -275,10 +310,10 @@ alternateConfig:
     pipelines:
       logs/events:
         receivers: [k8sobjects]
-        processors: [memory_limiter, transform/events_extract, filter/events_types, filter/events_allowlist, transform/events_shape]
+        processors: [memory_limiter, transform/purge_envelope, transform/events_extract, filter/events_types, filter/events_allowlist, transform/events_shape]
         exporters: [otlphttp/victoria-logs]
       logs/structured:
         receivers: [otlp]
-        processors: [memory_limiter, transform/otlp_extract, filter/otlp_types, filter/otlp_allowlist, transform/otlp_shape]
+        processors: [memory_limiter, transform/purge_envelope, transform/otlp_extract, filter/otlp_types, filter/otlp_allowlist, transform/otlp_shape]
         exporters: [otlphttp/victoria-logs]
 #% endif %#

@@ -638,11 +638,49 @@ for name, pipeline in pipelines.items():
 # by the type guard can therefore never reach the statement that composes a
 # body from it -- the ordering is the privacy guarantee, not a detail.
 assert pipelines['logs/events']['processors'] == [
-    'memory_limiter', 'transform/events_extract',
+    'memory_limiter', 'transform/purge_envelope', 'transform/events_extract',
     'filter/events_types', 'filter/events_allowlist', 'transform/events_shape'], pipelines
 assert pipelines['logs/structured']['processors'] == [
-    'memory_limiter', 'transform/otlp_extract',
+    'memory_limiter', 'transform/purge_envelope', 'transform/otlp_extract',
     'filter/otlp_types', 'filter/otlp_allowlist', 'transform/otlp_shape'], pipelines
+
+# A log record carries an envelope the attributes allowlist never sees, and the
+# store persists every part of it as its own field. The purge stage must run
+# first in both pipelines and must clear each caller-controlled part; replacing
+# them with a repository constant is fine, forwarding them is not.
+purge = config['processors']['transform/purge_envelope']
+assert purge['error_mode'] == 'ignore', purge
+statements = {
+    (group['context'], statement.split(',')[0].split('(')[1].strip())
+    for group in purge['log_statements'] for statement in group['statements']
+}
+expected_purge = {
+    ('resource', 'resource.schema_url'),
+    ('scope', 'scope.name'),
+    ('scope', 'scope.version'),
+    ('scope', 'scope.attributes'),
+    ('scope', 'scope.schema_url'),
+    ('log', 'log.event_name'),
+    ('log', 'log.trace_id'),
+    ('log', 'log.span_id'),
+    ('log', 'log.flags'),
+    ('log', 'log.severity_text'),
+}
+assert statements == expected_purge, statements ^ expected_purge
+# The scope name/version are the fixed values this repository owns, never a
+# pass-through, and no scope attribute survives.
+fixed_scope = {
+    statement.split(',', 1)[0]: statement.rsplit(',', 1)[1].strip()
+    for group in purge['log_statements'] if group['context'] == 'scope'
+    for statement in group['statements'] if statement.startswith('set(scope.name') or statement.startswith('set(scope.version')
+}
+assert fixed_scope == {
+    'set(scope.name': '"otel-events")',
+    'set(scope.version': '"0")',
+}, fixed_scope
+assert any(statement == 'keep_keys(scope.attributes, [])'
+           for group in purge['log_statements'] if group['context'] == 'scope'
+           for statement in group['statements']), purge
 
 # Integer contract: `event_count` is optional, but a value that is present must
 # already be an integer. A range check alone is not a type check, and under

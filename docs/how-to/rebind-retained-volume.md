@@ -42,16 +42,16 @@ The expected file is JSON, kept private and untracked:
 
 ```json
 {
-  "pv_name": "pvc-00000000-0000-0000-0000-000000000000",
-  "pv_uid": "00000000-0000-0000-0000-000000000000",
-  "csi_driver": "dobs.csi.digitalocean.com",
-  "csi_handle": "00000000-0000-0000-0000-000000000000",
-  "source_namespace": "app",
-  "source_name": "data",
-  "source_uid": "00000000-0000-0000-0000-000000000000",
-  "target_namespace": "app-next",
-  "target_name": "data",
-  "writers": [{"namespace": "app", "name": "release-name"}]
+    "pv_name": "pvc-00000000-0000-0000-0000-000000000000",
+    "pv_uid": "00000000-0000-0000-0000-000000000000",
+    "csi_driver": "dobs.csi.digitalocean.com",
+    "csi_handle": "00000000-0000-0000-0000-000000000000",
+    "source_namespace": "app",
+    "source_name": "data",
+    "source_uid": "00000000-0000-0000-0000-000000000000",
+    "target_namespace": "app-next",
+    "target_name": "data",
+    "writers": [{ "namespace": "app", "name": "release-name" }]
 }
 ```
 

@@ -222,9 +222,25 @@ These are bounded by construction: cloudflared exports no path, query, client
 address, user agent or body, so an aggregate cannot carry one and there is no
 field to leak them into. The identity labels the pinned tunnel _does_ emit —
 `userHostname`, `connection_id`, `edge_location`, `rpcName` — are dropped by the
-scrape job; they are deployment identity rather than aggregate dimensions, and
-the counters and histograms every panel queries carry no labels of their own, so
-removing them cannot change a panel or merge two series.
+scrape job as deployment identity rather than aggregate dimensions.
+
+**What that drop costs.** Two of the pinned gauges are _identity-only_: every
+series is distinguished solely by the label being removed —
+`cloudflared_tunnel_server_locations` (by `connection_id`, `edge_location`) and
+`cloudflared_tunnel_user_hostnames_counts` (by `userHostname`). Removing the label
+collapses their children into a single series, and the value that survives is an
+**arbitrary child**, not a sum or a max. Measured against the pin: 4 children
+become 1, and 2 become 1. Those residual values are therefore **not valid
+aggregates** and must not be read as totals.
+
+This is acceptable only because **no shipped panel consumes either gauge**: all
+frontdoor panel expressions query the label-free counters and histograms
+(`total_requests`, `response_by_code`, `request_errors`, `ha_connections`,
+`concurrent_requests_per_tunnel`), which carry no labels beyond the scrape target
+the store adds itself — so their values cannot be merged or double-counted by the
+drop. If you ever add a panel over either identity gauge, replace the `labeldrop`
+with a metric-name drop for that gauge (deleting the series) or keep the label
+deliberately; do not read the collapsed child as an aggregate.
 
 The scrape target and the probe URL name the Service the pinned chart actually
 renders for this app: `cloudflare-tunnel.network.svc.cluster.local:8080`, which

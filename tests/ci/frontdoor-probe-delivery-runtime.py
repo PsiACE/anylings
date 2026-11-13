@@ -67,6 +67,17 @@ GATUS_PIN = {
 # names an earlier ineffective pattern used and the status dimension a panel
 # needs. Values are synthetic; the label census is measured from
 # `cloudflared 2026.10.7`, not invented.
+# The four identity labels and the metric each one appears on, measured from the
+# pinned binary's own exposition. Both the filtered run and its control are
+# checked against this same map, so a label cannot be "proven absent" by
+# inspecting a metric that never carried it.
+IDENTITY_LABELS = {"userHostname", "connection_id", "edge_location", "rpcName"}
+IDENTITY_METRICS = {
+    "cloudflared_tunnel_server_locations": {"connection_id", "edge_location"},
+    "cloudflared_tunnel_user_hostnames_counts": {"userHostname"},
+    "cloudflared_tunnel_tunnel_register_success": {"rpcName"},
+}
+
 OWNED_IDENTITY_EXPOSITION = """\
 # HELP cloudflared_tunnel_total_requests requests proxied
 # TYPE cloudflared_tunnel_total_requests counter
@@ -88,8 +99,8 @@ cloudflared_tunnel_concurrent_requests_per_tunnel 0
 cloudflared_tunnel_server_locations{connection_id="0",edge_location="nrt09"} 1
 # TYPE cloudflared_tunnel_user_hostnames_counts gauge
 cloudflared_tunnel_user_hostnames_counts{userHostname="https://owned.example.trycloudflare.com"} 1
-# TYPE cloudflared_tunnel_register_success counter
-cloudflared_tunnel_register_success{rpcName="RegisterTunnel"} 1
+# TYPE cloudflared_tunnel_tunnel_register_success counter
+cloudflared_tunnel_tunnel_register_success{rpcName="RegisterTunnel"} 1
 """
 
 FRONTDOOR_METRICS = {
@@ -602,11 +613,18 @@ def run_label_policy(scratch):
             else:
                 raise AssertionError("the labelpolicy store returned no series")
 
-            labels = {name for sample in series for name in sample["metric"]}
-            user_labels = {name for sample in users for name in sample["metric"]}
-            every = labels | user_labels
-            # Real identity labels never reach the store.
-            for gone in ("userHostname", "connection_id", "edge_location", "rpcName"):
+            # Every identity label is checked on the metric that actually
+            # carries it. Scanning only the two gauges would leave `rpcName`
+            # unexamined, which is exactly how the fixture previously passed
+            # while naming the wrong register-success metric.
+            every: set[str] = set()
+            for metric, labels_on_metric in IDENTITY_METRICS.items():
+                samples = query(base, metric)
+                assert samples, (
+                    f"{metric} produced no series, so its identity label "
+                    f"{sorted(labels_on_metric)} cannot be shown absent")
+                every.update(name for sample in samples for name in sample["metric"])
+            for gone in IDENTITY_LABELS:
                 assert gone not in every, (gone, sorted(every))
             # The status dimension a panel needs survives.
             by_code = query(base, "cloudflared_tunnel_response_by_code")
@@ -625,7 +643,9 @@ def run_label_policy(scratch):
             # keeps the identity labels. Without this the assertion above could
             # pass on a store that simply never received them.
             controls = run_label_control(vm_binary, job, exposition, scratch, expo_port)
-            assert controls["leaked"], controls
+            # All four must appear in the control. A partial control would let a
+            # label pass "absent" simply because it was never ingested.
+            assert controls["leaked"] == IDENTITY_LABELS, controls
             (scratch / "label-policy.json").write_text(json.dumps({
                 "regex": drops[0]["regex"],
                 "identities_absent": True,
@@ -670,15 +690,18 @@ def run_label_control(vm_binary, rendered_job, exposition, scratch, expo_port):
         while time.monotonic() < deadline:
             assert store.child.poll() is None, "the control store exited"
             try:
-                for name in ("cloudflared_tunnel_server_locations",
-                             "cloudflared_tunnel_user_hostnames_counts"):
+                # Every metric that carries an identity label must be
+                # represented, so a missing one cannot leave the control partial
+                # (an earlier version scanned only the two gauges and so could
+                # never see `rpcName`, which lives on the register-success
+                # counter).
+                for name in IDENTITY_METRICS:
                     for sample in query(base, name):
                         leaked.update(
                             label for label in sample["metric"]
-                            if label in {"userHostname", "connection_id",
-                                         "edge_location", "rpcName"}
+                            if label in IDENTITY_LABELS
                         )
-                if leaked:
+                if leaked == IDENTITY_LABELS:
                     break
             except (URLError, TimeoutError, ConnectionError):
                 pass

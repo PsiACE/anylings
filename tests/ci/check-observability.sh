@@ -923,10 +923,15 @@ check_frontdoor_probe_delivery() {
   printf '%s\n' "$expected_host" >"$scratch/frontdoor-host.txt"
   # The tunnel identity must be dropped. Asserting that *some* labeldrop exists
   # is vacuous: an unrelated regex satisfies it. The rendered regex is applied
-  # below to the label names the PINNED tunnel actually emits, so an ineffective
-  # drop fails. The label census is recorded here, from
-  # `cloudflared 2026.10.7` -- the repository pin in .mise/config.toml and in the
-  # frontdoor values -- not from an unrelated local build.
+  # below to a CURATED census of label names, so an ineffective drop fails.
+  #
+  # Provenance of that census, stated precisely: the set below is checked in and
+  # was measured once from `cloudflared 2026.10.7` -- the repository pin in
+  # .mise/config.toml and in the frontdoor values. This block does NOT read the
+  # binary or a live exposition at run time, so it cannot detect a future tunnel
+  # release renaming a label. What it does enforce is the mutation that actually
+  # shipped wrong once: the rendered regex must match the identity names and must
+  # not match the status dimension.
   uv run --quiet --locked --no-dev python - "$scratch/scrape-fd.yaml" <<'PYLABELS'
 import json
 import re
@@ -947,6 +952,7 @@ pattern = drops[0]["regex"]
 # needs (must survive) plus the label names a previous, ineffective pattern
 # named -- asserted absent from the real exposition so the census cannot be
 # quietly replaced by that dead list.
+# Measured from the pinned binary's exposition; curated here, not re-measured.
 EMITTED_IDENTITY = {"userHostname", "connection_id", "edge_location", "rpcName"}
 MUST_SURVIVE = {"status_code"}
 NOT_EMITTED = {"connIndex", "ip", "hostname", "tunnel_id"}
@@ -970,12 +976,6 @@ print(json.dumps({
     "survives": sorted(MUST_SURVIVE),
 }, sort_keys=True))
 PYLABELS
-  # Report membership must be exactly the identity set, so a later edit that
-  # adds or drops a label is visible rather than silently accepted.
-  local dropped
-  dropped="$(printf '%s' "userHostname connection_id edge_location rpcName" | tr ' ' '\n' | sort | tr '\n' ' ')"
-  [ -n "$dropped" ] || die "the identity label census is empty"
-
   # --- the dashboard only names metrics that scrape can produce -----------
   local names metric
   names="$(sed -n 's/^ *- *job_name: *\(.*\)$/\1/p' "$scratch/scrape-fd.yaml")"
@@ -994,6 +994,18 @@ PYLABELS
       *) die "the frontdoor dashboard queries $metric, which the tunnel does not export" ;;
     esac
   done
+  # The drop collapses the two identity-only gauges to an arbitrary child, so
+  # their residual value is not a valid aggregate. That is only safe while no
+  # panel reads them: this makes the dependency explicit instead of leaving it as
+  # a claim in a comment. If a panel is ever added over either gauge, this fails
+  # and the author must choose between deleting the series and keeping the label.
+  for identity_gauge in cloudflared_tunnel_server_locations \
+                        cloudflared_tunnel_user_hostnames_counts; do
+    if grep -q "$identity_gauge" <<<"$queries"; then
+      die "the frontdoor dashboard reads $identity_gauge, whose children the rendered labeldrop collapses to an arbitrary child; that residue is not a valid aggregate"
+    fi
+  done
+
   # No path, query or client address may appear in a frontdoor query: the
   # tunnel exports none, and asserting it here stops one being invented later.
   if grep -qE '/request|user_agent|client_ip|request_uri|hostname=' <<<"$queries"; then

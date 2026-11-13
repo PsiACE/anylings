@@ -154,10 +154,19 @@ class Raw:
         self.value = value
 
 
+# The keys an OTLP AnyValue may use. A dict with exactly one of these is an
+# already-encoded value and must be passed through, not treated as a map.
+ANY_VALUE_KEYS = frozenset({
+    "stringValue", "intValue", "doubleValue", "boolValue", "arrayValue", "kvlistValue",
+})
+
+
 def any_of(value):
-    """Encode one Event body field, keeping nested types and ints exact."""
+    """Encode one field, keeping nested types and ints exact."""
     if isinstance(value, Raw):
         return value.value
+    if isinstance(value, dict) and len(value) == 1 and set(value) <= ANY_VALUE_KEYS:
+        return value
     if isinstance(value, dict):
         return {"kvlistValue": {"values": [
             {"key": key, "value": any_of(item)} for key, item in value.items()
@@ -183,23 +192,45 @@ def event_record(event_type, event, extra=None):
     return record
 
 
-def structured_record(reason, level, component=None, count=None, extra=None):
-    """One controlled OTLP record. Its free-text body is never read."""
-    fields = [(key, value) for key, value in (
+def structured_record(reason, level, component=None, count=None, extra=None, prepend=False):
+    """One controlled OTLP record. Its free-text body is never read.
+
+    `extra` may repeat an already-supplied key: that is the point of the
+    duplicate cases. Order matters, because the collector validates the first
+    occurrence of a key while the store ingests every occurrence.
+    """
+    pairs = [(key, value) for key, value in (
         ("reason", reason),
         ("level", level),
         ("component", component),
         ("event_count", count),
     ) if value is not None]
-    record = {
+    if extra:
+        extras = list(extra.items() if isinstance(extra, dict) else extra)
+    else:
+        extras = []
+    attributes_list = extras + pairs if prepend else pairs + extras
+    return {
         "timeUnixNano": str(time.time_ns()),
         "body": string(f"{HOSTILE}-BODY"),
-        "attributes": [{"key": key, "value": any_of(value)} for key, value in fields],
+        "attributes": [{"key": key, "value": any_of(value)} for key, value in attributes_list],
+    }
+
+
+def event_record(event_type, event, extra=None):
+    """One `k8sobjects` log record: body is a kvlist of {type, object}."""
+    record = {
+        "timeUnixNano": str(time.time_ns()),
+        "body": {"kvlistValue": {"values": [
+            {"key": "type", "value": string(event_type)},
+            {"key": "object", "value": any_of(event)},
+        ]}},
     }
     if extra:
-        record["attributes"].extend(
-            {"key": key, "value": any_of(value)} for key, value in extra.items()
-        )
+        pairs = list(extra.items() if isinstance(extra, dict) else extra)
+        record["attributes"] = [
+            {"key": key, "value": any_of(value)} for key, value in pairs
+        ]
     return record
 
 
@@ -396,11 +427,45 @@ def payloads():
         {"timeUnixNano": str(time.time_ns()), "body": string(f"{HOSTILE}-ONLY-BODY")},
     ]
 
+    # Repeated attribute keys. The collector keeps every occurrence,
+    # `attributes[...]` reads the FIRST, and the store ingests ALL of them, so
+    # a record can be validated on one value and stored from another. Both
+    # orders are sent: the checked-then-hostile order and its reverse.
+    duplicated_good = [
+        # Valid first, hostile second: must be stored with the FIRST value.
+        structured_record("dupKept", "WARN", "gateway", int_value(2), extra=[
+            ("reason", string(f"{HOSTILE}-DUP-REASON")),
+            ("level", string(f"{HOSTILE}-DUP-LEVEL")),
+            ("component", string(f"{HOSTILE}-DUP-COMPONENT")),
+            ("event_count", string(f"{HOSTILE}-DUP-COUNT")),
+        ]),
+        # Hostile first, valid second: the first occurrence is what the guard
+        # sees, so this must be dropped, not stored from the second value.
+        structured_record("dupGone", "ERROR", "gateway", int_value(1), extra=[
+            ("reason", string(f"{HOSTILE}-FIRST-REASON")),
+            ("level", string(f"{HOSTILE}-FIRST-LEVEL")),
+        ], prepend=True),
+    ]
+
+    events_duplicated = [
+        # Events re-derive their fields from the body, so an inherited record
+        # attribute must not survive at all, in either order.
+        event_record("ADDED", {
+            "type": "Warning", "reason": "FailedMount", "count": 4, "involvedObject": pod,
+        }, extra=[
+            ("event_severity", string(f"{HOSTILE}-EV-SEVERITY")),
+            ("event_count", string(f"{HOSTILE}-EV-COUNT")),
+            ("event_reason", string(f"{HOSTILE}-EV-REASON")),
+        ]),
+    ]
+
     return {
         "events_good": events_good,
         "events_hostile": events_hostile,
         "structured_good": structured_good,
         "structured_hostile": structured_hostile,
+        "structured_duplicated": duplicated_good,
+        "events_duplicated": events_duplicated,
     }
 
 
@@ -441,6 +506,20 @@ def collector_config(rendered, store_base, ports, with_guards):
                 name for name in pipeline["processors"]
                 if not name.endswith("_types") and name != "transform/purge_envelope"
             ]
+        # The control also reverts the first-occurrence normalisation, so the
+        # duplicate-key leak reproduces there and the assertions below cannot
+        # pass vacuously.
+        for name in ("transform/events_extract", "transform/otlp_extract"):
+            statements = relay["processors"][name]["log_statements"]
+            for group in statements:
+                # Drop every first-occurrence normalisation statement.
+                group["statements"] = [
+                    statement for statement in group["statements"]
+                    if statement != "keep_keys(attributes, [])"
+                    and "__otl_dup_" not in statement
+                    and not statement.startswith(
+                        'keep_keys(attributes, ["reason", "level"')
+                ]
         relay["processors"]["transform/otlp_shape"] = {
             "error_mode": "ignore",
             "log_statements": [{
@@ -519,8 +598,19 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
             records["structured_hostile"],
             {**resource, "service.name": "gateway"},
         ))
+        post(f"http://127.0.0.1:{structured_port}/v1/logs", envelope(
+            records["structured_duplicated"],
+            {**resource, "service.name": "gateway"},
+        ))
+        post(f"http://127.0.0.1:{events_port}/v1/logs", envelope(
+            records["events_duplicated"], resource,
+        ))
 
-        expected = len(records["events_good"]) + len(records["structured_good"])
+        # Both duplicate cases: the valid-first record is stored, the
+        # hostile-first one must be dropped, so it is not part of the positive
+        # expectation but it is part of what the receiver accepted.
+        expected = (len(records["events_good"]) + len(records["structured_good"])
+                    + 2)
         # Wait for a record from *each* pipeline, not just for a total count: a
         # count alone can be satisfied by one pipeline while the other is still
         # in flight, and the control run then misses its nil placeholder.
@@ -543,8 +633,12 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
         "stored": sent,
         "metrics": metrics,
         "store_metrics": store_metrics,
-        "accepted": len(records["events_good"]) + len(records["events_hostile"])
-        + len(records["structured_good"]) + len(records["structured_hostile"]),
+        "accepted": sum(
+            len(records[name]) for name in (
+                "events_good", "events_hostile", "structured_good",
+                "structured_hostile", "structured_duplicated", "events_duplicated",
+            )
+        ),
     }
 
 
@@ -627,6 +721,19 @@ def run(scratch):
     assert f"{HOSTILE}-SCOPE-NAME" in leaked and f"{HOSTILE}-SCOPE-PROMPT" in leaked, (
         "the control did not store hostile scope values"
     )
+    # And it stored the second occurrence of a repeated attribute key, which is
+    # the bypass this run guards. Both pipelines must show it.
+    for duplicate in (f"{HOSTILE}-DUP-COMPONENT", f"{HOSTILE}-DUP-COUNT",
+                      f"{HOSTILE}-DUP-LEVEL"):
+        assert duplicate in leaked, (
+            f"the control did not store {duplicate}; the duplicate-key "
+            "assertions would then not be measuring the normalisation"
+        )
+    control_lines = [
+        line for line in leaked.splitlines() if f"{HOSTILE}-DUP-COMPONENT" in line
+    ]
+    assert control_lines, "no control line carried the duplicated value"
+    assert control_lines[0].count('"component":') >= 1, control_lines[0][:200]
     print(
         "[observability] runtime: regression control without type guards leaks "
         f"{len(control_records)} records and flattened keys {sorted(leaked_keys)}"
@@ -640,15 +747,18 @@ def run(scratch):
     records = [json.loads(line) for line in fixed["stored"].splitlines() if line.strip()]
 
     # Exactly the well-formed records, and no more.
-    assert len(records) == 9, [record["_msg"] for record in records]
+    # Nine baseline positives plus the valid-first duplicate record and the
+    # duplicated Events record; the hostile-first duplicate is rejected.
+    assert len(records) == 11, [record["_msg"] for record in records]
 
     # Reasons are distinct per case, so a collapsed or duplicated record shows.
     events = [record for record in records if "event_type" in record]
     structured = [record for record in records if "reason" in record]
     assert sorted(record["event_reason"] for record in events) == [
-        "BackOff", "Scheduled", "Scheduled", "Unhealthy"], events
+        "BackOff", "FailedMount", "Scheduled", "Scheduled", "Unhealthy"], events
     assert sorted(record["reason"] for record in structured) == [
-        "authFailure", "backlog", "queueDepth", "recovered", "retryBudget"], structured
+        "authFailure", "backlog", "dupKept", "queueDepth", "recovered",
+        "retryBudget"], structured
     events = {record["event_reason"] + "/" + record["event_type"]: record for record in events}
     structured = {record["reason"]: record for record in structured}
 
@@ -685,9 +795,15 @@ def run(scratch):
     )
     # Key-level, not substring-level: `event_namespace` is an approved
     # operational field and contains `event_name` as a substring.
+    #
+    # Only keys the transport demonstrably persists are asserted here. The
+    # store never receives `schema_url`, `flags` or `dropped_attributes_count`
+    # at all -- measured with the purge stage removed -- so asserting their
+    # absence would pass before the fix and prove nothing. They are cleared in
+    # the configuration as defence in depth, but the assertion set below is
+    # restricted to the fields observed to leak unguarded.
     stored_keys = {key for record in records for key in record}
-    for envelope_key in ("event_name", "trace_id", "span_id", "schema_url",
-                         "dropped_attributes_count"):
+    for envelope_key in ("event_name", "trace_id", "span_id"):
         assert envelope_key not in stored_keys, envelope_key
     assert not any(key.startswith(("scope.attributes", "resource.")) for key in stored_keys), (
         sorted(key for key in stored_keys if key.startswith(("scope.", "resource.")))
@@ -721,6 +837,46 @@ def run(scratch):
         for key in ("event_count",):
             if key in record:
                 assert re.fullmatch(r"-?\d+", record[key]), (key, record[key])
+
+    # Duplicate attribute keys. The collector validates the FIRST occurrence
+    # and the store ingests every one, so without an explicit first-occurrence
+    # normalisation a record passes the guard on one value and is stored with
+    # another -- which is exactly what the store text would show as two keys.
+    for record in records:
+        # The parsed JSON dict cannot represent a repeated key, so the check is
+        # on the raw stored line: every stored key appears once.
+        line = next(
+            (candidate for candidate in fixed["stored"].splitlines()
+             if f'"_stream_id"' in candidate
+             and record["_msg"] in candidate
+             and record["_time"] in candidate),
+            None,
+        )
+        assert line is not None, record["_msg"]
+        for key in ("reason", "level", "component", "event_count",
+                    "event_reason", "event_severity", "event_type"):
+            assert line.count(f'"{key}":') <= 1, (key, line[:200])
+
+    kept = next((record for record in records if record.get("reason") == "dupKept"), None)
+    assert kept is not None, "the valid-first duplicate record was not stored"
+    # Stored from the first occurrence of each repeated key, not the second.
+    assert kept["level"] == "WARN", kept
+    assert kept["component"] == "gateway", kept
+    assert kept["event_count"] == "2", kept
+    assert kept["severity_text"] == "WARN", kept
+    # The hostile-first record fails the guard, so it must not be stored at all.
+    assert all(record.get("reason") != "dupGone" for record in records)
+    assert f'{HOSTILE}-FIRST-REASON' not in fixed["stored"], "the second-occurrence value was stored"
+
+    # Events discard inherited record attributes and re-derive from the body,
+    # so neither occurrence of a duplicated record attribute can survive.
+    mounted = next((record for record in records if record.get("event_reason") == "FailedMount"), None)
+    assert mounted is not None, "the duplicated Events record was not stored"
+    assert mounted["event_severity"] == "Warning", mounted
+    assert mounted["event_count"] == "4", mounted
+    assert mounted["severity_text"] == "WARN", mounted
+    for marker in (f"{HOSTILE}-EV-SEVERITY", f"{HOSTILE}-EV-COUNT", f"{HOSTILE}-EV-REASON"):
+        assert marker not in fixed["stored"], marker
 
     # Rejections are counted per filter, so the drop is observable and the
     # guard is demonstrably the component that did the work.

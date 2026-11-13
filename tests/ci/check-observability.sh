@@ -682,6 +682,27 @@ assert any(statement == 'keep_keys(scope.attributes, [])'
            for group in purge['log_statements'] if group['context'] == 'scope'
            for statement in group['statements']), purge
 
+# A repeated attribute key is validated on its first occurrence and stored from
+# every occurrence, so the checked value and the stored value could differ. Both
+# pipelines must normalise to exactly one occurrence before anything reads it,
+# and the Events pipeline must discard inherited record attributes entirely.
+extract = config['processors']['transform/otlp_extract']['log_statements']
+log_statements = next(group['statements'] for group in extract if group['context'] == 'log')
+assert any(statement.startswith('set(attributes["__otl_dup_reason"]') for statement in log_statements), log_statements
+assert any(statement.startswith('keep_keys(attributes, ["__otl_dup_') for statement in log_statements), log_statements
+for key in ('reason', 'level', 'component', 'event_count'):
+    assert any(statement.startswith(f'set(attributes["{key}"], attributes["__otl_dup_') for statement in log_statements), key
+    assert any(statement.startswith(f'delete_key(attributes, "__otl_dup_') for statement in log_statements), key
+# The rebuild must be the only path by which an approved key survives: nothing
+# may re-add the caller's original map wholesale.
+assert not any('set(attributes,' in statement for statement in log_statements), log_statements
+events_extract = config['processors']['transform/events_extract']['log_statements']
+events_log = next(group['statements'] for group in events_extract if group['context'] == 'log')
+assert events_log[0] == 'keep_keys(attributes, [])', events_log[:2]
+assert not any('keep_keys(attributes, ["event_' in statement for statement in events_log), events_log
+resource_statements = next(group['statements'] for group in events_extract if group['context'] == 'resource')
+assert resource_statements == ['keep_keys(attributes, ["k8s.namespace.name"])'], resource_statements
+
 # Integer contract: `event_count` is optional, but a value that is present must
 # already be an integer. A range check alone is not a type check, and under
 # `error_mode: ignore` a type error keeps the record, so this guard is what

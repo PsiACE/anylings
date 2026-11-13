@@ -102,6 +102,29 @@ exercised by every case, not by a case that opts in. The fixture also asserts a
 regression control reproduces the original leak, so the check cannot pass
 vacuously.
 
+## A repeated attribute key is normalised, not trusted
+
+An OTLP log record may list the same attribute key more than once. The collector
+keeps every occurrence; `attributes[...]` reads the **first**; the store ingests
+**all** of them. A record could therefore pass the type and allowlist checks on
+one value and be stored with another — a caller-selectable way to persist
+something the contract never saw.
+
+Both pipelines normalise before anything reads a field:
+
+- **structured** — each approved value is copied aside, the attribute map is
+  rebuilt from those copies only, and the copies are written back. Exactly one
+  occurrence survives, and it is the one the filters inspect.
+- **events** — inherited record attributes are discarded entirely and the
+  operational fields are re-derived from the API object in the record body, so
+  no record attribute can influence the stored event.
+
+The runtime fixture sends both orders (valid-then-hostile and hostile-then-valid)
+for `reason`, `level`, `component` and `event_count`, plus duplicated Events
+record attributes, and asserts: only the first occurrence is stored, the
+hostile-first record is rejected, no stored line contains a repeated key, and the
+guard-less control still stores the second occurrence.
+
 ## The stored body
 
 Shape appends only the parts that exist, so an absent optional `component` or

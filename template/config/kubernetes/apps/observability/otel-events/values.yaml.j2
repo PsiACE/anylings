@@ -147,6 +147,14 @@ alternateConfig:
             - set(log.trace_id, TraceID(0x00000000000000000000000000000000))
             - set(log.span_id, SpanID(0x0000000000000000))
             - set(log.flags, 0)
+            # A repeated attribute key is the other half of this problem. The
+            # collector keeps every occurrence, `attributes[...]` reads the
+            # FIRST one, and the store ingests ALL of them -- so an allowlisted
+            # check and the stored value could disagree, and the store would
+            # receive both. `keep_keys` retains the first occurrence of each
+            # listed key and drops every other occurrence and key, which makes
+            # the validated value and the stored value the same one. It runs
+            # before any other stage reads an attribute.
             # The caller's severity text is free text; the shape stage writes
             # the severity from the allowlisted field immediately after.
             - set(log.severity_text, "")
@@ -158,9 +166,17 @@ alternateConfig:
       log_statements:
         - context: resource
           statements:
+            # First occurrence only, here too: a duplicate resource key would
+            # otherwise be stored twice as well.
             - keep_keys(attributes, ["k8s.namespace.name"])
         - context: log
           statements:
+            # Nothing inherited from the caller's record attributes survives.
+            # The Events fields are re-derived from the API object in the body,
+            # so any attribute already on the record -- including a second
+            # occurrence of `event_severity` or `event_count` -- is discarded
+            # rather than merged with the derived value.
+            - keep_keys(attributes, [])
             - set(attributes["event_type"], body["type"])
             - set(attributes["event_severity"], body["object"]["type"])
             - set(attributes["event_reason"], body["object"]["reason"])
@@ -231,6 +247,26 @@ alternateConfig:
             - keep_keys(attributes, ["k8s.namespace.name", "service.name"])
         - context: log
           statements:
+            # Deterministic first-occurrence normalisation. The collector keeps
+            # every occurrence of a repeated key, `attributes[...]` reads the
+            # FIRST, and the store ingests ALL of them -- so without this a
+            # record could be validated on one value and stored with another.
+            # Each approved value is copied out, the attribute map is rebuilt
+            # from those copies only, so exactly one occurrence survives and it
+            # is the one the filters below inspect.
+            - set(attributes["__otl_dup_reason"], attributes["reason"]) where attributes["reason"] != nil
+            - set(attributes["__otl_dup_level"], attributes["level"]) where attributes["level"] != nil
+            - set(attributes["__otl_dup_component"], attributes["component"]) where attributes["component"] != nil
+            - set(attributes["__otl_dup_count"], attributes["event_count"]) where attributes["event_count"] != nil
+            - keep_keys(attributes, ["__otl_dup_reason", "__otl_dup_level", "__otl_dup_component", "__otl_dup_count"])
+            - set(attributes["reason"], attributes["__otl_dup_reason"]) where attributes["__otl_dup_reason"] != nil
+            - set(attributes["level"], attributes["__otl_dup_level"]) where attributes["__otl_dup_level"] != nil
+            - set(attributes["component"], attributes["__otl_dup_component"]) where attributes["__otl_dup_component"] != nil
+            - set(attributes["event_count"], attributes["__otl_dup_count"]) where attributes["__otl_dup_count"] != nil
+            - delete_key(attributes, "__otl_dup_reason")
+            - delete_key(attributes, "__otl_dup_level")
+            - delete_key(attributes, "__otl_dup_component")
+            - delete_key(attributes, "__otl_dup_count")
             - set(attributes["event_count"], 1) where attributes["event_count"] == nil
     # Same type-first rule as the Events pipeline: nothing is compared or
     # regex-matched until it is proven to be the type that check expects, so

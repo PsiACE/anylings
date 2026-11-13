@@ -71,7 +71,15 @@ def _failure_code(stderr: str) -> str:
     lowered = stderr.lower()
     if "forbidden" in lowered or "unauthorized" in lowered:
         return "api-forbidden"
-    if "timeout" in lowered or "timed out" in lowered or "deadline" in lowered:
+    # The URL's ?timeout=10s is present even when DNS or connection setup fails.
+    if any(text in lowered for text in ("connection refused", "no such host", "no route to host")):
+        return "api-unavailable"
+    timeouts = (
+        "i/o timeout", "timed out", "context deadline exceeded",
+        "client.timeout exceeded", "tls handshake timeout",
+        "timeout awaiting response headers",
+    )
+    if any(text in lowered for text in timeouts):
         return "api-timeout"
     return "api-unavailable"
 

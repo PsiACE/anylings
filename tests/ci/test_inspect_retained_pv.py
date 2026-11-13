@@ -263,6 +263,27 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertEqual(json.loads(out), {"error": "api-timeout"})
 
+    def test_connection_refused_query_timeout_is_not_a_timeout_error(self):
+        fake = FakeKubectl()
+        fake.failure = FakeKubectl.done("", 1, 'Get "https://127.0.0.1:1/api?timeout=10s": dial tcp: connect: connection refused')
+        status, out, _ = self.run_cli(fake)
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(out), {"error": "api-unavailable"})
+
+    def test_unresolvable_host_query_timeout_is_not_a_timeout_error(self):
+        fake = FakeKubectl()
+        fake.failure = FakeKubectl.done("", 1, 'Get "https://api.invalid.example/api?timeout=10s": lookup api.invalid.example: no such host')
+        status, out, _ = self.run_cli(fake)
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(out), {"error": "api-unavailable"})
+
+    def test_actual_io_timeout_remains_a_timeout_error(self):
+        fake = FakeKubectl()
+        fake.failure = FakeKubectl.done("", 1, 'Get "https://api.invalid.example/api?timeout=10s": dial tcp: i/o timeout')
+        status, out, _ = self.run_cli(fake)
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(out), {"error": "api-timeout"})
+
     def test_subprocess_timeout_is_a_transport_error(self):
         def explode(_arguments):
             raise subprocess.TimeoutExpired("kubectl", cli.PROCESS_TIMEOUT)

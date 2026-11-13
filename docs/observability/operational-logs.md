@@ -220,7 +220,13 @@ store and the same pinned components, no extra backend.
 
 These are bounded by construction: cloudflared exports no path, query, client
 address, user agent or body, so an aggregate cannot carry one and there is no
-field to leak them into. The **Frontdoor access** dashboard queries only the
+field to leak them into.
+
+The scrape target and the probe URL name the Service the pinned chart actually
+renders for this app: `cloudflare-tunnel.network.svc.cluster.local:8080`, which
+is the release name from the application's `config.json`. The offline check
+derives that host by rendering the chart under that release name and comparing,
+so a wrong host fails instead of matching itself. The **Frontdoor access** dashboard queries only the
 metrics above, and the offline check rejects any panel that names another.
 
 One measured caveat: cosmetically the `--hello-world` flag makes cloudflared run
@@ -246,6 +252,13 @@ rendered `alerting.custom` block posts a closed JSON template:
     "status": "[ALERT_TYPE]"
 }
 ```
+
+`[ALERT_TRIGGERED_OR_RESOLVED]` is the placeholder this Gatus release actually
+substitutes — it renders `TRIGGERED` or `RESOLVED`. `[ALERT_TYPE]` is **not**
+supported and is emitted literally, which would make the two payloads identical;
+it is rejected by the check. The custom provider must also be _selected_ by each
+endpoint's alert list: configuring `alerting.custom` alone delivers nothing,
+because Gatus routes by the alert's own `type`.
 
 It carries only those four allowlisted substitutions. `[RESULT_ERRORS]`,
 `[RESULT_BODY]` and response headers are deliberately excluded: error strings can

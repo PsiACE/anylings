@@ -125,9 +125,14 @@ configMaps:
             # transition. Deliberately not [RESULT_ERRORS] or [RESULT_BODY]:
             # error strings can embed the probed URL, so they stay out of the
             # notification.
+            #
+            # `[ALERT_TYPE]` does not exist in this Gatus release: it is emitted
+            # as that literal string, so trigger and resolve would be identical.
+            # `[ALERT_TRIGGERED_OR_RESOLVED]` is the real placeholder and
+            # renders `TRIGGERED` or `RESOLVED`.
             body: >-
               {"endpoint":"[ENDPOINT_NAME]","group":"[ENDPOINT_GROUP]",
-              "alert":"[ALERT_DESCRIPTION]","status":"[ALERT_TYPE]"}
+              "alert":"[ALERT_DESCRIPTION]","status":"[ALERT_TRIGGERED_OR_RESOLVED]"}
         endpoints:
           # One probe per platform dependency, each a real request or
           # connection. The gateway is expected to refuse an unkeyed remote
@@ -144,6 +149,18 @@ configMaps:
                 failure-threshold: 3
                 success-threshold: 2
                 send-on-resolved: true
+              # The same condition over the webhook provider. Gatus routes by
+              # the alert's own `type`, so a provider that no alert selects is
+              # never used -- configuring `alerting.custom` alone delivers
+              # nothing. Both providers carry identical thresholds and a
+              # resolve, and `gatus-webhook` stays optional: with no URL the
+              # custom alert is declared but inert, while Telegram still works
+              # if the operator supplied its Secret.
+              - type: custom
+                description: "magpie gateway did not refuse an unkeyed remote caller"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
           - name: argocd-server
             group: platform
             url: "http://argocd-server.#{ argocd.namespace }#.svc.cluster.local:80/healthz"
@@ -156,12 +173,17 @@ configMaps:
                 failure-threshold: 3
                 success-threshold: 2
                 send-on-resolved: true
+              - type: custom
+                description: "argocd-server health endpoint is failing"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
           - name: cloudflare-tunnel
             group: frontdoor
             # The tunnel's own metrics listener. It answers on /ready only when
             # the connector is registered; a refused connection or a non-200 is
             # a real frontdoor fault, not a probe artefact.
-            url: "http://cf.network.svc.cluster.local:8080/ready"
+            url: "http://cloudflare-tunnel.network.svc.cluster.local:8080/ready"
             interval: 60s
             conditions:
               - "[STATUS] == 200"
@@ -174,6 +196,11 @@ configMaps:
                 failure-threshold: 3
                 success-threshold: 2
                 send-on-resolved: true
+              - type: custom
+                description: "the public frontdoor tunnel is not ready"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
           - name: victoria-metrics
             group: platform
             url: "http://victoria-metrics.observability.svc.cluster.local:8428/health"
@@ -182,6 +209,11 @@ configMaps:
               - "[STATUS] == 200"
             alerts:
               - type: telegram
+                description: "the metric store is not answering its own health check"
+                failure-threshold: 3
+                success-threshold: 2
+                send-on-resolved: true
+              - type: custom
                 description: "the metric store is not answering its own health check"
                 failure-threshold: 3
                 success-threshold: 2

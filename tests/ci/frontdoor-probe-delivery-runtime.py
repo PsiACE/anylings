@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import yaml
@@ -325,14 +326,19 @@ def run_probe_and_delivery(gatus_bin, rendered_config, scratch):
             "url": f"http://127.0.0.1:{origin.port}/health",
             "interval": "1s",
             "conditions": ["[STATUS] == 200"],
-            # The rendered probes alert over Telegram, which needs operator
-            # credentials. The fixture retargets the same alert at the `custom`
-            # webhook so delivery can be observed locally. Only `type` and the
-            # thresholds change; the description, which is what the payload
-            # carries, is the rendered one.
+            # The alert LIST is the rendered one, untouched: the shipped
+            # endpoints already select the `custom` provider, so the fixture
+            # exercises that selection instead of rewriting `type`. Rewriting it
+            # would prove only that an altered config delivers -- the defect was
+            # that no rendered endpoint selected the provider at all.
+            #
+            # The only substitutions are the ones a local, credential-free run
+            # needs: the probe belongs to the owned origin, and the thresholds
+            # are shortened so trigger and resolve both happen inside one
+            # bounded call. Both are documented and both are still > 0 with a
+            # resolve, which is the behaviour under test.
             "alerts": [
-                {**alert, "type": "custom",
-                 "failure-threshold": 1, "success-threshold": 2}
+                {**alert, "failure-threshold": 1, "success-threshold": 2}
                 for alert in template["alerts"]
             ],
         }]
@@ -383,9 +389,21 @@ def run_probe_and_delivery(gatus_bin, rendered_config, scratch):
             assert resolve["method"] == "POST", resolve
             resolved_payload = json.loads(resolve["body"])
             assert resolved_payload["endpoint"] == "owned-origin", resolved_payload
-            # Gatus reports the resolve as the same description; the transition
-            # is distinguished by ordering and by the log, which is why the log
-            # is asserted too rather than inferring from the body.
+
+            # The transition must be carried by the PAYLOAD, not inferred from
+            # ordering or the log. `[ALERT_TRIGGERED_OR_RESOLVED]` is the
+            # placeholder this release substitutes; `[ALERT_TYPE]` is emitted
+            # literally and would make the two payloads identical.
+            trigger_status = payload["status"]
+            resolve_status = resolved_payload["status"]
+            assert trigger_status == "TRIGGERED", payload
+            assert resolve_status == "RESOLVED", resolved_payload
+            assert trigger_status != resolve_status, (payload, resolved_payload)
+            # Exactly four keys, and no placeholder survived substitution.
+            assert set(payload) == {"endpoint", "group", "alert", "status"}, payload
+            for value in [*payload.values(), *resolved_payload.values()]:
+                assert "[" not in str(value) or "]" not in str(value), value
+                assert "ALERT_" not in str(value), value
             text = log.read_text()
             assert "handleAlertsToTrigger" in text, text[-800:]
             assert "handleAlertsToResolve" in text, text[-800:]
@@ -396,6 +414,177 @@ def run_probe_and_delivery(gatus_bin, rendered_config, scratch):
                     "probes": origin.requests}
         finally:
             owned.stop()
+
+
+def run_dashboard_queries(scratch):
+    """Scrape a real tunnel into a real VictoriaMetrics and run the dashboard.
+
+    The exposition is the tunnel's own; the store is the pinned
+    `victoria-metrics` binary; the expressions are the ones the Frontdoor access
+    dashboard ships. Nothing is rewritten between those three.
+    """
+    vm_binary = os.environ["VICTORIA_METRICS_BIN"]
+    queries_path = scratch / "frontdoor-queries.json"
+    assert queries_path.is_file(), "the frontdoor dashboard queries were not captured"
+    queries = json.loads(queries_path.read_text())
+    assert queries, "the frontdoor dashboard has no queries"
+
+    vm_port, metrics_port = free_port(), free_port()
+    # Only the target address is substituted: a host cannot resolve the cluster
+    # Service. The rendered job, its relabeling and its sample_limit are passed
+    # through unchanged and parsed strictly, so this cannot hide an unsupported
+    # field in the shipped configuration.
+    scrape_config = yaml.safe_load((scratch / "frontdoor-scrape.yml").read_text())
+    jobs = scrape_config["scrape_configs"]
+    assert len(jobs) == 1 and jobs[0]["job_name"] == "cloudflare-tunnel", jobs
+    render_limit = jobs[0].get("sample_limit")
+    assert render_limit, "the rendered frontdoor job has no sample_limit"
+    jobs[0]["static_configs"] = [{"targets": [f"127.0.0.1:{metrics_port}"]}]
+    # A short interval so a bounded run sees several scrapes.
+    scrape_config["global"] = {"scrape_interval": "1s", "scrape_timeout": "1s"}
+    compiled = scratch / "frontdoor-scrape-runtime.yml"
+    compiled.write_text(yaml.safe_dump(scrape_config, sort_keys=False))
+    origin = FlappingOrigin()
+    with origin:
+        tunnel = Owned(
+            [
+                os.environ.get("CLOUDFLARED_BIN") or shutil.which("cloudflared"),
+                "tunnel", "--metrics", f"127.0.0.1:{metrics_port}",
+                "--url", f"http://127.0.0.1:{origin.port}",
+            ],
+            scratch / "cloudflared-dashboard.log",
+        )
+        data = scratch / "vm-frontdoor"
+        shutil.rmtree(data, ignore_errors=True)
+        store = Owned(
+            [
+                vm_binary,
+                f"-httpListenAddr=127.0.0.1:{vm_port}",
+                f"-storageDataPath={data}",
+                f"-promscrape.config={compiled}",
+                "-promscrape.config.strictParse",
+                "-search.latencyOffset=0s",
+                "-search.disableCache",
+            ],
+            scratch / "vm-frontdoor.log",
+        )
+        try:
+            wait_http(f"http://127.0.0.1:{metrics_port}/ready", [tunnel], timeout=60)
+            public = re.search(
+                r"https://[a-z0-9-]+\.trycloudflare\.com",
+                (scratch / "cloudflared-dashboard.log").read_text(),
+            )
+            assert public, "the tunnel did not publish a hostname"
+            time.sleep(5)
+            # Drive alternating statuses until both classes have actually been
+            # served. A public quick tunnel is a real network path and can drop
+            # a request; the assertion is that BOTH classes reach the store, not
+            # that this particular network delivered exactly four.
+            statuses = []
+            for attempt in range(12):
+                origin.state = "ok" if len(statuses) % 2 == 0 else "fail"
+                want = 200 if origin.state == "ok" else 503
+                if want in statuses:
+                    origin.state = "fail" if 503 not in statuses else "ok"
+                    want = 200 if origin.state == "ok" else 503
+                    if want in statuses:
+                        break
+                for _ in range(6):
+                    try:
+                        with urlopen(
+                            f"{public.group(0)}/dash-{attempt}", timeout=25
+                        ) as response:
+                            if response.status not in statuses:
+                                statuses.append(response.status)
+                        break
+                    except HTTPError as error:
+                        if error.code in (200, 429, 500, 502, 503, 504):
+                            if error.code not in statuses:
+                                statuses.append(error.code)
+                            break
+                    except (URLError, TimeoutError, ConnectionError):
+                        pass
+                    time.sleep(3)
+                if {200, 503} <= set(statuses):
+                    break
+            origin.state = "ok"
+            assert {200, 503} <= set(statuses), statuses
+
+            wait_http(f"http://127.0.0.1:{vm_port}/health", [store], timeout=60)
+            base = f"http://127.0.0.1:{vm_port}"
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                for item in (tunnel, store):
+                    assert item.child.poll() is None, f"{item.name} exited"
+                try:
+                    got = {
+                        expression: query(base, expression)
+                        for expression in queries
+                    }
+                    if all(got.values()) and any(
+                        "503" in json.dumps(samples) for samples in got.values()
+                    ):
+                        break
+                except (URLError, TimeoutError, ConnectionError):
+                    pass
+                time.sleep(1)
+            else:
+                raise AssertionError(
+                    f"the frontdoor dashboard queries did not return data: {got if 'got' in locals() else 'store unavailable'}"
+                )
+            # Both status classes are visible through the dashboard's own
+            # expression, which is what an operator sees.
+            by_code_expression = next(
+                expression for expression in queries if "response_by_code" in expression
+            )
+            codes = {sample["metric"].get("status_code") for sample in got[by_code_expression]}
+            assert codes >= {"200", "503"}, codes
+            total_expression = next(
+                expression for expression in queries
+                if "total_requests" in expression and "rate" in expression
+            )
+            assert got[total_expression], got[total_expression]
+            # Privacy through the whole path: no query returns a raw path,
+            # query string, client address, user agent or header value.
+            #
+            # The scraped `instance` label is the fixture's own loopback target,
+            # so it is excluded from the scan: it is test plumbing, not a value
+            # the store derived from the request. Everything else -- metric
+            # names and values -- must be free of per-request data.
+            observable = {
+                expression: [
+                    {
+                        "metric": {
+                            key: value for key, value in sample["metric"].items()
+                            if key != "instance"
+                        },
+                        "value": sample["value"],
+                    }
+                    for sample in samples
+                ]
+                for expression, samples in got.items()
+            }
+            encoded = json.dumps(observable)
+            for forbidden in ("/dash-", "trycloudflare.com", "127.0.0.1", "User-Agent"):
+                assert forbidden not in encoded, (forbidden, encoded[:400])
+            return {
+                "queries": len(queries),
+                "nonempty": sum(1 for samples in got.values() if samples),
+                "status_codes": sorted(codes),
+                "statuses": statuses,
+            }
+        finally:
+            store.stop()
+            tunnel.stop()
+
+
+def query(base, expression):
+    with urlopen(
+        f"{base}/api/v1/query?" + urlencode({"query": expression}), timeout=5
+    ) as response:
+        payload = json.load(response)
+    assert payload["status"] == "success", payload
+    return payload["data"]["result"]
 
 
 def run(scratch):
@@ -423,14 +612,28 @@ def run(scratch):
     assert custom["method"] == "POST", custom
     assert custom["url"] == "${GATUS_WEBHOOK_URL}", custom
     body = " ".join(str(custom["body"]).split())
-    for placeholder in ("[ENDPOINT_NAME]", "[ENDPOINT_GROUP]", "[ALERT_DESCRIPTION]",
-                        "[ALERT_TYPE]"):
-        assert placeholder in body, (placeholder, body)
-    for forbidden in ("[RESULT_ERRORS]", "[RESULT_BODY]", "[RESULT_HTTP]", "[RESPONSE_BODY]"):
+    # Placeholders this release actually substitutes. `[ALERT_TYPE]` is NOT one
+    # of them: the binary emits it literally, so a template using it delivers the
+    # same string on trigger and resolve. Its absence is asserted below, and the
+    # delivered values are checked after the real POST.
+    used = set(re.findall(r"\[[A-Z][A-Z_]+\]", body))
+    assert used == {"[ENDPOINT_NAME]", "[ENDPOINT_GROUP]", "[ALERT_DESCRIPTION]",
+                    "[ALERT_TRIGGERED_OR_RESOLVED]"}, sorted(used)
+    for forbidden in ("[ALERT_TYPE]", "[RESULT_ERRORS]", "[RESULT_BODY]",
+                      "[RESULT_HTTP]", "[RESPONSE_BODY]", "[ENDPOINT_URL]"):
         assert forbidden not in body, (forbidden, body)
     endpoints = {endpoint["name"]: endpoint for endpoint in config["endpoints"]}
+    # The provider must be selected by a rendered endpoint, not merely
+    # configured. The deliverable defect was that every alert was `telegram`.
+    for name, endpoint in endpoints.items():
+        selected = {alert["type"] for alert in endpoint["alerts"]}
+        assert "custom" in selected, (name, selected)
     frontdoor_probe = endpoints["cloudflare-tunnel"]
-    assert frontdoor_probe["url"].startswith("http://cf.network.svc.cluster.local:"), frontdoor_probe
+    # Derived by the offline check from the platform render plus the pinned
+    # chart, never a literal chosen here.
+    derived_host = (scratch / "frontdoor-host.txt").read_text().strip()
+    assert frontdoor_probe["url"] == f"http://{derived_host}/ready", (
+        frontdoor_probe["url"], derived_host)
     # A fixed, operator-owned target list: no probe URL is caller-supplied.
     for endpoint in config["endpoints"]:
         assert "${" not in endpoint["url"], (endpoint["name"], endpoint["url"])
@@ -438,6 +641,10 @@ def run(scratch):
     results = {}
     with FlappingOrigin() as origin:
         results["frontdoor"] = run_frontdoor(cloudflared, origin, scratch)
+    # The dashboard's own expressions must return data from the real store. The
+    # direct exposition read above is necessary but not sufficient: it proves
+    # the counters exist, not that the query the operator sees resolves to them.
+    results["dashboard"] = run_dashboard_queries(scratch)
     results["delivery"] = run_probe_and_delivery(gatus_bin, text, scratch)
 
     (scratch / "frontdoor-probe-delivery.json").write_text(json.dumps(results, indent=2))

@@ -150,7 +150,7 @@ server:
           # leak them into. `request_errors` counts proxy-to-origin failures,
           # which is the closest thing to a 5xx-class signal on this path.
           static_configs:
-            - targets: [cf.network.svc.cluster.local:8080]
+            - targets: [cloudflare-tunnel.network.svc.cluster.local:8080]
           sample_limit: 2000
           metric_relabel_configs:
             # The tunnel identity labels are high-cardinality deployment

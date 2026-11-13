@@ -92,8 +92,9 @@ seed_dir = ""
 #    publishes six ClusterIP-only applications into the `observability`
 #    namespace: VictoriaMetrics (7d retention target), Gatus (probe status),
 #    per-node OTel kubelet collectors, kube-state-metrics (workload state),
-#    VictoriaLogs (3d operational log store) and one event collector that
-#    watches read-only Kubernetes Events plus structured OTLP records.
+#    VictoriaLogs (3d operational log store), one event collector that
+#    watches read-only Kubernetes Events plus structured OTLP records, and
+#    VictoriaTraces (7d request-trace store fed over OTLP).
 #    No Grafana, Loki, operator or database is deployed, no node/host log tail
 #    is collected, and no PersistentVolumeClaim is provisioned automatically.
 # =============================================================================

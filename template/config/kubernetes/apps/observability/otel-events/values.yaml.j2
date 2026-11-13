@@ -107,6 +107,9 @@ alternateConfig:
         - name: events
           mode: watch
     otlp:
+      # One receiver serves both signals. Logs go to VictoriaLogs, traces to
+      # VictoriaTraces; nothing about a span is written into the log store and
+      # no log record is turned into a fake span.
       protocols:
         http:
           endpoint: ${env:MY_POD_IP}:4318
@@ -339,7 +342,50 @@ alternateConfig:
             - set(log.severity_text, "DEBUG") where attributes["level"] == "DEBUG"
             - set(log.severity_number, SEVERITY_NUMBER_DEBUG) where attributes["level"] == "DEBUG"
             - keep_keys(attributes, ["event_count", "reason", "level", "component"])
+    # A span carries two attribute maps and a name that are all
+    # caller-controlled. The allowlist below keeps only fields that describe the
+    # operation; anything else is dropped rather than sanitized, so a header, a
+    # token, a session id or a prompt cannot ride in on a span attribute.
+    filter/traces_attributes:
+      error_mode: ignore
+      traces:
+        # Drop a span whose operation name is not a plain, bounded identifier.
+        # The name is the one caller-controlled string that survives to the
+        # store, so a free-text or oversized name is rejected whole.
+        span:
+          - 'name == nil or not IsString(name) or not IsMatch(name, "^[A-Za-z][A-Za-z0-9 ./_:-]{0,119}$")'
+    # Rebuild both maps from the allowlisted keys only, so the record contains
+    # exactly what is named here -- the same drop-then-rebuild discipline the log
+    # pipelines use.
+    transform/traces_shape:
+      error_mode: ignore
+      trace_statements:
+        - context: resource
+          statements:
+            - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
+        - context: span
+          statements:
+            - set(attributes["http.request.method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil
+            - set(attributes["http.response.status_code"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil
+            - set(attributes["http.route"], attributes["http.route"]) where attributes["http.route"] != nil
+            - set(attributes["rpc.method"], attributes["rpc.method"]) where attributes["rpc.method"] != nil
+            - set(attributes["error.type"], attributes["error.type"]) where attributes["error.type"] != nil
+            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
   exporters:
+    otlphttp/victoria-traces:
+      # OTLP/HTTP to VictoriaTraces' native ingest path. Separate from the log
+      # exporter so a trace never lands in the log store and vice versa.
+      traces_endpoint: http://victoria-traces.observability.svc.cluster.local:10428/insert/opentelemetry/v1/traces
+      timeout: 5s
+      sending_queue:
+        enabled: true
+        queue_size: 256
+        num_consumers: 2
+      retry_on_failure:
+        enabled: true
+        initial_interval: 1s
+        max_interval: 5s
+        max_elapsed_time: 30s
     otlphttp/victoria-logs:
       # OTLP/HTTP to VictoriaLogs' native ingest path: no extra agent, gateway
       # or protocol translation process.
@@ -378,4 +424,12 @@ alternateConfig:
         receivers: [otlp]
         processors: [memory_limiter, transform/purge_envelope, transform/otlp_extract, filter/otlp_types, filter/otlp_allowlist, transform/otlp_shape]
         exporters: [otlphttp/victoria-logs]
+      # Request traces. The span contract is narrow on purpose: only the span's
+      # own timing, identity and status are trusted, plus an allowlisted set of
+      # attributes. Nothing that looks like a credential, header, session or
+      # prompt survives.
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, filter/traces_attributes, transform/traces_shape]
+        exporters: [otlphttp/victoria-traces]
 #% endif %#

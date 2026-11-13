@@ -140,6 +140,24 @@ alternateConfig:
             - set(attributes["event_namespace"], body["object"]["involvedObject"]["namespace"])
             - set(attributes["event_namespace"], body["object"]["regarding"]["namespace"]) where attributes["event_namespace"] == nil
             - set(attributes["event_namespace"], body["object"]["metadata"]["namespace"]) where attributes["event_namespace"] == nil
+    # Type guards run before any regex or range check, because a comparison or
+    # regex on the wrong type raises under `error_mode: ignore` and would leave
+    # the record alive. `not IsInt` / `not IsString` are total: a map, array,
+    # bool, double or free-text value fails them and the record is dropped.
+    # `event_count` is optional and defaults to the integer 1 above; anything
+    # present must already be an integer.
+    filter/events_types:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_count"] != nil and not IsInt(attributes["event_count"])'
+          - 'attributes["event_type"] == nil or not IsString(attributes["event_type"])'
+          - 'attributes["event_severity"] == nil or not IsString(attributes["event_severity"])'
+          - 'attributes["event_reason"] == nil or not IsString(attributes["event_reason"])'
+          - 'attributes["object_kind"] == nil or not IsString(attributes["object_kind"])'
+          - 'attributes["object_name"] == nil or not IsString(attributes["object_name"])'
+          - 'attributes["event_namespace"] == nil or not IsString(attributes["event_namespace"])'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsString(resource.attributes["k8s.namespace.name"])'
     # Drop, rather than sanitize, anything that does not match the allowlist.
     # A record whose reason is free text (a message pasted into `reason`) is
     # discarded whole, so no substring of it can reach the store.
@@ -179,22 +197,42 @@ alternateConfig:
         - context: log
           statements:
             - set(attributes["event_count"], 1) where attributes["event_count"] == nil
+    # Same type-first rule as the Events pipeline: nothing is compared or
+    # regex-matched until it is proven to be the type that check expects, so
+    # `error_mode: ignore` cannot turn a type failure into a surviving record.
+    filter/otlp_types:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_count"] != nil and not IsInt(attributes["event_count"])'
+          - 'attributes["reason"] == nil or not IsString(attributes["reason"])'
+          - 'attributes["level"] == nil or not IsString(attributes["level"])'
+          - 'attributes["component"] != nil and not IsString(attributes["component"])'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsString(resource.attributes["k8s.namespace.name"])'
+          - 'resource.attributes["service.name"] != nil and not IsString(resource.attributes["service.name"])'
     filter/otlp_allowlist:
       error_mode: ignore
       logs:
         log_record:
+          # `== nil or` is redundant after the type filter, but an evaluation
+          # error inside a filter keeps the record, so this stays fail-closed.
           - 'attributes["reason"] == nil or not IsMatch(attributes["reason"], "^[A-Za-z][A-Za-z0-9]{0,63}$")'
           - 'attributes["level"] == nil or not IsMatch(attributes["level"], "^(DEBUG|INFO|WARN|ERROR)$")'
           - 'attributes["component"] != nil and not IsMatch(attributes["component"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
           - 'attributes["event_count"] < 0 or attributes["event_count"] > 100000'
           - 'resource.attributes["service.name"] != nil and not IsMatch(resource.attributes["service.name"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
           - 'resource.attributes["k8s.namespace.name"] != nil and not IsMatch(resource.attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$")'
+    # The body is composed by appending only the parts that exist, so an absent
+    # optional component or namespace leaves no `<nil>` placeholder behind.
     transform/otlp_shape:
       error_mode: ignore
       log_statements:
         - context: log
           statements:
-            - set(log.body, Concat(["event", attributes["level"], attributes["component"], resource.attributes["k8s.namespace.name"], attributes["reason"]], " "))
+            - set(log.body, Concat(["event", attributes["level"]], " "))
+            - set(log.body, Concat([log.body, attributes["component"]], " ")) where attributes["component"] != nil
+            - set(log.body, Concat([log.body, resource.attributes["k8s.namespace.name"]], " ")) where resource.attributes["k8s.namespace.name"] != nil
+            - set(log.body, Concat([log.body, attributes["reason"]], " "))
             - set(log.severity_text, "ERROR") where attributes["level"] == "ERROR"
             - set(log.severity_number, SEVERITY_NUMBER_ERROR) where attributes["level"] == "ERROR"
             - set(log.severity_text, "WARN") where attributes["level"] == "WARN"
@@ -237,10 +275,10 @@ alternateConfig:
     pipelines:
       logs/events:
         receivers: [k8sobjects]
-        processors: [memory_limiter, transform/events_extract, filter/events_allowlist, transform/events_shape]
+        processors: [memory_limiter, transform/events_extract, filter/events_types, filter/events_allowlist, transform/events_shape]
         exporters: [otlphttp/victoria-logs]
       logs/structured:
         receivers: [otlp]
-        processors: [memory_limiter, transform/otlp_extract, filter/otlp_allowlist, transform/otlp_shape]
+        processors: [memory_limiter, transform/otlp_extract, filter/otlp_types, filter/otlp_allowlist, transform/otlp_shape]
         exporters: [otlphttp/victoria-logs]
 #% endif %#

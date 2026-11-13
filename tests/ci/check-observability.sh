@@ -633,12 +633,35 @@ pipelines = config['service']['pipelines']
 assert set(pipelines) == {'logs/events', 'logs/structured'}, pipelines
 for name, pipeline in pipelines.items():
     assert pipeline['exporters'] == ['otlphttp/victoria-logs'], (name, pipeline)
-# Both pipelines filter before they shape, so a rejected record never reaches
-# the statement that composes a body from it.
+# Types are checked before any regex or range, that allowlist runs before the
+# shape stage, and the shape stage runs before the exporter. A record rejected
+# by the type guard can therefore never reach the statement that composes a
+# body from it -- the ordering is the privacy guarantee, not a detail.
 assert pipelines['logs/events']['processors'] == [
-    'memory_limiter', 'transform/events_extract', 'filter/events_allowlist', 'transform/events_shape']
+    'memory_limiter', 'transform/events_extract',
+    'filter/events_types', 'filter/events_allowlist', 'transform/events_shape'], pipelines
 assert pipelines['logs/structured']['processors'] == [
-    'memory_limiter', 'transform/otlp_extract', 'filter/otlp_allowlist', 'transform/otlp_shape']
+    'memory_limiter', 'transform/otlp_extract',
+    'filter/otlp_types', 'filter/otlp_allowlist', 'transform/otlp_shape'], pipelines
+
+# Integer contract: `event_count` is optional, but a value that is present must
+# already be an integer. A range check alone is not a type check, and under
+# `error_mode: ignore` a type error keeps the record, so this guard is what
+# actually stops a string or a nested map from being stored.
+for pipeline in ('events', 'otlp'):
+    guards = config['processors'][f'filter/{pipeline}_types']['logs']['log_record']
+    joined = '\n'.join(guards)
+    count_guard = next(guard for guard in guards if 'event_count' in guard)
+    assert 'not IsInt(attributes["event_count"])' in count_guard, count_guard
+    # Absent is allowed; present-and-wrong is not. Anything else is not a guard.
+    assert '!= nil' in count_guard and 'IsMatch' not in count_guard, count_guard
+    # Every other accepted attribute is proven to be a string first, because a
+    # regex on a map, array, bool or double raises and would keep the record.
+    string_guards = [guard for guard in guards if 'IsString' in guard]
+    expected_strings = 7 if pipeline == 'events' else 5
+    assert len(string_guards) == expected_strings, (pipeline, guards)
+    for guard in string_guards:
+        assert 'not IsString' in guard, guard
 
 # Drop-not-sanitize: every allowlist entry rejects a missing or malformed field
 # outright, and no entry rewrites a value into an accepted one.
@@ -666,13 +689,36 @@ for forbidden in ('message', 'note', 'annotations', 'metadata', 'body'):
 keep = next(statement for statement in shape if statement.startswith('keep_keys'))
 assert 'body' not in keep and 'message' not in keep, keep
 
+# Optional parts must not be concatenated unconditionally: a missing component
+# or namespace would render as `<nil>` in the stored message.
+structured_shape = config['processors']['transform/otlp_shape']['log_statements'][0]['statements']
+compose = next(statement for statement in structured_shape if 'set(log.body' in statement)
+# The base body is built from the required field only.
+assert 'attributes["level"]' in compose, compose
+assert 'component' not in compose and 'k8s.namespace.name' not in compose, compose
+appends = {
+    statement for statement in structured_shape
+    if 'set(log.body' in statement and 'Concat([log.body' in statement
+}
+# `reason` is required, so it is appended unconditionally. The two optional
+# parts carry their own presence condition, which is what keeps `<nil>` and a
+# doubled separator out of the stored message.
+optional = sorted(
+    next(field for field in ('component', 'k8s.namespace.name') if field in statement)
+    for statement in appends if statement.endswith('!= nil')
+)
+assert optional == ['component', 'k8s.namespace.name'], appends
+required = [statement for statement in appends if not statement.endswith('!= nil')]
+assert len(required) == 1 and 'attributes["reason"]' in required[0], required
+assert not any('<nil>' in statement for statement in structured_shape)
+
 # The structured input requires an explicit level and reason, so an arbitrary
 # application body cannot enter the store by arriving without them.
 structured = config['processors']['filter/otlp_allowlist']['logs']['log_record']
 joined = '\n'.join(structured)
 assert 'attributes["reason"]' in joined and 'attributes["level"]' in joined
 assert 'resource.attributes["service.name"]' in joined
-print('[observability] rendered event collector: read-only Events RBAC, two filtered pipelines, allowlisted body only')
+print('[observability] rendered event collector: read-only Events RBAC, type guards before regex/range, nil-free body')
 PYLOG
 
   yq -o=json '.' "$out" | jq -s '.' >"$docs"

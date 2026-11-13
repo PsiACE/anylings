@@ -352,46 +352,35 @@ no namespace and allows no extra chart registry.
 - **victoria-logs** — single-node VictoriaLogs (`victoria-logs-single` chart
   `0.13.12`, image `v1.53.0`), the operational log store. Ingest is OTLP over
   HTTP from the collector below; it tails no file and reads no Kubernetes
-  object itself.
+  object itself. Contract and limits:
+  [operational logs how-to](docs/observability/operational-logs.md).
 - **otel-events** — pinned OpenTelemetry contrib `0.140.1` on collector chart
   `0.140.0`, a single replica. Watches Kubernetes Events read-only and accepts
-  structured OTLP records on port `4318`. See
-  [Operational logs](#operational-logs) for the fields it keeps.
+  structured OTLP records on port `4318`. See the
+  [operational logs how-to](docs/observability/operational-logs.md) for the
+  field contract.
 
 ### Operational logs
 
-Two controlled inputs reach one store. Neither reads a session, a prompt, tool
-output or an application's arbitrary log file.
+Log coverage is **Kubernetes Events plus a structured OTLP input only**. It is
+not application or node container log collection, and reading it as "full logs"
+would be wrong.
 
-1. **Kubernetes Events**, through the `k8sobjects` receiver with one read-only
-   grant: `get, list, watch` on `events`. No `pods/log`, no `pods/exec`, no
-   Secrets, no `nodes/proxy`, no host path, no privileged daemon.
-2. **Structured OTLP** from a workload, sent to
-   `http://otel-events.observability.svc.cluster.local:4318/v1/logs`, with these
-   attributes: `reason` (required, `[A-Za-z][A-Za-z0-9]{0,63}`), `level`
-   (required, one of `DEBUG`, `INFO`, `WARN`, `ERROR`), `component` (optional,
-   a DNS label), and `event_count` (optional integer, `0`–`100000`). The record
-   body is never read.
+- **Kubernetes Events** — one read-only grant (`get, list, watch` on `events`).
+- **Structured OTLP** — a workload sends an allowlisted operational record to
+  `http://otel-events.observability.svc.cluster.local:4318/v1/logs`. A free-text
+  log line is not accepted; the body is never read.
 
-Both pipelines extract a fixed field set, **drop** any record that does not
-match the allowlist, then compose the stored body from the surviving fields
-alone. Persisted fields are `event_type`, `event_severity`, `event_reason`,
-`event_count`, `object_kind`, `object_name`, `event_namespace`, `level`,
-`component`, namespace and service name. The event message, note, annotations,
-managed fields, resource UIDs, authorization headers, cookies, query strings and
-every unlisted attribute are discarded with the whole record — a free-text
-`reason` is rejected, not token-scrubbed. Rejected records are counted in
-`otelcol_processor_filter_logs_filtered_total` and the **Operational logs**
-dashboard, so a privacy decision is visible without repeating its content.
+Both pipelines **drop** a record that is missing a field or carries the wrong
+type, then compose the stored body from the surviving fields alone. Event
+messages, notes, annotations, prompts, sessions and tool output are never
+copied, and rejected records are counted rather than echoed.
 
-This vertical does **not** provide application container logs or node logs. Real
-file-based coverage needs a separate source integration and is not claimed here.
-
-The store keeps `-retentionPeriod=3d` and
-`-retention.maxDiskSpaceUsageBytes=1GiB` in a bounded `emptyDir`; the caps are a
-query target, not hard erasure, and a reschedule loses the data. Its added
-requests are **50m / 128Mi** and limits **500m / 512Mi**; the collector's are
-**30m / 96Mi** and **300m / 256Mi**.
+See **[Operational logs how-to](docs/observability/operational-logs.md)** for the
+exact field contract, the per-field type rules, retention and its limits, and the
+verification commands. The store keeps `3d` and 1GiB in a bounded `emptyDir`; its
+added requests are **50m / 128Mi** (limits **500m / 512Mi**) and the collector's
+are **30m / 96Mi** (limits **300m / 256Mi**).
 
 The vmui **Nodes and workloads** dashboard includes actual usage, requested
 resources (not measured utilization), restarts/OOM/scheduling, controller usage,
@@ -435,7 +424,8 @@ Read these as operational facts, not guarantees:
 - **The log store is an operational window, not an audit trail.** VictoriaLogs
   keeps `3d` and 1GiB of allowlisted operational records. It drops whole per-day
   partitions, so the window is a query bound, not proof of deletion. It holds no
-  application container or node logs, and no session, prompt or tool output.
+  application container or node logs, and no session, prompt or tool output. See
+  the [operational logs how-to](docs/observability/operational-logs.md).
 - **Nothing survives a reschedule by default.** VictoriaMetrics and VictoriaLogs
   both use a bounded `emptyDir`, and no `PersistentVolumeClaim` is provisioned
   for any application, so no cloud volume is created or billed implicitly. To

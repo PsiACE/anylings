@@ -161,6 +161,17 @@ def run(scratch):
     vm_binary = os.environ["VICTORIA_METRICS_BIN"]
     assert "0.140.1" in subprocess.check_output([collector_binary, "--version"], text=True, timeout=10)
     assert "v1.155.0" in subprocess.check_output([vm_binary, "--version"], text=True, timeout=10)
+    # Validate the unmodified rendered config before replacing cluster DNS with
+    # loopback targets. A passing ingestion fixture must not hide invalid SD.
+    with (scratch / "production-scrape-validate.log").open("w") as log:
+        subprocess.run([
+            vm_binary,
+            f"-promscrape.config={scratch / 'scrape.yaml'}",
+            "-promscrape.config.dryRun",
+            "-promscrape.config.strictParse=true",
+            "-envflag.enable=false",
+        ], stdout=log, stderr=log, check=True, timeout=15)
+    print("[observability] runtime: unmodified rendered scrape config, including DNS discovery, passes strict VM parsing")
     config = json.loads((scratch / "collector.json").read_text())
     env = {**os.environ, "MY_POD_IP": "127.0.0.1", "K8S_NODE_NAME": "synthetic-1"}
     # Ephemeral local certificate only, never an existing key or trust store.

@@ -112,7 +112,6 @@ server:
             - names: [otel-kubelet.observability.svc.cluster.local]
               type: A
               port: 8889
-              refresh_interval: 30s
           sample_limit: 5000
           metric_relabel_configs:
             - action: labelmap

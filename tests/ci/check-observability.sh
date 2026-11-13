@@ -483,7 +483,7 @@ assert headless['spec']['ports'] == [{'name': 'metrics', 'port': 8889, 'targetPo
 jobs = {job['job_name']: job for job in read('scrape.json')['scrape_configs']}
 assert jobs['kubelet']['dns_sd_configs'] == [{
     'names': ['otel-kubelet.observability.svc.cluster.local'],
-    'type': 'A', 'port': 8889, 'refresh_interval': '30s',
+    'type': 'A', 'port': 8889,
 }]
 assert not jobs['kubelet'].get('static_configs')
 assert jobs['kubelet']['sample_limit'] == 5000

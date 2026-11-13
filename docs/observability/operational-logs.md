@@ -103,10 +103,24 @@ every unlisted attribute are discarded with the record.
 Rejected records are counted per filter, so a privacy decision is observable
 without repeating its content:
 
+Query the counter through VictoriaMetrics, which already scrapes the collector.
+The pinned collector image has no shell or `wget`; do not try to exec them.
+In one terminal, keep this loopback-only port-forward in the foreground using
+an explicit operator kubeconfig and context:
+
 ```bash
-# How many records each filter dropped.
-kubectl --namespace observability exec deploy/otel-events -- \
-  wget -qO- http://127.0.0.1:8888/metrics | grep filter_logs_filtered
+kubectl --kubeconfig /path/to/operator.conf --context operator@cluster \
+  --namespace observability port-forward --address 127.0.0.1 \
+  service/victoria-metrics 8428:8428
+```
+
+In another terminal, read the per-filter counters, then stop the port-forward
+with Ctrl-C when finished:
+
+```bash
+curl --fail --silent --show-error --get \
+  --data-urlencode 'query=otelcol_processor_filter_logs_filtered_total{job="otel-events"}' \
+  http://127.0.0.1:8428/api/v1/query
 ```
 
 The vmui **Operational logs** dashboard shows the ingest path (accepted, stored,
@@ -124,6 +138,7 @@ absence of hostile markers:
 
 ```bash
 OTELCOL_BIN=/path/to/otelcol-contrib-0.140.1 \
+VICTORIA_METRICS_BIN=/path/to/victoria-metrics-v1.155.0 \
 VICTORIA_LOGS_BIN=/path/to/victoria-logs-v1.53.0 \
   bash tests/ci/check-observability.sh --runtime
 ```

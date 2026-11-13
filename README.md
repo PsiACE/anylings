@@ -325,17 +325,58 @@ cannot change what the cluster runs; leaving it empty deploys the tag alone.
 
 ## Observability
 
-Opt in with `[observability] enabled = true`. That publishes two applications
+Opt in with `[observability] enabled = true`. That publishes four applications
 into the `observability` namespace; leaving it disabled publishes nothing, adds
 no namespace and allows no extra chart registry.
 
 - **victoria-metrics** — single-node VictoriaMetrics (`victoria-metrics-single`
-  chart), the only metric store. It scrapes its own `/metrics` and Gatus, and
+  chart), the only metric store. It scrapes its own `/metrics`, Gatus, every kubelet collector Pod and KSM, and
   serves queries and dashboards through vmui on `/vmui/`. No Prometheus operator,
   vmagent, Loki or database is deployed with it.
 - **gatus** — probe-based status and alerting. Its dashboard is a status page;
   it also exports `gatus_results_*` metrics that VictoriaMetrics scrapes, so
   probe history that outlives the status page is read from metrics.
+
+- **otel-kubelet** — pinned OpenTelemetry contrib `0.140.1` on collector chart
+  `0.140.0`, one unprivileged DaemonSet Pod per node (including tainted nodes).
+  Reads numeric node, Pod, container and volume usage from kubelet
+  `/stats/summary` every 30 seconds. Uses the projected service-account token,
+  `get nodes/stats` only, HTTPS and CA/hostname verification. No `nodes/proxy`,
+  host filesystem mounts, host ports or application telemetry receivers.
+- **kube-state-metrics** — pinned chart `9.0.1`, image `v2.20.0`, one replica.
+  Watches only nodes, Pods, Deployments, ReplicaSets, DaemonSets, StatefulSets,
+  Jobs and CronJobs. Its explicit metric allowlist covers restarts, last OOM
+  termination, readiness, scheduling, requests/limits, ownership and replica
+  availability. It cannot read Secrets or ConfigMaps and exports no arbitrary
+  workload annotations or labels.
+
+The vmui **Nodes and workloads** dashboard includes actual usage, requested
+resources (not measured utilization), restarts/OOM/scheduling, controller usage,
+Deployment-attributed working sets through ReplicaSet ownership, and volume
+headroom. For example, `sum by (node) (k8s_node_cpu_usage)` is CPU in cores;
+`sum by (namespace,pod) (k8s_pod_memory_working_set_bytes)` is Pod working-set
+memory in bytes. The volume name is retained so two volumes cannot collapse
+onto one series; Pod UIDs, backend disk identifiers, paths and arbitrary resource
+attributes are not retained as metric labels in VM. Workload names are operational metadata, not an
+anonymous dataset. No prompts, sessions or tool output enter these pipelines.
+VM resolves all ready collector Pod IPs through a headless Service and DNS A
+discovery; a load-balanced ClusterIP would silently miss nodes. KSM's single
+replica uses an ordinary stable ClusterIP.
+
+Before any future deployment, verify that each node name resolves from a Pod
+and its kubelet serving certificate chains to the service-account CA with that
+node name in its SAN. Failure is **closed**; do not disable TLS verification to
+make a provider work. Real cluster DNS, certificate trust, projected token
+rotation and kubelet webhook authorization still need native/provider evidence.
+
+The added requests are **20m / 48Mi** for KSM plus **30m / 64Mi per node**
+for the collector. Limits are **100m / 128Mi** and **200m / 160Mi per node**.
+VM bounds each metrics job to 5,000 samples per scrape and the store to 10,000
+hourly / 20,000 daily series, 30 labels per series, 768Mi container memory and a
+2Gi ephemeral data volume. These are caps, not an assertion that the existing
+single node has enough actual headroom. Over-budget scrapes/series may be
+rejected; inspect `/targets`, `up` and VM's ignored-row metrics. No new capacity
+or deployment is authorized by these templates.
 
 Read these as operational facts, not guarantees:
 
@@ -349,11 +390,11 @@ Read these as operational facts, not guarantees:
   `storage.type: memory`, so its own results and events are capped by count and
   lost on restart. Longer probe history means querying the scraped metrics.
 - **Nothing survives a reschedule by default.** VictoriaMetrics uses a bounded
-  `emptyDir`, and no `PersistentVolumeClaim` is provisioned for either
+  `emptyDir`, and no `PersistentVolumeClaim` is provisioned for any
   application, so no cloud volume is created or billed implicitly. To keep
   metrics across a pod replacement, create a claim yourself and point
   `server.persistentVolume.existingClaim` at it.
-- **Access is in-cluster.** Both Services are `ClusterIP`; no Ingress, route,
+- **Access is in-cluster.** All Services are `ClusterIP`; no Ingress, route,
   LoadBalancer or NodePort is rendered. Reaching vmui or Gatus from outside is a
   separate ingress decision, and it must keep authentication in front of them.
 
@@ -474,12 +515,29 @@ checked against real artifacts rather than against the values file's intent. It
 asserts that the default input publishes nothing, then on the enabled render:
 explicit 7d retention, resource limits, non-root and read-only root filesystems,
 ClusterIP-only Services with no route or LoadBalancer, no automatically
-provisioned claim, no cluster-scoped metrics RBAC, an optional notification
+provisioned claim, no store RBAC and minimal read-only collector RBAC, an optional notification
 Secret reference rather than embedded credentials, and that the vmui dashboard
 flag, its mount, the ConfigMap, the scrape target and the probe Services all name
 things that render actually creates, with no empty dashboard panel. The
 contracts job and `tests/ci/local-gate.sh` both call it, before any native run
-exists.
+exists. The same script accepts `--runtime` when `OTELCOL_BIN` (0.140.1) and
+`VICTORIA_METRICS_BIN` (v1.155.0) point at disposable release binaries. It starts
+two actual collectors, synthetic HTTPS/mTLS kubelets and VictoriaMetrics, then
+asserts all workload dashboard queries are nonempty, numerical sample values,
+multi-volume identities, both node identities and privacy. Exact owned processes
+are terminated and waited and server threads joined in the same foreground run;
+`OBSERVABILITY_RUNTIME_LOG_DIR` optionally preserves full sanitized logs. There
+are no downloads, installs, background services or extra CI workflow in that
+mode. KSM exposition is synthetic, TLS client certificates replace the fixed
+in-Pod SA token path, and loopback targets replace cluster DNS: this proves
+collection/ingestion/query behavior, not live KSM watches, SA auth or cluster DNS.
+
+**Remaining mandatory observability slices:** operational logs with redaction
+and bounded retention, traces without prompt/session/tool payloads, aggregate
+API/web analytics, expanded probes and end-to-end notification delivery.
+Existing Gatus templates and an optional Telegram Secret reference are not
+notification-delivery evidence. These are follow-ups, not optional omissions or
+a claim that this metrics PR completes observability.
 
 Git's upstream **git daemon** is the only Git fixture. The runner pushes encrypted
 configuration into a local bare repository; Argo reads that one repository through

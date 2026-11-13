@@ -10,13 +10,20 @@
 # generated locally for this run and the only Secret input is a synthetic name.
 set -euo pipefail
 
+# Runtime is opt-in and uses explicitly supplied disposable release binaries.
+# It never downloads tools, invokes Kubernetes, or starts detached services.
+case "${1:-}" in
+  ""|--runtime) ;;
+  *) echo "usage: $0 [--runtime]" >&2; exit 2 ;;
+esac
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 log() { printf '[observability] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
-for tool in helm jq yq just; do
+for tool in helm jq yq just kubeconform uv; do
   command -v "$tool" >/dev/null || die "$tool is required"
 done
 
@@ -80,8 +87,8 @@ check_default_off() {
   if grep -q 'namespace: observability' <<<"$text"; then
     die "the AppProject grants the observability namespace while the slice is disabled"
   fi
-  if grep -q 'victoriametrics' <<<"$text"; then
-    die "the AppProject allows the VictoriaMetrics chart registry while the slice is disabled"
+  if grep -qE 'victoriametrics|open-telemetry|prometheus-community' <<<"$text"; then
+    die "the AppProject allows a monitoring chart registry while the slice is disabled"
   fi
   log "default-off holds: no applications, namespace or extra chart repo"
 }
@@ -91,7 +98,7 @@ check_default_off() {
 check_enabled_apps() {
   local apps="$enabled_out/kubernetes/apps/observability" project="$enabled_out/kubernetes/projects/kubernetes.yaml"
   local app text
-  for app in victoria-metrics gatus; do
+  for app in victoria-metrics gatus otel-kubelet kube-state-metrics; do
     [ -f "$apps/$app/config.json" ] || die "$app was not published as an application"
     [ -f "$apps/$app/values.yaml" ] || die "$app has no rendered values file"
   done
@@ -109,7 +116,7 @@ check_enabled_apps() {
     || die "the AppProject does not allow the pinned VictoriaMetrics chart registry"
   grep -q 'namespace: observability' <<<"$text" \
     || die "the AppProject does not allow the observability destination"
-  log "enabled slice publishes two pinned applications with a scoped AppProject"
+  log "enabled slice publishes four pinned applications with a scoped AppProject"
 }
 
 # -------------------------------------------------------- chart rendering --
@@ -142,7 +149,7 @@ assert_no_public_exposure() {
   done
   # Services are the only place a type can widen; check every one of them.
   types="$(yq -r 'select(.kind == "Service") | .spec.type // "ClusterIP"' "$out")"
-  if grep -qvx 'ClusterIP' <<<"$types"; then
+  if [ -n "$types" ] && grep -qvx 'ClusterIP' <<<"$types"; then
     die "$label rendered a Service that is not ClusterIP"
   fi
   log "$label renders no Ingress, route, LoadBalancer or NodePort"
@@ -172,6 +179,8 @@ check_metric_store() {
     grep -q -- "^$flag=" <<<"$args" \
       || die "the metric store does not bound $flag"
   done
+  grep -qE '^--memory.allowedBytes=[0-9]+$' <<<"$args" \
+    || die "the metric store memory byte budget is not a valid integer"
   # Non-root, read-only root filesystem, no added capabilities.
   yq -e 'select(.kind == "Deployment" or .kind == "StatefulSet")
     | .spec.template.spec.securityContext.runAsNonRoot == true' "$out" >/dev/null \
@@ -351,9 +360,165 @@ check_wiring() {
   log "dashboards, mount, vmui flag, scrape target and probe Services all agree"
 }
 
+
+# Check the actual chart output, including defaults that values-only tests miss.
+check_workload_metrics() {
+  local app
+  for app in otel-kubelet kube-state-metrics; do
+    chart_render "$enabled_out/kubernetes/apps/observability/$app" "$scratch/$app.yaml"
+    assert_no_public_exposure "$scratch/$app.yaml" "$app"
+    kubeconform -strict -summary "$scratch/$app.yaml"
+  done
+  # Decode YAML with the existing yq tool; the assertions need only stdlib.
+  for app in otel-kubelet kube-state-metrics victoria-metrics; do
+    yq -o=json -I=0 '.' "$scratch/$app.yaml" | jq -s '.' >"$scratch/$app.json"
+  done
+  kubeconform -strict -summary "$enabled_out/kubernetes/apps/observability/otel-kubelet/service.yaml" \
+    "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml"
+  yq -o=json '.' "$enabled_out/kubernetes/apps/observability/otel-kubelet/service.yaml" >"$scratch/headless.json"
+  yq -r 'select(.kind == "ConfigMap") | .data.relay // ""' "$scratch/otel-kubelet.yaml" >"$scratch/collector.yaml"
+  yq -o=json '.' "$scratch/collector.yaml" >"$scratch/collector.json"
+  yq -r 'select(.kind == "ConfigMap") | .data["scrape.yml"] // ""' "$scratch/victoria-metrics.yaml" >"$scratch/scrape.yaml"
+  yq -o=json '.' "$scratch/scrape.yaml" >"$scratch/scrape.json"
+  uv run --quiet --locked --no-dev python - "$scratch" "$enabled_out" <<'PYTEST'
+import json
+import sys
+from pathlib import Path
+
+scratch, enabled = map(Path, sys.argv[1:])
+
+def read(name):
+    return json.loads((scratch / name).read_text())
+
+def only(documents, kind):
+    matches = [doc for doc in documents if doc and doc['kind'] == kind]
+    assert len(matches) == 1, (kind, len(matches))
+    return matches[0]
+
+collector_docs = read('otel-kubelet.json')
+state_docs = read('kube-state-metrics.json')
+collector = read('collector.json')
+state_config = json.loads((enabled / 'kubernetes/apps/observability/kube-state-metrics/config.json').read_text())
+assert state_config['chartVersion'] == '9.0.1'
+agent_config = json.loads((enabled / 'kubernetes/apps/observability/otel-kubelet/config.json').read_text())
+assert agent_config['chartVersion'] == '0.140.0'
+
+# No write verbs, proxy, Secrets, ConfigMaps, or unrelated cluster inventory.
+expected_state = {
+    ('', 'nodes'), ('', 'pods'),
+    *{('apps', name) for name in ('deployments', 'replicasets', 'daemonsets', 'statefulsets')},
+    *{('batch', name) for name in ('jobs', 'cronjobs')},
+}
+for documents, expected, verbs in (
+    (collector_docs, {('', 'nodes/stats')}, {'get'}),
+    (state_docs, expected_state, {'list', 'watch'}),
+):
+    role = only(documents, 'ClusterRole')
+    grants = set()
+    for rule in role['rules']:
+        assert set(rule['verbs']) == verbs, rule
+        assert not rule.get('nonResourceURLs'), rule
+        grants.update((group, resource) for group in rule['apiGroups'] for resource in rule['resources'])
+    assert grants == expected, grants
+    account = only(documents, 'ServiceAccount')['metadata']['name']
+    binding = only(documents, 'ClusterRoleBinding')
+    assert binding['roleRef']['name'] == role['metadata']['name']
+    assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': account, 'namespace': 'observability'}]
+    workload = only(documents, 'DaemonSet' if documents is collector_docs else 'Deployment')
+    pod = workload['spec']['template']['spec']
+    assert pod['serviceAccountName'] == account
+    assert pod['automountServiceAccountToken'] is True
+    assert not any(pod.get(key) for key in ('hostNetwork', 'hostPID', 'hostIPC'))
+    assert not any('hostPath' in volume for volume in pod.get('volumes', []))
+    assert pod['securityContext']['runAsNonRoot']
+    assert pod['securityContext']['runAsUser'] != 0
+    assert pod['securityContext']['seccompProfile']['type'] == 'RuntimeDefault'
+    assert len(pod['containers']) == 1
+    container = pod['containers'][0]
+    for resource in ('cpu', 'memory'):
+        assert container['resources']['requests'][resource]
+        assert container['resources']['limits'][resource]
+    security = container['securityContext']
+    assert security['readOnlyRootFilesystem']
+    assert not security['allowPrivilegeEscalation']
+    assert not security.get('privileged')
+    assert security['capabilities'] == {'drop': ['ALL']}
+    assert not any(port.get('hostPort') for port in container.get('ports', []))
+    assert not any(doc['kind'] in ('PersistentVolumeClaim', 'StatefulSet') for doc in documents if doc)
+
+pod_template = only(collector_docs, 'DaemonSet')['spec']['template']
+agent = pod_template['spec']['containers'][0]
+assert agent['image'] == 'otel/opentelemetry-collector-contrib:0.140.1'
+assert any(env['name'] == 'K8S_NODE_NAME' and env['valueFrom']['fieldRef']['fieldPath'] == 'spec.nodeName' for env in agent['env'])
+assert {port['containerPort'] for port in agent['ports']} == {8889}
+assert set(collector['receivers']) == {'kubeletstats'}
+assert set(collector['exporters']) == {'prometheus'}
+assert set(collector['service']['pipelines']) == {'metrics'}
+assert collector['service']['pipelines']['metrics'] == {
+    'receivers': ['kubeletstats'],
+    'processors': ['memory_limiter', 'transform/identity'],
+    'exporters': ['prometheus'],
+}
+receiver = collector['receivers']['kubeletstats']
+assert receiver['auth_type'] == 'serviceAccount'
+assert receiver['endpoint'] == 'https://${env:K8S_NODE_NAME}:10250'
+assert receiver['ca_file'] == '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+assert receiver['insecure_skip_verify'] is False
+assert set(receiver['metric_groups']) == {'node', 'pod', 'container', 'volume'}
+assert receiver['extra_metadata_labels'] == []
+assert 'k8s_api_config' not in receiver
+assert collector['exporters']['prometheus']['metric_expiration'] == '2m'
+statements = collector['processors']['transform/identity']['metric_statements']
+assert statements == [{'context': 'resource', 'statements': [
+    'keep_keys(attributes, ["k8s.node.name", "k8s.namespace.name", "k8s.pod.name", "k8s.container.name", "k8s.volume.name"])'
+]}]
+
+# Selector agreement plus DNS A discovery ensures every ready DaemonSet Pod is
+# scraped individually. VM itself still needs no Kubernetes API permissions.
+headless = read('headless.json')
+assert headless['spec']['clusterIP'] == 'None'
+assert headless['spec']['type'] == 'ClusterIP'
+assert all(pod_template['metadata']['labels'].get(key) == value for key, value in headless['spec']['selector'].items())
+assert headless['spec']['ports'] == [{'name': 'metrics', 'port': 8889, 'targetPort': 'metrics', 'protocol': 'TCP'}]
+jobs = {job['job_name']: job for job in read('scrape.json')['scrape_configs']}
+assert jobs['kubelet']['dns_sd_configs'] == [{
+    'names': ['otel-kubelet.observability.svc.cluster.local'],
+    'type': 'A', 'port': 8889, 'refresh_interval': '30s',
+}]
+assert not jobs['kubelet'].get('static_configs')
+assert jobs['kubelet']['sample_limit'] == 5000
+assert jobs['kube-state-metrics']['sample_limit'] == 5000
+assert jobs['kube-state-metrics']['metric_relabel_configs'] == [{'action': 'labeldrop', 'regex': 'uid'}]
+state_service = only(state_docs, 'Service')
+assert state_service['metadata']['name'] == 'kube-state-metrics'
+assert any(port['port'] == 8080 for port in state_service['spec']['ports'])
+assert jobs['kube-state-metrics']['static_configs'] == [{'targets': ['kube-state-metrics.observability.svc.cluster.local:8080']}]
+state = only(state_docs, 'Deployment')
+assert state['spec']['replicas'] == 1
+container = state['spec']['template']['spec']['containers'][0]
+assert container['image'] == 'registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0'
+args = container['args']
+resources = next(arg for arg in args if arg.startswith('--resources='))
+assert set(resources.split('=', 1)[1].split(',')) == {resource for _, resource in expected_state}
+allowlist = next(arg for arg in args if arg.startswith('--metric-allowlist='))
+for metric in ('kube_pod_container_status_restarts_total', 'kube_pod_container_status_last_terminated_reason', 'kube_pod_status_scheduled', 'kube_pod_container_resource_requests', 'kube_pod_owner', 'kube_deployment_status_replicas_available'):
+    assert metric in allowlist.split('=', 1)[1].split(',')
+assert not any(arg.startswith(('--metric-labels-allowlist=', '--metric-annotations-allowlist=')) for arg in args)
+print('[observability] pinned collectors: minimal RBAC, TLS/SA, resources, privacy and all-Pod DNS discovery passed')
+PYTEST
+}
+
 check_default_off
 check_enabled_apps
 check_metric_store
 check_status_dashboards
+check_workload_metrics
 check_wiring
+if [ "${1:-}" = --runtime ]; then
+  : "${OTELCOL_BIN:?set OTELCOL_BIN to the pinned 0.140.1 release binary}"
+  : "${VICTORIA_METRICS_BIN:?set VICTORIA_METRICS_BIN to the pinned v1.155.0 release binary}"
+  yq -r '.data["nodes-workloads.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
+    | jq '[.rows[].panels[].expr[]]' >"$scratch/workload-queries.json"
+  uv run --quiet --locked --no-dev python tests/ci/observability-runtime.py "$scratch"
+fi
 log "observability contracts passed"

@@ -724,11 +724,24 @@ def assert_resource_normalised(processor, approved):
     assert keep is not None, (processor, resource)
     kept = keep.split('[', 1)[1].rsplit(']', 1)[0]
     assert sorted(kept.replace('"', '').split(', ')) == sorted(scratch), (processor, kept, scratch)
-    # Each scratch value is written back under the approved name, then removed.
+    # Each scratch value is written back under the approved name.
     for source, name in approved:
         restore = f'set(attributes["{source}"], attributes["__otl_dup_{name}"])'
         assert any(statement.startswith(restore) for statement in resource), (processor, source, resource)
-        assert any(statement == f'delete_key(attributes, "__otl_dup_{name}")' for statement in resource), (processor, name, resource)
+    # The stage must END with a whitelist over the approved names.
+    #
+    # Scratch keys are caller-writable: a sender may repeat `__otl_dup_ns` in
+    # its own resource list. `delete_key` is `pdata.Map.Remove`, which removes
+    # only the FIRST matching entry, so a cleanup built from `delete_key` leaves
+    # an occurrence behind that is then stored as a new field and promoted into
+    # `_stream`. `keep_keys` uses `RemoveIf` and drops every non-matching entry,
+    # so the approved names are the only keys that can survive.
+    expected_keep = 'keep_keys(attributes, [' + ', '.join(
+        '"%s"' % source for source, _ in approved) + '])'
+    assert resource[-1] == expected_keep, (processor, resource[-1], expected_keep)
+    # No cleanup may depend on removing a name the caller can also supply.
+    assert not any(statement.startswith('delete_key(attributes, "__otl_dup_')
+                   for statement in resource), (processor, resource)
     # Nothing writes the caller's map wholesale, and no unapproved key is read.
     assert not any(statement.startswith('set(attributes,') for statement in resource), resource
     approved_sources = {source for source, _ in approved}
@@ -736,11 +749,6 @@ def assert_resource_normalised(processor, approved):
         for _, name in approved:
             if statement.startswith(f'set(attributes["{name}"]'):
                 assert f'__otl_dup_{name}' in statement, (processor, statement)
-    # Leftover scratch keys would be a stored field of their own. Parenthesised
-    # so the comparison is not parsed as part of the generator expression.
-    removed = [statement for statement in resource
-               if statement.startswith('delete_key(attributes, "__otl_dup_')]
-    assert len(removed) == len(approved), (processor, removed, approved)
     return approved_sources
 
 

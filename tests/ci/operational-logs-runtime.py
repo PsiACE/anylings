@@ -487,10 +487,24 @@ def payloads():
         structured_record("resDupGone", "INFO", None, int_value(1)),
     ]
 
+    # Caller repeats the scratch key this stage copies into. `delete_key` is
+    # `pdata.Map.Remove`, which removes only the first matching entry, so a
+    # cleanup built from it leaves one behind -- stored as a new field and
+    # promoted into `_stream`. Each case is a separate record so a stored row
+    # can be attributed to exactly one of them.
+    scratch_collision_records = [
+        structured_record("scratchNsOnce", "INFO", None, int_value(1)),
+        structured_record("scratchNsTwice", "INFO", None, int_value(1)),
+        structured_record("scratchNsThrice", "INFO", None, int_value(1)),
+        structured_record("scratchSvcTwice", "INFO", None, int_value(1)),
+        structured_record("scratchRecTwice", "INFO", None, int_value(1)),
+    ]
+
     return {
         "events_good": events_good,
         "events_hostile": events_hostile,
         "structured_good": structured_good,
+        "scratch_collision_records": scratch_collision_records,
         "structured_resource_dup": structured_resource_dup,
         "structured_resource_dup_hostile_first": structured_resource_dup_hostile_first,
         "structured_hostile": structured_hostile,
@@ -651,11 +665,68 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
             records["structured_resource_dup_hostile_first"], duplicate_resource,
             resource_duplicates=resource_duplicates, resource_duplicates_first=True,
         ))
+        # A hostile duplicate of the scratch name itself, in every position that
+        # matters: once, twice (the reported case), three times, on the service
+        # scratch key, and on a record scratch key. All are actually posted.
+        scratch_cases = {
+            "scratchNsOnce": {"__otl_dup_ns": f"{HOSTILE}-SCRATCH-NS"},
+            "scratchNsTwice": {"__otl_dup_ns": f"{HOSTILE}-SCRATCH-NS"},
+            "scratchNsThrice": {"__otl_dup_ns": f"{HOSTILE}-SCRATCH-NS"},
+            "scratchSvcTwice": {"__otl_dup_svc": f"{HOSTILE}-SCRATCH-SVC"},
+            "scratchRecTwice": {},
+        }
+        for record in records["scratch_collision_records"]:
+            reason = record["attributes"][0]["value"]["stringValue"]
+            duplicates = scratch_cases[reason]
+            # `scratchNsTwice`/`Thrice`/`SvcTwice` repeat the same scratch key;
+            # `envelope` appends each entry of the mapping once, so a repeated
+            # key is expressed by passing the same name in both the base
+            # resource list and the duplicate map for the "once" case, and by a
+            # doubled value list below for the repeated ones.
+            # The hostile entries are added explicitly, `repetitions` times,
+            # so the duplicate really is a duplicate in the wire list.
+            host_resource = dict(duplicate_resource)
+            if reason in ("scratchNsTwice", "scratchNsThrice", "scratchSvcTwice"):
+                repetitions = 2 if reason != "scratchNsThrice" else 3
+                payload = envelope([record], host_resource)
+                resource_attributes = payload["resourceLogs"][0]["resource"]["attributes"]
+                for name in duplicates:
+                    for index in range(repetitions):
+                        resource_attributes.append({
+                            "key": name,
+                            "value": string(f"{HOSTILE}-SCRATCH-{index}-{name}"),
+                        })
+                request = Request(
+                    f"http://127.0.0.1:{structured_port}/v1/logs",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urlopen(request, timeout=10) as response:
+                    assert response.status == 200, response.status
+            elif reason == "scratchRecTwice":
+                # The record-side sibling: a caller-supplied duplicate of the
+                # record scratch name.
+                payload = envelope([record], host_resource)
+                payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].append(
+                    {"key": "__otl_dup_reason", "value": string(f"{HOSTILE}-SCRATCH-REC")})
+                payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].append(
+                    {"key": "__otl_dup_reason", "value": string(f"{HOSTILE}-SCRATCH-REC-2")})
+                request = Request(
+                    f"http://127.0.0.1:{structured_port}/v1/logs",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urlopen(request, timeout=10) as response:
+                    assert response.status == 200, response.status
+            else:
+                # Exactly one hostile occurrence of the scratch name.
+                post(f"http://127.0.0.1:{structured_port}/v1/logs",
+                     envelope([record], {**host_resource, **duplicates}))
 
         # Valid-first duplicates are stored; the hostile-first ones must be
         # dropped, so only the former count towards the positive expectation.
         expected = (len(records["events_good"]) + len(records["structured_good"])
-                    + 3)
+                    + 3 + len(records["scratch_collision_records"]))
         # Wait for a record from *each* pipeline, not just for a total count: a
         # count alone can be satisfied by one pipeline while the other is still
         # in flight, and the control run then misses its nil placeholder.
@@ -687,6 +758,7 @@ def run_fixture(binary, rendered, store_args, scratch, ports, label, with_guards
                 "events_good", "events_hostile", "structured_good",
                 "structured_hostile", "structured_duplicated", "events_duplicated",
                 "structured_resource_dup", "structured_resource_dup_hostile_first",
+                "scratch_collision_records",
             )
         ),
     }
@@ -828,7 +900,7 @@ def run(scratch):
     # Exactly the well-formed records, and no more.
     # Nine baseline positives plus the valid-first duplicate record and the
     # duplicated Events record; the hostile-first duplicate is rejected.
-    assert len(records) == 12, [record["_msg"] for record in records]
+    assert len(records) == 17, [record["_msg"] for record in records]
 
     # Reasons are distinct per case, so a collapsed or duplicated record shows.
     events = [record for record in records if "event_type" in record]
@@ -837,7 +909,8 @@ def run(scratch):
         "BackOff", "FailedMount", "Scheduled", "Scheduled", "Unhealthy"], events
     assert sorted(record["reason"] for record in structured) == [
         "authFailure", "backlog", "dupKept", "queueDepth", "recovered",
-        "resDupKept", "retryBudget"], structured
+        "resDupKept", "retryBudget", "scratchNsOnce", "scratchNsThrice",
+        "scratchNsTwice", "scratchRecTwice", "scratchSvcTwice"], structured
     events = {record["event_reason"] + "/" + record["event_type"]: record for record in events}
     structured = {record["reason"]: record for record in structured}
 
@@ -977,6 +1050,26 @@ def run(scratch):
             continue
         for key in ("k8s.namespace.name", "service.name"):
             assert line.count(f'"{key}":') <= 1, (key, line[:240])
+
+    # A caller-supplied duplicate of the scratch key must not survive the
+    # resource stage. The store and the query response are checked on the raw
+    # text, because a repeated or caller-named key is exactly what a parsed
+    # dict hides.
+    assert "__otl_dup_" not in fixed["stored"], (
+        "a scratch key reached the store: "
+        f"{[line[:200] for line in fixed['stored'].splitlines() if '__otl_dup_' in line][:1]}"
+    )
+    for reason in ("scratchNsOnce", "scratchNsTwice", "scratchNsThrice",
+                   "scratchSvcTwice", "scratchRecTwice"):
+        row = next((record for record in records if record.get("reason") == reason), None)
+        assert row is not None, f"{reason} was not stored"
+        # The approved context is intact, so the case is a positive, not a pass
+        # by dropping the record.
+        assert row["k8s.namespace.name"] == "agents", row
+        assert row["service.name"] == "gateway", row
+        assert row["event_count"] == "1", row
+        allowed = STRUCTURED_KEYS
+        assert set(row) <= allowed, sorted(set(row) - allowed)
 
     # Rejections are counted per filter, so the drop is observable and the
     # guard is demonstrably the component that did the work.

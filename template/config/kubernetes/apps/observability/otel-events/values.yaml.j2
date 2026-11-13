@@ -174,7 +174,14 @@ alternateConfig:
             - set(attributes["__otl_dup_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil
             - keep_keys(attributes, ["__otl_dup_ns"])
             - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
-            - delete_key(attributes, "__otl_dup_ns")
+            # End with a whitelist over the approved names, never a delete of a
+            # scratch name the caller can also supply. `delete_key` resolves to
+            # `pdata.Map.Remove`, which removes the FIRST matching entry only, so
+            # a caller who repeats the scratch name leaves an occurrence behind --
+            # stored as a new field and promoted into `_stream`. `keep_keys` uses
+            # `RemoveIf` and drops every non-matching entry, and after the rebuild
+            # each approved name exists exactly once.
+            - keep_keys(attributes, ["k8s.namespace.name"])
         - context: log
           statements:
             # Nothing inherited from the caller's record attributes survives.
@@ -258,8 +265,12 @@ alternateConfig:
             - keep_keys(attributes, ["__otl_dup_ns", "__otl_dup_svc"])
             - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
             - set(attributes["service.name"], attributes["__otl_dup_svc"]) where attributes["__otl_dup_svc"] != nil
-            - delete_key(attributes, "__otl_dup_ns")
-            - delete_key(attributes, "__otl_dup_svc")
+            # Whitelist, not `delete_key`: `delete_key` is `pdata.Map.Remove`,
+            # which removes only the first matching entry. A caller who repeats
+            # the scratch name would leave an occurrence behind, stored as a new
+            # field and promoted into `_stream`. `keep_keys` removes every
+            # non-matching entry, so no caller-chosen key can survive.
+            - keep_keys(attributes, ["k8s.namespace.name", "service.name"])
         - context: log
           statements:
             # Deterministic first-occurrence normalisation. The collector keeps

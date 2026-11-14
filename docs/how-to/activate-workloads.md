@@ -18,6 +18,13 @@ It is a controlled maintenance operation, not a zero-downtime upgrade.
   activating replacement workloads or allowing a new volume to provision.
 - Keep both stages unmerged until every transition is ready. Merging quiesce
   and allowing Argo to sync stops the runtime and gateway.
+- The `kubernetes` AppProject keeps **both** the legacy `default` destination and
+  the new `gateways` destination for this transition. The old `default/magpie`
+  Application and its resources must actually be pruned before the `default`
+  grant is revoked; removing the destination in the same change that moves the
+  workload leaves the old Application outside its project while its removal is
+  attempted. Drop the transitional grant later, from a change that can show the
+  prune already happened.
 
 ## Perform the transition in order
 

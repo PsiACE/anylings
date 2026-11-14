@@ -33,6 +33,14 @@ spec:
     # its data volume are scoped to one application.
     - name: in-cluster
       namespace: gateways
+    # TRANSITIONAL: keep the legacy `default` destination while a cluster still
+    # runs the pre-migration gateway there. The renderer cannot know whether a
+    # given instance has finished pruning, so the grant stays until a later
+    # change proves the old workload is gone; revoking it in the same step that
+    # moves the workload leaves the old Application outside its project while
+    # its removal is attempted.
+    - name: in-cluster
+      namespace: default
     - name: in-cluster
       namespace: kube-system
     - name: in-cluster

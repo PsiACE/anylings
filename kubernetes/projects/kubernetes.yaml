@@ -27,6 +27,13 @@ spec:
     # its data volume are scoped to one application.
     - name: in-cluster
       namespace: gateways
+    # TRANSITIONAL: the legacy `default` destination is retained until the old
+    # `default/magpie` Application and its resources are actually pruned. Revoking
+    # it in the same change that moves the workload leaves the old Application
+    # outside its project while its removal is being attempted. Remove this grant
+    # only in a later change that proves the prune already happened.
+    - name: in-cluster
+      namespace: default
     - name: in-cluster
       namespace: kube-system
     - name: in-cluster

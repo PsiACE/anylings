@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/blueprint-contracts", "crates/blueprint-state", "crates/blueprint-service", "crates/spin-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+# Pinned exactly: this crate's dependency graph is the platform's contract
+# implementation, so an incidental upgrade must be a reviewed change here and
+# not something a resolver does on its own.
+[workspace.dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
+jsonschema = { version = "=0.58.6", default-features = false }
+blueprint-contracts = { path = "crates/blueprint-contracts" }
+blueprint-state = { path = "crates/blueprint-state" }
+blueprint-service = { path = "crates/blueprint-service" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

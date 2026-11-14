@@ -1,0 +1,37 @@
+# The single shared Spin application manifest.
+#
+# One application, one deployment, several components. This is the "small number of
+# shared runtime components, not a pod per function" decision from the blueprint: the
+# routes below are triggers of one component, not separate workloads.
+#
+# Everything here is pinned. `spin_manifest_version = 2` is the current manifest
+# format, and the SDK that produces the module is pinned exactly in
+# `platform/core/Cargo.toml` (`spin-sdk = "=8.0.0"`), so a rebuilt module always comes
+# from a known dependency set.
+#
+# The `source` below is a build output and is not committed. Build it with:
+#   rustup target add wasm32-wasip2
+#   cd platform/core && cargo build -p spin-core --release --target wasm32-wasip2
+spin_manifest_version = 2
+
+[application]
+name = "anylings-blueprint-core"
+version = "0.1.0"
+description = "Shared platform core: events, health, tasks and bounded state"
+
+# One catch-all route. The component owns its own closed route table, so adding a route
+# is a reviewable code change rather than a manifest edit that bypasses the router.
+[[trigger.http]]
+route = "/..."
+component = "core"
+
+[component.core]
+source = "../../core/target/wasm32-wasip2/release/spin_core.wasm"
+
+# The database is the platform's own SQLite file. The host resolves this handle and owns
+# the directory, its permissions, and the single-writer rule; the component never names
+# a path. `spin.toml` therefore carries no filesystem grant: the SQLite capability below
+# is the only storage access the component is given.
+[component.core.sqlite_database]
+type = "spin"
+name = "default"

@@ -1,0 +1,20 @@
+# The request logic of the shared core, with no Wasm or HTTP-server types.
+#
+# Keeping this crate host-independent is what makes the HTTP contract testable on a
+# workstation: `spin-core` only adapts Spin's request/response into `Request`/`Reply`.
+[package]
+name = "blueprint-service"
+description = "HTTP request semantics for the shared core, independent of the Wasm host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blueprint-contracts.workspace = true
+blueprint-state.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+blueprint-state.workspace = true

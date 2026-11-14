@@ -1,0 +1,25 @@
+# Thin Wasm adapter: Spin's HTTP types in, `blueprint-service` decisions out.
+#
+# The Spin SDK only builds for a wasm target, so it is a target-scoped dependency.
+# On a workstation this crate compiles as an empty library and the component entry
+# point is genuinely absent; that absence is reported as NOT-RUN, never as a pass.
+[package]
+name = "spin-core"
+description = "Spin HTTP component for the shared platform core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blueprint-contracts.workspace = true
+blueprint-service.workspace = true
+serde_json.workspace = true
+
+# Only the Wasm adapter needs the SDK, and only a wasm target can build it.
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+spin-sdk = { version = "=8.0.0", default-features = false, features = ["http", "sqlite", "json"] }

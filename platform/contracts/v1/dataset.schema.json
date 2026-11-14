@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anylings.invalid/contracts/v1/dataset.schema.json",
+  "title": "Dataset catalog, partition and immutable upload batch",
+  "description": "The catalog is a server-owned registry: a caller names a dataset by its public name and the core resolves the storage key, partition layout and authorization scope itself. No caller supplies an object path, bucket, SQL or a filesystem location. An upload batch is immutable: its identity is server-assigned and its key digest covers content, so the same logical batch re-announced is a duplicate ack, never a rewrite.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "dataset"],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "dataset": { "$ref": "#/$defs/catalogEntry" },
+    "batch": { "$ref": "#/$defs/uploadBatch" },
+    "partitions": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["partitionKey", "signal", "day"],
+        "properties": {
+          "partitionKey": {
+            "description": "Server-computed path segment. Public callers see it in results but never send it.",
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[a-z0-9][a-z0-9._/=/-]*$"
+          },
+          "signal": { "type": "string", "enum": ["metrics", "logs", "traces", "events"] },
+          "day": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+          "rowCount": { "type": "integer", "minimum": 0 },
+          "bytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "objectKey": {
+      "description": "Server-computed storage key. Returned for operator diagnostics only; it is not an accepted request field anywhere.",
+      "type": "string",
+      "maxLength": 1024
+    }
+  },
+  "$defs": {
+    "catalogEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "service", "signal", "retentionDays", "authorizationScope"],
+      "properties": {
+        "name": {
+          "description": "Public dataset name. The only dataset identifier a caller may send.",
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 63,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "service": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "signal": { "type": "string", "enum": ["metrics", "logs", "traces", "events"] },
+        "retentionDays": { "type": "integer", "minimum": 1, "maximum": 3650 },
+        "authorizationScope": {
+          "description": "Scope a caller must hold to read this dataset. Server-side only: a request that names a different scope is rejected, not filtered.",
+          "type": "string",
+          "enum": [
+            "telemetry:read",
+            "telemetry:write",
+            "query:read",
+            "task:read",
+            "task:write",
+            "health:read"
+          ]
+        },
+        "maxScanBytes": { "type": "integer", "minimum": 1048576 },
+        "state": { "type": "string", "enum": ["active", "frozen", "retired"] }
+      }
+    },
+    "uploadBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchID", "keyDigest", "state", "createdAt"],
+      "properties": {
+        "batchID": {
+          "description": "Server-assigned immutable batch identity. A caller that re-announces a batch sends this value back; it never mints one.",
+          "type": "string",
+          "pattern": "^b_[0-9a-f]{32}$"
+        },
+        "keyDigest": {
+          "description": "sha256 over the canonical batch descriptor. Two announcements of the same logical batch produce the same digest and therefore one batch. Opaque to public callers.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "objectDigest": {
+          "description": "sha256 of the uploaded object content, when the object has already been stored. Absent until then.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "state": {
+          "type": "string",
+          "enum": ["pending", "uploaded", "committed", "abandoned"],
+          "description": "pending: announced, no object yet. uploaded: object stored and digest verified. committed: cataloged and queryable, terminal. abandoned: expired pending, terminal."
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": {
+          "description": "Pending batches are bounded in time; an expired pending batch becomes abandoned and releases its slot.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

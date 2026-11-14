@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anylings.invalid/contracts/v1/error.schema.json",
+  "title": "Standardized platform error",
+  "description": "Every non-2xx reply from the shared core is this object and nothing else. Codes are a closed set so a caller can branch without parsing prose. A rejected request never carries partial success, and the message never echoes a credential, dataset path or SQL fragment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "code", "message", "retryable"],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "code": {
+      "type": "string",
+      "enum": [
+        "invalid_envelope",
+        "invalid_request",
+        "payload_too_large",
+        "unauthorized",
+        "forbidden_scope",
+        "not_found",
+        "conflict",
+        "lease_lost",
+        "outcome_unknown",
+        "rate_limited",
+        "queue_full",
+        "unavailable",
+        "internal"
+      ]
+    },
+    "message": {
+      "description": "Short, stable, non-sensitive explanation. No dataset key, path, token or SQL text.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "retryable": {
+      "description": "True only when an identical retry can succeed without operator action. A non-idempotent task whose outcome is unknown is never retryable.",
+      "type": "boolean"
+    },
+    "field": {
+      "description": "Optional pointer to the offending request field, dotted path form.",
+      "type": "string",
+      "maxLength": 128
+    },
+    "requestID": {
+      "description": "Correlation id echoed back so a caller can find the server log without being told internals.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{8,64}$"
+    }
+  },
+  "allOf": [
+    {
+      "description": "An unknown-side-effect outcome is never presented as safe to retry automatically.",
+      "if": { "properties": { "code": { "const": "outcome_unknown" } }, "required": ["code"] },
+      "then": { "properties": { "retryable": { "const": false } }, "required": ["retryable"] }
+    },
+    {
+      "description": "Authentication and authorization failures are never advertised as retryable.",
+      "if": {
+        "properties": { "code": { "enum": ["unauthorized", "forbidden_scope"] } },
+        "required": ["code"]
+      },
+      "then": { "properties": { "retryable": { "const": false } }, "required": ["retryable"] }
+    }
+  ]
+}

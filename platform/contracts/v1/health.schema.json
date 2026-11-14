@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anylings.invalid/contracts/v1/health.schema.json",
+  "title": "Health state and notification state",
+  "description": "Health is derived from a bounded window of probe results, not from the last message alone, so a single flapped sample cannot flip the state. A transition is persisted exactly once per (service, check) with a transition ID, and notifications key off that transition ID: redelivery of the same transition is a duplicate, and recovery is its own transition. Steady state never re-notifies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "check"],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "check": { "$ref": "#/$defs/check" },
+    "observation": { "$ref": "#/$defs/observation" },
+    "transition": { "$ref": "#/$defs/transition" },
+    "notification": { "$ref": "#/$defs/notification" }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "checkID", "kind", "state", "updatedAt"],
+      "properties": {
+        "service": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "checkID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "kind": { "type": "string", "enum": ["probe", "heartbeat", "derived"] },
+        "state": {
+          "type": "string",
+          "enum": ["unknown", "healthy", "degraded", "failed"],
+          "description": "unknown only until the first observation; it is not a synonym for failed."
+        },
+        "consecutiveFailures": { "type": "integer", "minimum": 0 },
+        "consecutiveSuccesses": { "type": "integer", "minimum": 0 },
+        "lastObservedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "since": {
+          "description": "When the current state began. Preserved across samples that do not change state.",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "checkID", "ok", "observedAt", "observedBy"],
+      "properties": {
+        "service": { "type": "string", "minLength": 1, "maxLength": 63 },
+        "checkID": { "type": "string", "minLength": 1, "maxLength": 63 },
+        "ok": { "type": "boolean" },
+        "observedAt": { "type": "string", "format": "date-time" },
+        "observedBy": {
+          "description": "Probe identity. An observation older than the stored lastObservedAt is discarded as stale, so an out-of-order retry cannot rewrite history.",
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128
+        },
+        "latencyMs": { "type": "integer", "minimum": 0 },
+        "detail": { "type": "string", "maxLength": 512 }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transitionID", "service", "checkID", "from", "to", "at"],
+      "properties": {
+        "transitionID": {
+          "description": "Deterministic id over (service, checkID, from, to, at). Identical transitions dedupe; a distinct recovery is a distinct id.",
+          "type": "string",
+          "pattern": "^h_[0-9a-f]{32}$"
+        },
+        "service": { "type": "string", "minLength": 1, "maxLength": 63 },
+        "checkID": { "type": "string", "minLength": 1, "maxLength": 63 },
+        "from": { "type": "string", "enum": ["unknown", "healthy", "degraded", "failed"] },
+        "to": { "type": "string", "enum": ["unknown", "healthy", "degraded", "failed"] },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "notification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transitionID", "channel", "state"],
+      "properties": {
+        "transitionID": { "type": "string", "pattern": "^h_[0-9a-f]{32}$" },
+        "channel": {
+          "description": "Configured channel name. The core never accepts a recipient address or webhook URL from a request.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "state": { "type": "string", "enum": ["pending", "delivered", "failed", "suppressed"] },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "lastAttemptAt": { "type": "string", "format": "date-time" },
+        "nextAttemptAt": {
+          "description": "Backoff cursor for a retryable delivery failure. Only set while state is pending.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "dedupeKey": {
+          "description": "Server-computed (transitionID, channel). A caller cannot choose it.",
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "task": {
+    "taskID": "t_0123456789abcdef0123456789abcdef",
+    "service": "gateway",
+    "kind": "archive",
+    "idempotent": false,
+    "state": "outcome_unknown",
+    "submittedAt": "2026-11-14T09:40:00Z",
+    "submittedBy": "operator",
+    "authorizationScope": "task:write",
+    "paramsDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "paramBytes": 512,
+    "generation": 1
+  },
+  "lease": {
+    "taskID": "t_0123456789abcdef0123456789abcdef",
+    "generation": 1,
+    "workerID": "worker-local-01",
+    "grantedAt": "2026-11-14T09:41:00Z",
+    "expiresAt": "2026-11-14T09:46:00Z"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "1",
+  "code": "outcome_unknown",
+  "message": "task side effect is unknown; reconcile before retrying",
+  "retryable": false
+}

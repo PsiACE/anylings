@@ -1,0 +1,14 @@
+[package]
+name = "blueprint-state"
+description = "SQLite state layer: event dedup, health, bounded queues, task leases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blueprint-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true

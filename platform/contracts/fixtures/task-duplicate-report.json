@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1",
+  "task": {
+    "taskID": "t_fedcba9876543210fedcba9876543210",
+    "service": "gateway",
+    "kind": "probe",
+    "idempotent": true,
+    "state": "succeeded",
+    "submittedAt": "2026-11-14T09:50:00Z",
+    "submittedBy": "operator",
+    "authorizationScope": "task:write",
+    "paramsDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "paramBytes": 128,
+    "generation": 1
+  },
+  "report": {
+    "taskID": "t_fedcba9876543210fedcba9876543210",
+    "generation": 1,
+    "workerID": "worker-local-01",
+    "outcome": "succeeded",
+    "reportedAt": "2026-11-14T09:52:00Z",
+    "exitCode": 0,
+    "summary": "endpoint answered 200",
+    "resultDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "duplicate": true
+  },
+  "artifact": {
+    "artifactID": "a_5555555555555555555555555555555a",
+    "name": "result.json",
+    "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "bytes": 2048,
+    "uploadedAt": "2026-11-14T09:51:00Z"
+  }
+}

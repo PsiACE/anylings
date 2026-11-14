@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "1",
+  "code": "forbidden_scope",
+  "message": "principal does not hold the required scope",
+  "retryable": false,
+  "requestID": "req-6c1f0a2e"
+}

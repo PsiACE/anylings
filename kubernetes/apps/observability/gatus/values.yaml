@@ -138,13 +138,11 @@ configMaps:
           # caller, so a 401 is the healthy answer here.
           - name: magpie-gateway
             group: platform
-            # PRODUCTION COMPATIBILITY ADJUSTMENT (publication layer only).
-            # The template targets the post-cutover gateway namespace. This
-            # instance still runs the gateway in `default` because the
-            # Bub/gateways workload cutover is deliberately out of scope for
-            # the observability release, so probe the deployed service. Revert
-            # to the template value in the same change as that cutover.
-            url: "http://magpie.default.svc.cluster.local:3425/v1/models"
+            # Activation stage: the gateway now lives in `gateways`, so the
+            # probe targets that service again. The morning observability
+            # publication used `magpie.default.svc` only because the cutover
+            # had not run yet; this tree is that cutover.
+            url: "http://magpie.gateways.svc.cluster.local:3425/v1/models"
             interval: 60s
             conditions:
               - "[STATUS] == 401"

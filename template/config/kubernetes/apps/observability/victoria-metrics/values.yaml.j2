@@ -138,6 +138,11 @@ server:
           static_configs:
             - targets: [victoria-logs.observability.svc.cluster.local:9428]
           sample_limit: 2000
+        - job_name: victoria-traces
+          # The trace store's own health and ingest counters.
+          static_configs:
+            - targets: [victoria-traces.observability.svc.cluster.local:10428]
+          sample_limit: 2000
         - job_name: cloudflare-tunnel
           # The public frontdoor's own counters, from cloudflared's metrics
           # listener. These are real request aggregates: every request the

@@ -98,7 +98,7 @@ check_default_off() {
 check_enabled_apps() {
   local apps="$enabled_out/kubernetes/apps/observability" project="$enabled_out/kubernetes/projects/kubernetes.yaml"
   local app text
-  for app in victoria-metrics gatus otel-kubelet kube-state-metrics victoria-logs otel-events; do
+  for app in victoria-metrics gatus otel-kubelet kube-state-metrics victoria-logs victoria-traces otel-events; do
     [ -f "$apps/$app/config.json" ] || die "$app was not published as an application"
     [ -f "$apps/$app/values.yaml" ] || die "$app has no rendered values file"
   done
@@ -122,7 +122,10 @@ check_enabled_apps() {
   jq -e '.chart == "opentelemetry-collector" and .chartVersion == "0.140.0"' \
     "$apps/otel-events/config.json" >/dev/null \
     || die "the event collector reuses the pinned collector chart"
-  log "enabled slice publishes six pinned applications with a scoped AppProject"
+  jq -e '.chart == "victoria-traces-single" and .chartVersion == "0.1.13"' \
+    "$apps/victoria-traces/config.json" >/dev/null \
+    || die "the trace store chart is not pinned to the reviewed version"
+  log "enabled slice publishes seven pinned applications with a scoped AppProject"
 }
 
 # -------------------------------------------------------- chart rendering --
@@ -624,15 +627,19 @@ assert events['include_initial_state'] is False, events
 assert events['objects'] == [{'name': 'events', 'mode': 'watch'}], events
 assert set(config['receivers']['otlp']['protocols']) == {'http'}
 
-# One exporter, and it is VictoriaLogs' own OTLP path: no third pipeline stage.
-assert set(config['exporters']) == {'otlphttp/victoria-logs'}
+# Two exporters: VictoriaLogs' own OTLP path for logs, and a separate trace
+# exporter. Neither signal can land in the other store.
+assert set(config['exporters']) == {'otlphttp/victoria-logs', 'otlphttp/victoria-traces'}
 endpoint = config['exporters']['otlphttp/victoria-logs']['logs_endpoint']
 assert endpoint == 'http://victoria-logs.observability.svc.cluster.local:9428/insert/opentelemetry/v1/logs', endpoint
 
 pipelines = config['service']['pipelines']
-assert set(pipelines) == {'logs/events', 'logs/structured'}, pipelines
+assert set(pipelines) == {'logs/events', 'logs/structured', 'traces'}, pipelines
 for name, pipeline in pipelines.items():
-    assert pipeline['exporters'] == ['otlphttp/victoria-logs'], (name, pipeline)
+    if name.startswith('logs/'):
+        assert pipeline['exporters'] == ['otlphttp/victoria-logs'], (name, pipeline)
+    else:
+        assert pipeline['exporters'] == ['otlphttp/victoria-traces'], (name, pipeline)
 # Types are checked before any regex or range, that allowlist runs before the
 # shape stage, and the shape stage runs before the exporter. A record rejected
 # by the type guard can therefore never reach the statement that composes a
@@ -1114,6 +1121,179 @@ PYPROBE
   log "frontdoor aggregates, probe success/failure and webhook delivery configured"
 }
 
+# ---------------------------------------------------------------- traces --
+
+# A trace is a timed operation with an identity and a parent, not a log line
+# carrying a correlation id. The rendered trace path must be its own exporter,
+# its own store, and an attribute allowlist that drops rather than sanitizes.
+check_traces() {
+  local out="$scratch/victoria-traces.yaml" collector args
+  chart_render "$enabled_out/kubernetes/apps/observability/victoria-traces" "$out"
+  assert_no_public_exposure "$out" "the trace store"
+  kubeconform -strict -summary "$out"
+
+  yq -e 'select(.kind == "Deployment")' "$out" >/dev/null \
+    || die "the trace store rendered no Deployment"
+  args="$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[].args[]' "$out")"
+  grep -qx -- '--retentionPeriod=7d' <<<"$args" \
+    || die "the trace store does not run with an explicit 7d retention"
+  grep -q -- '^--retention.maxDiskSpaceUsageBytes=' <<<"$args" \
+    || die "the trace store does not cap the disk its retention may use"
+  grep -q -- '^--memory.allowedBytes=' <<<"$args" \
+    || die "the trace store does not bound its memory budget"
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.containers[] | .resources.limits.memory' "$out" >/dev/null \
+    || die "the trace store container has no memory limit"
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.securityContext.runAsNonRoot == true' "$out" >/dev/null \
+    || die "the trace store pod does not require a non-root user"
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.containers[].securityContext.readOnlyRootFilesystem == true' \
+    "$out" >/dev/null \
+    || die "the trace store container has a writable root filesystem"
+  yq -e 'select(.kind == "Deployment")
+    | .spec.template.spec.volumes[] | select(.emptyDir) | .emptyDir.sizeLimit' \
+    "$out" >/dev/null \
+    || die "the trace store scratch volume has no sizeLimit"
+  if yq -e 'select(.kind == "PersistentVolumeClaim")' "$out" >/dev/null 2>&1; then
+    die "the trace store provisions a PersistentVolumeClaim on its own"
+  fi
+  for kind in ClusterRole ClusterRoleBinding; do
+    if yq -e "select(.kind == \"$kind\")" "$out" >/dev/null 2>&1; then
+      die "the trace store renders a $kind, which an HTTP store does not need"
+    fi
+  done
+  # The Service must expose the native OTLP ingest port the collector targets.
+  local port
+  port="$(yq -r 'select(.kind == "Service") | .spec.ports[] | select(.name == "http") | .port' "$out")"
+  [ "$port" = 10428 ] || die "the trace store Service does not expose 10428 (got $port)"
+
+  # The collector half: a dedicated trace exporter, and a trace pipeline that
+  # never routes through the log exporter.
+  collector="$(yq -r 'select(.kind == "ConfigMap") | .data.relay // ""' "$scratch/otel-events.yaml")"
+  printf '%s\n' "$collector" >"$scratch/rendered-traces-collector.yaml"
+  uv run --quiet --locked --no-dev python - "$scratch/rendered-traces-collector.yaml" <<'PYTRACES'
+import sys
+import yaml
+
+config = yaml.safe_load(open(sys.argv[1]))
+assert "traces" in config["service"]["pipelines"], list(config["service"]["pipelines"])
+pipeline = config["service"]["pipelines"]["traces"]
+assert pipeline["exporters"] == ["otlphttp/victoria-traces"], pipeline
+# A span must not be written into the log store, and the log pipelines must not
+# carry the trace exporter.
+assert "otlphttp/victoria-logs" not in pipeline["exporters"], pipeline
+for name, other in config["service"]["pipelines"].items():
+    if name.startswith("logs/"):
+        assert "otlphttp/victoria-traces" not in other["exporters"], (name, other)
+exporter = config["exporters"]["otlphttp/victoria-traces"]
+assert exporter["traces_endpoint"].endswith("/insert/opentelemetry/v1/traces"), exporter
+assert "victoria-traces.observability.svc.cluster.local:10428" in exporter["traces_endpoint"], exporter
+# The processors must run in the order that makes the allowlist meaningful:
+# drop, then rebuild, then export.
+assert pipeline["processors"] == [
+    "memory_limiter", "filter/traces_privacy", "transform/traces_privacy"], pipeline
+
+# Every retained surface is rebuilt from an explicit key set, and the surfaces
+# that cannot be allowlisted safely are cleared outright.
+shape = config["processors"]["transform/traces_privacy"]["trace_statements"]
+span_group = next(group for group in shape if group["context"] == "span")
+assert 'set(status.message, "")' in span_group["statements"], span_group
+event_group = next(group for group in shape if group["context"] == "spanevent")
+assert "keep_keys(attributes, [])" in event_group["statements"], event_group
+assert any(s.startswith("set(name, ") for s in event_group["statements"]), event_group
+scope_group = next(group for group in shape if group["context"] == "scope")
+assert "keep_keys(scope.attributes, [])" in scope_group["statements"], scope_group
+assert any(s.startswith("set(scope.name,") for s in scope_group["statements"]), scope_group
+resource_group = next(group for group in shape if group["context"] == "resource")
+# Nothing copies a caller map wholesale.
+assert not any(s.startswith("set(attributes,") for s in span_group["statements"]
+               + resource_group["statements"])
+
+# The name contract accepts the shapes real instrumentations emit, and the
+# allowed keys are value-checked too -- key filtering alone would store a
+# credential placed in an allowed key.
+filters = config["processors"]["filter/traces_privacy"]["traces"]["span"]
+# The name is type-checked and value-checked, in two statements.
+assert any("not IsString(name)" in s for s in filters), filters
+name_filter = next(s for s in filters if "IsMatch(name" in s)
+# Route templates (leading slash) and letter-initial operation names are the
+# accepted shapes; free text is not.
+assert name_filter.startswith("not IsMatch(name,"), name_filter
+assert "/" in name_filter.split("^(", 1)[1][:4], name_filter
+method_filter = next(s for s in filters if 'attributes["http.request.method"]' in s)
+assert "GET|HEAD|POST|PUT|PATCH|DELETE" in method_filter, method_filter
+status_filter = next(s for s in filters if 'attributes["http.response.status_code"]' in s)
+assert "IsInt(" in status_filter and "< 100" in status_filter, status_filter
+# A span carrying links is rejected whole, because this release has no link
+# context and the store's LogSQL projection keeps link attributes.
+assert any("Len(links) > 0" in s for s in filters), filters
+# Trace state is cleared on the span, not stored.
+assert 'set(trace_state, "")' in span_group["statements"], span_group
+# Retained maps are REBUILT, not filtered in place. `attributes[...]` reads the
+# first occurrence while the exporter keeps every one, so a valid-then-hostile
+# duplicate would pass an in-place check and still be exported. Both maps must
+# copy out, drop the originals, and write back only the checked copies.
+print("[observability] trace rebuild check running")
+for group, prefix in ((resource_group, "__trace_keep_"), (span_group, "__trace_keep_")):
+    statements = group["statements"]
+    copies = [s for s in statements if s.startswith(f'set(attributes["{prefix}')]
+    assert copies, (group["context"], statements)
+    for copy in copies:
+        assert " where " in copy and ("IsMatch" in copy or "IsInt" in copy), copy
+    # The scratch-only keep, distinct from the approved-name allowlist.
+    keep = next(s for s in statements
+                if s.startswith("keep_keys(attributes, [") and prefix in s)
+    import re as _re
+    kept_names = _re.findall(r'"([^"]+)"', keep)
+    assert kept_names, keep
+    for name in kept_names:
+        assert name.startswith(prefix), (group["context"], name)
+    # Each scratch key is removed after the write-back, or it would persist as
+    # a field of its own.
+    deletes = [s for s in statements if s.startswith("delete_key(attributes,")]
+    assert deletes, (group["context"], statements)
+    for name in kept_names:
+        assert f'delete_key(attributes, "{name}")' in deletes, (name, deletes)
+    # The scratch channel is closed BEFORE the copies by an allowlist of the
+    # approved real names. `delete_key` per scratch name was not enough: it
+    # removes only the first occurrence, so a doubled scratch key survived and
+    # was written back as the real key (measured at the previous head with
+    # entirely legal route values).
+    keeps = [i for i, s in enumerate(statements)
+             if s.startswith("keep_keys(attributes, [")]
+    first_copy = next(i for i, s in enumerate(statements)
+                      if s.startswith('set(attributes["') and prefix in s)
+    opens = [i for i in keeps if i < first_copy]
+    assert opens, (group["context"], keeps, first_copy)
+    approved = _re.findall(r'"([^"]+)"', statements[opens[0]])
+    assert approved, statements[opens[0]]
+    for name in approved:
+        assert not name.startswith(prefix), (group["context"], name)
+    # The final map also keeps only approved names, after the write-back.
+    closes = [i for i in keeps if i > first_copy]
+    assert closes, (group["context"], keeps)
+    final = _re.findall(r'"([^"]+)"', statements[closes[-1]])
+    assert final == approved, (group["context"], final, approved)
+    # No per-scratch `delete_key` is used to enforce closure, because one call
+    # cannot remove a duplicate.
+    closure = [s for s in statements
+               if s.startswith("delete_key(attributes,") and prefix in s]
+    assert not closure or all(i > first_copy for i in [
+        statements.index(s) for s in closure]), (group["context"], closure)
+# Query delimiters are absent from the name/route classes: a query string is not
+# an operation identifier.
+for statement in (name_filter, *[s for s in filters if 'attributes["http.route"]' in s]):
+    class_text = statement.split('"^', 1)[1].split('$"', 1)[0]
+    # `?` and `=` are unambiguous query delimiters. `,` is checked as a pair
+    # with `=` because it is also a legal literal inside a character class.
+    assert "?" not in class_text, statement
+    assert "=" not in class_text, statement
+print("[observability] trace path: dedicated exporter, ordered drop-then-rebuild, closed attribute set")
+PYTRACES
+  log "trace store: 7d + disk caps, non-root, ClusterIP, no claim, no cluster RBAC; collector has a dedicated trace pipeline"
+}
+
 check_default_off
 check_enabled_apps
 check_metric_store
@@ -1123,6 +1303,7 @@ check_status_dashboards
 check_workload_metrics
 check_wiring
 check_frontdoor_probe_delivery
+check_traces
 if [ "${1:-}" = --runtime ]; then
   : "${OTELCOL_BIN:?set OTELCOL_BIN to the pinned 0.140.1 release binary}"
   : "${VICTORIA_METRICS_BIN:?set VICTORIA_METRICS_BIN to the pinned v1.155.0 release binary}"
@@ -1141,6 +1322,16 @@ if [ "${1:-}" = --runtime ]; then
   # The frontdoor-access, probe and delivery paths need the same rendered
   # artifacts plus the pinned Gatus and cloudflared binaries.
   : "${GATUS_BIN:?set GATUS_BIN to the pinned Gatus v5.38.0 release binary}"
+  # The trace slice needs the rendered collector and store documents plus the
+  # pinned VictoriaTraces binary.
+  : "${VICTORIA_TRACES_BIN:?set VICTORIA_TRACES_BIN to the pinned v0.13.0 release binary}"
+  mise exec -- helm template victoria-traces \
+    oci://ghcr.io/victoriametrics/helm-charts/victoria-traces-single \
+    --version 0.1.13 --namespace observability \
+    --values "$enabled_out/kubernetes/apps/observability/victoria-traces/values.yaml" \
+    >"$scratch/victoria-traces.yaml" 2>>"$scratch/chart-pull.log" \
+    || die "could not render the trace store chart for the runtime fixture"
+  [ -s "$scratch/victoria-traces.yaml" ] || die "the trace store chart rendered nothing"
   yq -r 'select(.kind == "ConfigMap") | .data["config.yaml"] // ""' "$scratch/gatus.yaml" \
     >"$scratch/gatus-config-rendered.yaml" \
     || die "could not extract the rendered Gatus configuration"
@@ -1169,6 +1360,9 @@ if [ "${1:-}" = --runtime ]; then
   yq -r '.data["frontdoor-access.json"]' "$enabled_out/kubernetes/apps/observability/victoria-metrics/dashboards.yaml" \
     | jq '[.rows[].panels[].expr[]]' >"$scratch/frontdoor-queries.json"
   uv run --quiet --locked --no-dev python tests/ci/frontdoor-probe-delivery-runtime.py "$scratch"
+  # Trace slice: workload span -> collector filter/shape -> VictoriaTraces ->
+  # Jaeger query, with the privacy allowlist proved by hostile attributes.
+  uv run --quiet --locked --no-dev python tests/ci/traces-runtime.py "$scratch"
   uv run --quiet --locked --no-dev python tests/ci/observability-runtime.py "$scratch"
   # The same rendered collector configuration, with only loopback endpoints
   # substituted, feeds the actual log store and is then queried.

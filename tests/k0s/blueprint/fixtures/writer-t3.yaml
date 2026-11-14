@@ -1,0 +1,71 @@
+# Fixture T3-like writer: the second dataset that must stay on its own claim.
+#
+# Same shape as the gateway writer with its own data, so the rehearsal can prove
+# the gateway rebind never moves or deletes this claim: its UID is expected to
+# be identical at every phase, forward and reverse.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: writer-t3
+  namespace: blueprint-agents
+  labels:
+    anylings.dev/owner: blueprint-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      anylings.dev/owner: blueprint-fixture
+      app.kubernetes.io/name: writer-t3
+  template:
+    metadata:
+      labels:
+        anylings.dev/owner: blueprint-fixture
+        app.kubernetes.io/name: writer-t3
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: writer
+          image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /data/records /data/state
+              if [ ! -f /data/records/records.ndjson ]; then
+                i=0
+                while [ "$i" -lt 120 ]; do
+                  printf '{"seq":%s,"dataset":"t3","value":"synthetic-%s"}\n' "$i" "$i"
+                  i=$((i + 1))
+                done > /data/records/records.ndjson
+                printf 't3\n' > /data/state/owner
+              fi
+              printf 'writer-t3-start\n' >> /data/state/writer.log
+              while :; do
+                date +%s.%N >> /data/state/heartbeat
+                sleep 1
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: t3-code-home

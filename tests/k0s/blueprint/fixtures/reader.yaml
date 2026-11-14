@@ -1,0 +1,95 @@
+# Fixture read-only readers: the only permitted holder after quiesce.
+#
+# The production maintenance readers this mirrors exist because tar cannot be
+# run from a writer Pod that has already been stopped. They are one-time
+# operator utility Pods, not GitOps workloads: no ServiceAccount token, no
+# ports, read-only root filesystem, all capabilities dropped, and the claim
+# mounted read-only at both the volume and the mount.
+#
+# Deliberately no fsGroup: fsGroup would chown the volume, which is a
+# filesystem write this procedure must never perform.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-gateway
+  namespace: blueprint-source
+  labels:
+    anylings.dev/owner: blueprint-fixture
+    anylings.dev/utility: read-only-reader
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: reader
+      image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 8Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: data
+          mountPath: /src
+          readOnly: true
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: magpie-config
+        readOnly: true
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-t3
+  namespace: blueprint-agents
+  labels:
+    anylings.dev/owner: blueprint-fixture
+    anylings.dev/utility: read-only-reader
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: reader
+      image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 8Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: data
+          mountPath: /src
+          readOnly: true
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: t3-code-home
+        readOnly: true

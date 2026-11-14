@@ -76,7 +76,7 @@ def encrypt(tar_path: Path, sealed_path: Path, recipient: str) -> int:
     """Encrypt file to file. A blank recipient is refused, never defaulted."""
     if not recipient.strip():
         raise BackupError("recipient-blank")
-    return _run(
+    status = _run(
         [
             "sops",
             "--encrypt",
@@ -91,6 +91,11 @@ def encrypt(tar_path: Path, sealed_path: Path, recipient: str) -> int:
             str(tar_path),
         ]
     )
+    # SOPS creates the archive with the ambient umask, which is not this
+    # procedure's confidentiality promise: a ciphertext is still private custody.
+    if status == 0 and sealed_path.exists():
+        sealed_path.chmod(0o600)
+    return status
 
 
 def decrypt(sealed_path: Path, plain_path: Path, key_file: Path | None = None) -> int:

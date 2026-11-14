@@ -61,6 +61,11 @@ class Custody(unittest.TestCase):
         self.assertNotIn("synthetic", archive.line())
         self.assertNotIn("records.ndjson", archive.line())
 
+    def test_ciphertext_is_private_to_its_custody(self) -> None:
+        sealed = self.directory / "sealed.sops"
+        self.assertEqual(backup.encrypt(self.dataset(), sealed, self.recipient), 0)
+        self.assertEqual(sealed.stat().st_mode & 0o777, 0o600)
+
     def test_ciphertext_does_not_contain_the_payload(self) -> None:
         tar_path = self.dataset()
         sealed = self.directory / "sealed.sops"

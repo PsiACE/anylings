@@ -112,6 +112,12 @@ cd platform/core
 cargo build -p spin-core --release --target wasm32-wasip2
 ```
 
+The module lands at `platform/core/target/wasm32-wasip2/release/spin_core.wasm`, which is
+exactly what the manifest's `source` names. Spin resolves that path against the
+manifest's own directory, so it is `core/target/...` rather than `platform/core/...`.
+`tests/blueprint/core/check.sh` asserts that the path stays inside the repository, because
+a `../` slip there is invisible until `spin up` fails.
+
 ## What is NOT-RUN here, and why
 
 This phase could not execute the Spin component, and does not claim to.

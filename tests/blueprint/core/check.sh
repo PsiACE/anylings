@@ -40,4 +40,22 @@ done
 # its own tests, so a JSON edit that the code did not follow fails above.
 [ -f platform/contracts/limits.json ] || { log 'error: limits.json is missing'; exit 1; }
 
+log 'spin manifest source resolves inside the repository'
+manifest="platform/spin.toml"
+[ -f "$manifest" ] || { log 'error: platform/spin.toml is missing'; exit 1; }
+source_path="$(sed -n 's/^source = "\(.*\)"$/\1/p' "$manifest" | head -1)"
+[ -n "$source_path" ] || { log 'error: no component source in the manifest'; exit 1; }
+case "$source_path" in
+    /*) log "error: component source must be relative, got $source_path"; exit 1 ;;
+esac
+# Spin resolves `source` against the manifest's own directory, so the guard must too.
+resolved="$(dirname "$manifest")/$source_path"
+case "$(realpath -m "$resolved")" in
+    "$PWD"/*) ;;
+    *) log "error: component source escapes the repository: $source_path"; exit 1 ;;
+esac
+case "$source_path" in
+    ../*) log "error: component source walks above the manifest directory: $source_path"; exit 1 ;;
+esac
+
 log 'ok'

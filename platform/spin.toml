@@ -26,7 +26,8 @@ route = "/..."
 component = "core"
 
 [component.core]
-source = "../../core/target/wasm32-wasip2/release/spin_core.wasm"
+# Relative to this manifest's own directory (`platform/`), not the repository root.
+source = "core/target/wasm32-wasip2/release/spin_core.wasm"
 
 # The database is the platform's own SQLite file. The host resolves this handle and owns
 # the directory, its permissions, and the single-writer rule; the component never names

@@ -17,7 +17,7 @@ platform behaves the same way whichever control plane you bring.
 | Cloudflare Tunnel         | always  | Outbound-only connector in the cluster; the tunnel, routes, DNS and Access applications belong to the `cloudflare` OpenTofu root                                              |
 | Magpie model gateway      | always  | One replica, gateway-key authentication, no vendor credential in Git; `/config` is ephemeral unless you name an existing claim                                                |
 | Bub agent runtime         | opt-in  | One replica with a browser surface, behind the server's own pairing or bearer tokens; you publish the amd64 image and choose the provider and model at runtime                |
-| Self-hosted observability | opt-in  | Metrics, probe status, workload state, kubelet usage and operational logs as ClusterIP Services; no application or node log collection, no traces, no Grafana                 |
+| Self-hosted observability | opt-in  | Seven ClusterIP applications: metrics, probe status, workload state, kubelet usage, operational logs and request traces; no application or node log collection, no Grafana    |
 | SpinKube                  | opt-in  | cert-manager plus the Spin operator and one sample WASM app, all ClusterIP-only                                                                                               |
 
 Retention values are query bounds, not proof of deletion: an `emptyDir` store
@@ -57,8 +57,9 @@ and default.
 ## Observability
 
 Opt in with `[observability] enabled = true`. A disabled section publishes
-nothing. The slice keeps one metric store, one operational log store, probe
-status, kubelet usage and workload state as ClusterIP Services; retention and
+nothing. The slice keeps one metric store, one operational log store and one
+request-trace store, plus probe status, kubelet usage and workload state, as
+ClusterIP Services; retention and
 sizing are in the [configuration
 reference](docs/reference/configuration.md#optional-slices-observability-and-spinkube).
 
@@ -66,6 +67,11 @@ Log coverage is Kubernetes Events plus a structured OTLP record — not applicat
 or node container logs — and retention is a query bound, not erasure. The exact
 field contract, rejected-record behaviour and verification commands are in the
 [operational logs how-to](docs/observability/operational-logs.md).
+
+Traces are inbound OTLP spans your workloads send; the slice stores and queries
+them, and does not instrument anything for you. Accepted span fields, cleared
+caller surfaces, retention and the query API are in the [request traces
+page](docs/observability/traces.md).
 
 ## Documentation
 
@@ -75,6 +81,7 @@ field contract, rejected-record behaviour and verification commands are in the
 - [OpenTofu roots](infra/tofu/README.md) — the four roots, their inputs, state and validation.
 - [k0s lifecycle](infra/tofu/k0s/README.md) — reset, drift and destruction behaviour for the native backend.
 - [Operational logs](docs/observability/operational-logs.md) — the exact log record contract, retention and verification.
+- [Request traces](docs/observability/traces.md) — accepted span fields, cleared surfaces, retention and querying.
 - [Retained volume preflight](docs/how-to/rebind-retained-volume.md) — read-only inspection only; it rebinds nothing.
 
 ## Security boundaries

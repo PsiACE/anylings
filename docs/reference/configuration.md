@@ -100,10 +100,10 @@ published-image section below for the supply requirements.
 
 ### Optional slices: observability and SpinKube
 
-| Key                     | Default | Effect when `enabled = true`                                                                                                              |
-| ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `observability.enabled` | `false` | Six ClusterIP applications: VictoriaMetrics, Gatus, kube-state-metrics, per-node kubelet collectors, VictoriaLogs and one event collector |
-| `spinkube.enabled`      | `false` | cert-manager, the Spin operator with its CRDs, one executor and one sample app in `spinkube`                                              |
+| Key                     | Default | Effect when `enabled = true`                                                                                                                                |
+| ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `observability.enabled` | `false` | Seven ClusterIP applications: VictoriaMetrics, Gatus, kube-state-metrics, per-node kubelet collectors, VictoriaLogs, one event collector and VictoriaTraces |
+| `spinkube.enabled`      | `false` | cert-manager, the Spin operator with its CRDs, one executor and one sample app in `spinkube`                                                                |
 
 Disabled publishes nothing, adds no namespace and allows no extra chart registry.
 
@@ -116,6 +116,7 @@ Observability bounds, as rendered:
 | kube-state-metrics | 1 replica, explicit metric allowlist | 20m / 48Mi  | 100m / 128Mi |
 | kubelet collector  | 1 Pod per node, 30s interval         | 30m / 64Mi  | 200m / 160Mi |
 | event collector    | 1 replica, Events + structured OTLP  | 30m / 96Mi  | 300m / 256Mi |
+| VictoriaTraces     | `7d` and 1GiB, 2Gi `emptyDir`        | 25m / 96Mi  | 400m / 384Mi |
 | Gatus              | in-memory history, capped by count   | 10m / 32Mi  | — / 128Mi    |
 
 Retention and size are **query and storage targets**, not erasure guarantees, and
@@ -127,6 +128,12 @@ when less than 256MiB of free disk remains. Log coverage is Kubernetes Events pl
 structured OTLP record; see [operational
 logs](../observability/operational-logs.md) for the field contract rather than
 assuming container or node log collection.
+
+Traces are OTLP spans a workload sends; the slice stores and queries them, it
+does not instrument a workload or generate spans. The trace store keeps `7d` and
+1GiB in a bounded `emptyDir`, under the same query-bound, not-erasure, caveat.
+Accepted fields, the cleared caller surfaces and the query API are in the
+[request traces](../observability/traces.md) page.
 
 ### Optional alert delivery
 

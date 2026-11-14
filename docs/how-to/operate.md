@@ -117,9 +117,11 @@ just plan platform
 just apply platform
 ```
 
-`just wait platform` waits for the bootstrap Application, not for every generated
-workload. Applications appear asynchronously as the ApplicationSet discovers
-them. Do not rerun bootstrap to upgrade.
+`just wait platform` waits for the Argo CD component rollouts and for its
+Application, AppProject and ApplicationSet CRDs to be established — not for the
+bootstrap Application to sync, and not for every generated workload.
+Applications appear asynchronously as the ApplicationSet discovers them. Do not
+rerun bootstrap to upgrade.
 
 ## Change the platform
 

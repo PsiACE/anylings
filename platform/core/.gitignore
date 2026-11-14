@@ -1,0 +1,3 @@
+# Cargo build output. The Spin module built here is a derived artifact; it is rebuilt
+# from the pinned lockfile, never committed.
+/target/

@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anylings.invalid/contracts/v1/task.schema.json",
+  "title": "Task lifecycle, claim lease and result report",
+  "description": "One task is submitted once, claimed at most once per lease generation, and settled by exactly one accepted report. Leases are optimistic: every claim increments generation, and a heartbeat or report carrying an older generation is rejected as lease_lost rather than silently applied. Expiry is not permission to re-run: for non-idempotent work an expired lease moves the task to outcome_unknown and waits for an explicit reconciliation, because a worker that lost the lease may already have caused the side effect. Uploaded artifacts without an accepted report are likewise reconciled, and a duplicate report is an idempotent no-op that returns the first accepted outcome.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "task"],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "task": { "$ref": "#/$defs/task" },
+    "lease": { "$ref": "#/$defs/lease" },
+    "report": { "$ref": "#/$defs/report" },
+    "artifact": { "$ref": "#/$defs/artifact" }
+  },
+  "$defs": {
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskID",
+        "service",
+        "kind",
+        "idempotent",
+        "state",
+        "submittedAt",
+        "submittedBy",
+        "authorizationScope"
+      ],
+      "properties": {
+        "taskID": { "type": "string", "pattern": "^t_[0-9a-f]{32}$" },
+        "service": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "kind": {
+          "description": "Closed set of executable work kinds. A new kind is a contract change, not a free-form string.",
+          "type": "string",
+          "enum": ["probe", "query", "archive", "verify"]
+        },
+        "idempotent": {
+          "description": "Declared by the submitting service and enforced by the core. Only idempotent work may be reclaimed automatically after lease expiry.",
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "submitted",
+            "leased",
+            "cancel_requested",
+            "outcome_unknown",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "expired"
+          ],
+          "description": "submitted: durable and claimable. leased: a live worker holds a generation. cancel_requested: cancel recorded, worker must stop and report. outcome_unknown: side effect may have happened; needs reconciliation, never auto-run. succeeded/failed/cancelled/expired: terminal."
+        },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "submittedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "description": "Authenticated principal that submitted the task; the only principal allowed to cancel it or reconcile its unknown outcome."
+        },
+        "authorizationScope": {
+          "type": "string",
+          "enum": ["task:read", "task:write"]
+        },
+        "paramsDigest": {
+          "description": "sha256 of the stored parameters. Parameters themselves stay server-side; a caller sees only this digest.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "paramBytes": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+        "generation": {
+          "description": "Monotonic claim generation. Zero before the first claim, incremented by each successful claim, never reused.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "deadline": {
+          "description": "Absolute lease deadline of the current generation. A report or heartbeat after it is stale.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "result": { "$ref": "#/$defs/report" },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/artifact" }
+        }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskID", "generation", "workerID", "grantedAt", "expiresAt"],
+      "properties": {
+        "taskID": { "type": "string", "pattern": "^t_[0-9a-f]{32}$" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "workerID": {
+          "description": "Opaque worker identity for this claim. The same worker re-claiming gets a new generation; it never extends the old one implicitly.",
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "grantedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "heartbeatAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactID", "name", "digest", "bytes"],
+      "properties": {
+        "artifactID": { "type": "string", "pattern": "^a_[0-9a-f]{32}$" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "digest": {
+          "description": "sha256 of artifact content. The core records it and never re-derives it from a worker-supplied string.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "uploadedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskID", "generation", "workerID", "outcome", "reportedAt"],
+      "properties": {
+        "taskID": { "type": "string", "pattern": "^t_[0-9a-f]{32}$" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "workerID": { "type": "string", "minLength": 8, "maxLength": 128 },
+        "outcome": { "type": "string", "enum": ["succeeded", "failed"] },
+        "reportedAt": { "type": "string", "format": "date-time" },
+        "exitCode": { "type": "integer", "minimum": -255, "maximum": 255 },
+        "summary": { "type": "string", "maxLength": 1024 },
+        "resultDigest": {
+          "description": "Digest of the uploaded result payload, when the task produced one. A report naming a digest the core never stored fails reconciliation instead of inventing a result.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "duplicate": {
+          "description": "Set by the core on the response when this report matched an already accepted one. The stored outcome is returned unchanged.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

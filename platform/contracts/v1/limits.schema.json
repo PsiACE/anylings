@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anylings.invalid/contracts/v1/limits.schema.json",
+  "title": "Bounded platform limits",
+  "description": "Hard bounds applied by the shared core before any durable write. Instances of this schema are the single source of truth for the numbers; the state layer asserts its compiled constants against the instance so the two cannot drift.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "request",
+    "event",
+    "page",
+    "result",
+    "task",
+    "dataset",
+    "storage",
+    "query"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxBodyBytes", "maxBatchItems", "maxHeaderValueBytes"],
+      "properties": {
+        "maxBodyBytes": { "type": "integer", "minimum": 1024, "maximum": 8388608 },
+        "maxBatchItems": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxHeaderValueBytes": { "type": "integer", "minimum": 128, "maximum": 8192 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxAttributes",
+        "maxAttributeKeyBytes",
+        "maxAttributeValueBytes",
+        "maxClockSkewSeconds"
+      ],
+      "properties": {
+        "maxAttributes": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "maxAttributeKeyBytes": { "type": "integer", "minimum": 8, "maximum": 256 },
+        "maxAttributeValueBytes": { "type": "integer", "minimum": 32, "maximum": 4096 },
+        "maxClockSkewSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defaultSize", "maxSize"],
+      "properties": {
+        "defaultSize": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "maxSize": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxRows", "maxBytes", "maxArtifacts"],
+      "properties": {
+        "maxRows": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "maxBytes": { "type": "integer", "minimum": 4096, "maximum": 33554432 },
+        "maxArtifacts": { "type": "integer", "minimum": 1, "maximum": 256 }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxParamBytes",
+        "leaseSeconds",
+        "heartbeatSeconds",
+        "maxReportsPerTask",
+        "maxOpenTasksPerService"
+      ],
+      "properties": {
+        "maxParamBytes": { "type": "integer", "minimum": 256, "maximum": 1048576 },
+        "leaseSeconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
+        "heartbeatSeconds": { "type": "integer", "minimum": 5, "maximum": 600 },
+        "maxReportsPerTask": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "maxOpenTasksPerService": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxPendingBatches",
+        "maxCatalogPerService",
+        "maxPartitionsPerBatch",
+        "maxRetentionDays"
+      ],
+      "properties": {
+        "maxPendingBatches": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxCatalogPerService": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "maxPartitionsPerBatch": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "maxRetentionDays": { "type": "integer", "minimum": 1, "maximum": 3650 }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "walAutocheckpointPages",
+        "busyTimeoutMs",
+        "maxPendingQueueRows",
+        "maxNotificationAttempts"
+      ],
+      "properties": {
+        "walAutocheckpointPages": { "type": "integer", "minimum": 64, "maximum": 65536 },
+        "busyTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000 },
+        "maxPendingQueueRows": { "type": "integer", "minimum": 64, "maximum": 1000000 },
+        "maxNotificationAttempts": { "type": "integer", "minimum": 1, "maximum": 32 }
+      }
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxConcurrency", "maxScanBytes", "timeoutMs"],
+      "properties": {
+        "maxConcurrency": { "const": 1 },
+        "maxScanBytes": { "type": "integer", "minimum": 1048576, "maximum": 10737418240 },
+        "timeoutMs": { "type": "integer", "minimum": 500, "maximum": 300000 }
+      }
+    }
+  }
+}

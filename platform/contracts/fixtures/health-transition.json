@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "1",
+  "check": {
+    "service": "gateway",
+    "checkID": "http",
+    "kind": "probe",
+    "state": "degraded",
+    "consecutiveFailures": 1,
+    "consecutiveSuccesses": 0,
+    "lastObservedAt": "2026-11-14T10:00:01Z",
+    "updatedAt": "2026-11-14T10:00:02Z",
+    "since": "2026-11-14T10:00:01Z"
+  },
+  "observation": {
+    "service": "gateway",
+    "checkID": "http",
+    "ok": false,
+    "observedAt": "2026-11-14T10:00:01Z",
+    "observedBy": "probe-local-01",
+    "latencyMs": 2003
+  },
+  "transition": {
+    "transitionID": "h_0123456789abcdef0123456789abcdef",
+    "service": "gateway",
+    "checkID": "http",
+    "from": "unknown",
+    "to": "degraded",
+    "at": "2026-11-14T10:00:01Z"
+  },
+  "notification": {
+    "transitionID": "h_0123456789abcdef0123456789abcdef",
+    "channel": "ops-capture",
+    "state": "pending",
+    "attempts": 0,
+    "dedupeKey": "h_0123456789abcdef0123456789abcdef/ops-capture"
+  }
+}

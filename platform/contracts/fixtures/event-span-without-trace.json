@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "1",
+  "eventID": "req-9f2c1d41",
+  "source": "application",
+  "time": "2026-11-14T10:02:44.512Z",
+  "type": "request.completed",
+  "service": "gateway",
+  "spanID": "00f067aa0ba902b7"
+}

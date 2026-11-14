@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1",
+  "request": { "maxBodyBytes": 262144, "maxBatchItems": 512, "maxHeaderValueBytes": 2048 },
+  "event": {
+    "maxAttributes": 32,
+    "maxAttributeKeyBytes": 64,
+    "maxAttributeValueBytes": 512,
+    "maxClockSkewSeconds": 300
+  },
+  "page": { "defaultSize": 50, "maxSize": 200 },
+  "result": { "maxRows": 2000, "maxBytes": 1048576, "maxArtifacts": 32 },
+  "task": {
+    "maxParamBytes": 16384,
+    "leaseSeconds": 300,
+    "heartbeatSeconds": 30,
+    "maxReportsPerTask": 4,
+    "maxOpenTasksPerService": 1000
+  },
+  "dataset": {
+    "maxPendingBatches": 256,
+    "maxCatalogPerService": 64,
+    "maxPartitionsPerBatch": 512,
+    "maxRetentionDays": 90
+  },
+  "storage": {
+    "walAutocheckpointPages": 2048,
+    "busyTimeoutMs": 5000,
+    "maxPendingQueueRows": 20000,
+    "maxNotificationAttempts": 8
+  },
+  "query": { "maxConcurrency": 1, "maxScanBytes": 268435456, "timeoutMs": 15000 }
+}

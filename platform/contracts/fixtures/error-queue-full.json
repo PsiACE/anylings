@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "1",
+  "code": "queue_full",
+  "message": "service has reached its open-task bound",
+  "retryable": true
+}

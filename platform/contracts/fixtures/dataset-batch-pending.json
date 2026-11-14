@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1",
+  "dataset": {
+    "name": "gateway-events",
+    "service": "gateway",
+    "signal": "events",
+    "retentionDays": 30,
+    "authorizationScope": "telemetry:read",
+    "maxScanBytes": 268435456,
+    "state": "active"
+  },
+  "batch": {
+    "batchID": "b_0123456789abcdef0123456789abcdef",
+    "keyDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "state": "pending",
+    "createdAt": "2026-11-14T10:00:00Z",
+    "expiresAt": "2026-11-14T10:30:00Z",
+    "bytes": 0
+  },
+  "partitions": [
+    {
+      "partitionKey": "gateway/signal=events/day=2026-11-14",
+      "signal": "events",
+      "day": "2026-11-14",
+      "rowCount": 0,
+      "bytes": 0
+    }
+  ]
+}

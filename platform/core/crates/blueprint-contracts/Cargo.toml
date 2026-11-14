@@ -1,0 +1,15 @@
+[package]
+name = "blueprint-contracts"
+description = "Versioned platform contracts: envelope, errors, limits, dataset, task and health"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true

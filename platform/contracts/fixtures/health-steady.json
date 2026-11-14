@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1",
+  "check": {
+    "service": "gateway",
+    "checkID": "http",
+    "kind": "probe",
+    "state": "healthy",
+    "consecutiveFailures": 0,
+    "consecutiveSuccesses": 4,
+    "lastObservedAt": "2026-11-14T10:05:00Z",
+    "updatedAt": "2026-11-14T10:05:00Z",
+    "since": "2026-11-14T10:03:00Z"
+  },
+  "observation": {
+    "service": "gateway",
+    "checkID": "http",
+    "ok": true,
+    "observedAt": "2026-11-14T10:05:00Z",
+    "observedBy": "probe-local-01",
+    "latencyMs": 12
+  }
+}

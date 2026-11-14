@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anylings.invalid/contracts/v1/event.schema.json",
+  "title": "Platform event envelope",
+  "description": "Every event accepted by the shared core carries this envelope, whether it arrives from an inbound webhook, a probe, an application or an internal scheduler. Producers choose eventID; consumers treat (source, eventID) as the idempotency key, so a retried delivery is a duplicate rather than a second business fact. Time is producer-claimed and bounded by maxClockSkewSeconds at ingestion; the core stores its own receipt time separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "eventID", "source", "time", "type", "service"],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "eventID": {
+      "description": "Producer-assigned unique id. Opaque to the core; only equality matters.",
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "source": {
+      "description": "Authenticated producer identity, also the idempotency namespace. The core never trusts a client-supplied source to differ from the authenticated principal.",
+      "type": "string",
+      "enum": ["webhook", "probe", "application", "scheduler", "operator"]
+    },
+    "time": {
+      "description": "Producer-claimed occurrence time, RFC 3339 with an explicit offset.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "description": "Dotted event type, stable per producer contract.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(\\.[a-z0-9]+)+$"
+    },
+    "service": {
+      "description": "Service the event is about, not the transport that carried it.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "warning", "error", "critical"]
+    },
+    "traceID": {
+      "description": "W3C trace id, 32 lowercase hex characters. Present when the producer is part of a trace.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "spanID": {
+      "description": "W3C span id, 16 lowercase hex characters. Only meaningful together with traceID.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "attributes": {
+      "description": "Flattened, already-redacted string map. Values are strings so a single redaction pass covers every producer; nested or binary payloads are forbidden.",
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_.]{0,63}$" },
+      "additionalProperties": { "type": "string", "maxLength": 4096 }
+    },
+    "dedupeKey": {
+      "description": "Optional explicit idempotency key for producers whose natural key is not eventID alone, for example a repeated webhook delivery id. When present it, not eventID, decides the duplicate.",
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    }
+  },
+  "allOf": [
+    {
+      "description": "A span id without a trace id cannot be correlated, so it is rejected rather than stored uselessly.",
+      "if": { "required": ["spanID"] },
+      "then": { "required": ["traceID"] }
+    }
+  ]
+}

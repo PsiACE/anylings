@@ -1,0 +1,79 @@
+#% if observability.enabled %#
+---
+# Single-node VictoriaTraces: the platform's trace store. It receives OTLP
+# traces from the collector and serves Jaeger-compatible queries, so a trace can
+# be found by service and inspected for duration, parent/child and error status.
+#
+# This is a TRACE store, not a log store with trace IDs attached: a span is a
+# timed operation with a trace ID, a parent span ID, a duration and a status.
+# Request logs that happen to carry a correlation ID are not traces and are not
+# stored here.
+#
+# Retention is an explicit 7d window, chosen to match the metric store's query
+# band. It is a query bound, not physical erasure: VictoriaTraces prunes whole
+# per-day partitions, so a partition that stops receiving data keeps its bytes
+# until a drop runs.
+#
+# Operator-style naming gives the chart a real Service named `victoria-traces`
+# and a Deployment rather than a StatefulSet.
+useLegacyNaming: false
+# The chart would otherwise create a service account with an API token this
+# store never uses: traces are written over HTTP and read over HTTP.
+serviceAccount:
+  create: true
+  automountToken: false
+server:
+  mode: deployment
+  fullnameOverride: victoria-traces
+  retentionPeriod: 7d
+  # A second, independent cap: age alone does not bound a small cluster.
+  retentionDiskSpaceUsage: 1GiB
+  # Never provision a claim. A claim would silently bill a cloud volume and
+  # outlive the Application; the operator creates one deliberately if needed.
+  persistentVolume:
+    enabled: false
+  emptyDir:
+    sizeLimit: 2Gi
+  extraArgs:
+    # Disable the chart's env-flag mapping so a VM_* variable cannot override
+    # the limits set here.
+    envflag.enable: false
+    loggerFormat: json
+    http.shutdownDelay: 15s
+    memory.allowedBytes: "201326592"
+    # Bounded ingest and query work for a single modest node.
+    insert.maxFieldsPerLine: 64
+    maxConcurrentInserts: 2
+    search.maxQueryDuration: 30s
+    search.maxConcurrentRequests: 2
+    loggerMaxArgLen: 512
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      cpu: 400m
+      memory: 384Mi
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  # ClusterIP only: no Ingress, route, LoadBalancer or NodePort.
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+  route:
+    enabled: false
+#% endif %#

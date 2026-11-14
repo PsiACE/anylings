@@ -19,6 +19,22 @@ gate=('contracts' 'render-platform' 'tofu-static')
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 q() { yq -r "$1" "$2"; }
 
+# Compare against a captured string, never `producer | grep -q`. `grep -q` exits
+# on its first match, which sends SIGPIPE to a still-writing producer, and
+# `pipefail` then reports a *successful* match as a failed pipeline. That is
+# load-dependent: it passed locally and failed on a loaded CI runner, so the
+# shape is banned here rather than retried. Same rule as the other checks.
+contains() {
+  local haystack="$1" needle="$2"
+  case "$haystack" in
+    *"$needle"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Statements of one job, captured once.
+job_run() { yq ".jobs.\"$1\".steps[]? | .run // \"\"" "$ci"; }
+
 [ -f "$native" ] || fail "the native rehearsal has no workflow of its own"
 
 # ---------------------------------------------------------------- the gate --
@@ -70,13 +86,13 @@ while read -r job; do
   esac
   # A new job must stay offline: no rehearsal entrypoint, no nested workflow,
   # no sudo, no longer than the gate's own bound.
-  if yq ".jobs.\"$job\".steps[]? | .run // \"\"" "$ci" | grep -q 'tests/ci/run.sh'; then
+  if contains "$(job_run "$job")" 'tests/ci/run.sh'; then
     fail "the gate workflow runs the native rehearsal in job: $job"
   fi
   if [ "$(q ".jobs.\"$job\".uses // \"\"" "$ci")" != "" ]; then
     fail "the gate workflow delegates to another workflow in job: $job"
   fi
-  if yq ".jobs.\"$job\".steps[]? | .run // \"\"" "$ci" | grep -Eq '(^|[^[:alnum:]_])sudo '; then
+  if grep -Eq '(^|[^[:alnum:]_])sudo ' <<<"$(job_run "$job")"; then
     fail "the gate workflow holds a privileged job: $job"
   fi
   timeout="$(q ".jobs.\"$job\".timeout-minutes // 45" "$ci")"
@@ -85,7 +101,7 @@ done < <(q '.jobs | keys | .[]' "$ci")
 
 # The render assertions exist once. Both entry points must call the same script,
 # or a confidentiality check can be present in the workflow and missing locally.
-yq '.jobs."render-platform".steps[] | .run // ""' "$ci" | grep -q 'tests/ci/check-render.sh' \
+contains "$(job_run render-platform)" 'tests/ci/check-render.sh' \
   || fail "the render job does not call tests/ci/check-render.sh"
 grep -q 'tests/ci/check-render.sh' tests/ci/local-gate.sh \
   || fail "the local gate does not call tests/ci/check-render.sh"
@@ -100,7 +116,7 @@ read -r -a needs <<<"$(q '.jobs."landing-feedback".needs | join(" ")' "$ci")"
 for job in "${needs[@]}"; do
   [ "$(q ".jobs | has(\"$job\")" "$ci")" = true ] \
     || fail "landing-feedback depends on a job that does not exist: $job"
-  if yq ".jobs.\"$job\".steps[]? | .run // \"\"" "$ci" | grep -q 'tests/ci/run.sh'; then
+  if contains "$(job_run "$job")" 'tests/ci/run.sh'; then
     fail "landing-feedback waits on the native rehearsal: $job"
   fi
 done

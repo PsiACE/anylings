@@ -17,6 +17,9 @@ spec:
     - ghcr.io/argoproj/argo-helm
     - ghcr.io/bjw-s-labs/helm
     - ghcr.io/stakater/charts
+    - ghcr.io/victoriametrics/helm-charts
+    - ghcr.io/open-telemetry/opentelemetry-helm-charts
+    - ghcr.io/prometheus-community/charts
   destinations:
     - name: in-cluster
       namespace: "argo-system"
@@ -28,6 +31,9 @@ spec:
       namespace: kube-system
     - name: in-cluster
       namespace: network
+    # Observability slice: ClusterIP-only, no route, no operator namespace.
+    - name: in-cluster
+      namespace: observability
     # The agent runtime keeps its workspace and state in its own namespace,
     # separate from the shared gateway.
     - name: in-cluster

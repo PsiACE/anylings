@@ -1,0 +1,112 @@
+---
+# No presets: the chart's receiver/port defaults also accept logs and traces.
+# This collector reads only kubelet numeric summaries; it never tails files,
+# mounts the host, or accepts application telemetry.
+fullnameOverride: otel-kubelet
+mode: daemonset
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.140.1"
+command:
+  name: otelcol-contrib
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+clusterRole:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources: [nodes/stats]
+      verbs: [get]
+# Include tainted/control-plane nodes without host networking or hostPath.
+tolerations:
+  - operator: Exists
+hostNetwork: false
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+resources:
+  requests:
+    cpu: 30m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 160Mi
+extraEnvs:
+  - name: K8S_NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+# A separate headless Service selects every DaemonSet Pod. An ordinary Service
+# would repeatedly scrape an arbitrary subset through its load balancer.
+service:
+  enabled: false
+ports:
+  otlp:
+    enabled: false
+  otlp-http:
+    enabled: false
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+  metrics:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+# Complete replacement, not a merge with the chart's example pipelines.
+alternateConfig:
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+  receivers:
+    kubeletstats:
+      collection_interval: 30s
+      auth_type: serviceAccount
+      endpoint: https://${env:K8S_NODE_NAME}:10250
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: false
+      metric_groups: [node, pod, container, volume]
+      # Do not fetch /pods, attach arbitrary annotations, or query node capacity.
+      extra_metadata_labels: []
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_mib: 120
+      spike_limit_mib: 24
+    transform/identity:
+      metric_statements:
+        - context: resource
+          statements:
+            - 'keep_keys(attributes, ["k8s.node.name", "k8s.namespace.name", "k8s.pod.name", "k8s.container.name", "k8s.volume.name"])'
+  exporters:
+    prometheus:
+      endpoint: ${env:MY_POD_IP}:8889
+      # Avoid stale Pod identities lingering after kubelet drops a Pod.
+      metric_expiration: 2m
+      resource_to_telemetry_conversion:
+        enabled: true
+  service:
+    extensions: [health_check]
+    telemetry:
+      logs:
+        level: warn
+      metrics:
+        level: none
+    pipelines:
+      metrics:
+        receivers: [kubeletstats]
+        processors: [memory_limiter, transform/identity]
+        exporters: [prometheus]

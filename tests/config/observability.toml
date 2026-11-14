@@ -7,6 +7,6 @@ url = "git://git.example.test/platform.git"
 [ingress]
 tunnel_token_file = ".local/tunnel.token"
 
-# Self-hosted observability slice: VictoriaMetrics single-node plus Gatus.
+# Self-hosted observability slice: VictoriaMetrics, Gatus, kubelet usage and workload state.
 [observability]
 enabled = true

@@ -36,8 +36,11 @@ and trusted host keys. Host provisioning is separate; no VM provider is assumed.
 
 The full configuration and issued admin kubeconfig are in state. Keep state,
 configuration and referenced credentials private and available for future operations.
-Both backends then follow the shared export/readiness/bootstrap/platform flow in
-the repository README. Optional local-path storage is not replicated or HA.
+Both backends then follow the shared export/readiness/bootstrap/platform flow
+in [operate the platform](../../../docs/how-to/operate.md). Optional node-local
+storage (`just apply k0s-storage`) is described in the [configuration
+reference](../../../docs/reference/configuration.md#node-local-storage-k0s); it is
+not replicated or HA.
 
 ## Destruction and recovery
 

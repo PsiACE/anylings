@@ -152,9 +152,10 @@ this root directly: deleting its old HCL resources otherwise schedules deletion.
    the real `magpie` workload is added separately. Resolve ownership conflicts
    explicitly; do not force over another controller's resources.
 5. Remove `ingress.mode` from the operator's `cluster.toml` before rendering this
-   revision, as described in the root README: the connector is baseline, so a
-   config that still sets a mode is rejected. This is an input migration the
-   operator performs, not something an apply rewrites.
+   revision, as described in [operate the
+   platform](../../docs/how-to/operate.md#change-the-platform): the connector is
+   baseline, so a config that still sets a mode is rejected. This is an input
+   migration the operator performs, not something an apply rewrites.
 6. Remove obsolete Git paths only after the new owners reconcile successfully.
 
 This migration has not been exercised against a live existing installation.

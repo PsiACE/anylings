@@ -1,0 +1,9 @@
+{
+  "appName": "victoria-metrics",
+  "namespace": "observability",
+  "chartRepo": "ghcr.io/victoriametrics/helm-charts",
+  "chart": "victoria-metrics-single",
+  "chartVersion": "0.50.0",
+  "valuesFile": "kubernetes/apps/observability/victoria-metrics/values.yaml",
+  "manifestPath": "kubernetes/apps/observability/victoria-metrics"
+}

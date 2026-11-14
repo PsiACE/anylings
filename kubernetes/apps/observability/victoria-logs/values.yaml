@@ -1,0 +1,83 @@
+---
+# Single-node VictoriaLogs: the platform's operational log store. It receives
+# only the structured records that `otel-events` already reduced to
+# allowlisted fields; nothing here scrapes a log file or reads a Kubernetes
+# object itself.
+#
+# Retention is an explicit 3d plus a 1GiB disk cap, whichever is reached first.
+# That is a query/storage target, not a hard-erasure promise: VictoriaLogs
+# drops whole per-day partitions once they fall outside the window, and a
+# process that stops writing for a partition defers that drop. The store is an
+# emptyDir, so a rescheduled Pod loses every record regardless of retention.
+#
+# Operator-style naming gives the chart a real Service named `victoria-logs`
+# and a Deployment instead of a StatefulSet template.
+useLegacyNaming: false
+# The chart would otherwise create a service account with an API token that
+# this store never uses: it is written to over HTTP and queried by HTTP.
+serviceAccount:
+  create: true
+  automountToken: false
+server:
+  mode: deployment
+  fullnameOverride: victoria-logs
+  # Two independent caps: age and disk. Neither alone bounds a small cluster.
+  retentionPeriod: 3d
+  retentionDiskSpaceUsage: 1GiB
+  # Never provision a claim. A claim would silently bill a cloud volume and
+  # outlive the Application; the operator creates one deliberately if needed.
+  persistentVolume:
+    enabled: false
+  emptyDir:
+    sizeLimit: 2Gi
+  # The chart turns the extra args into container arguments; these bound the
+  # ingestion and query work a single small node has to absorb.
+  extraArgs:
+    envflag.enable: false
+    loggerFormat: json
+    http.shutdownDelay: 15s
+    memory.allowedBytes: "201326592"
+    insert.maxLineSizeBytes: 16384
+    insert.maxFieldsPerLine: 32
+    maxConcurrentInserts: 2
+    search.maxQueryDuration: 30s
+    search.maxConcurrentRequests: 2
+    loggerMaxArgLen: 512
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      # Caps the container; the flags above bound caches only.
+      cpu: 500m
+      memory: 512Mi
+  # The image ships its own nonroot account; fsGroup keeps a kubelet-made
+  # emptyDir writable by it.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  # ClusterIP only: the ingress and the internal service are both ordinary
+  # in-cluster Services, and nothing here creates an Ingress or a Route.
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+  route:
+    enabled: false
+# The chart can ship a bundled Vector agent that tails every container log on
+# the node. This slice ingests structured OTLP records only, so no host volume,
+# no log-file tailing and no extra agent is rendered.
+vector:
+  enabled: false

@@ -1,0 +1,11 @@
+#% if observability.enabled %#
+{
+  "appName": "kube-state-metrics",
+  "namespace": "observability",
+  "chartRepo": "ghcr.io/prometheus-community/charts",
+  "chart": "kube-state-metrics",
+  "chartVersion": "9.0.1",
+  "valuesFile": #{ repository_path('kubernetes/apps/observability/kube-state-metrics/values.yaml') | tojson }#,
+  "manifestPath": ""
+}
+#% endif %#

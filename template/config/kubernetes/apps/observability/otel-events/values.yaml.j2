@@ -1,0 +1,574 @@
+#% if observability.enabled %#
+---
+# One operational-log collector, as a single Deployment: the `k8sobjects`
+# receiver watches the Kubernetes Events API and cannot run as a replicated
+# watcher without producing duplicate records.
+#
+# Two controlled inputs feed one store:
+#   * `k8sobjects` - cluster Events, reduced to allowlisted operational fields.
+#   * `otlp`       - structured operational records from a workload, with the
+#                    documented schema below and no free-text body.
+#
+# Nothing here tails a file, mounts the host, runs a privileged daemon, reads
+# Secrets or proxies the node. It never receives prompts, sessions, tool
+# output or arbitrary application labels.
+fullnameOverride: otel-events
+mode: deployment
+replicaCount: 1
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.140.1"
+command:
+  name: otelcol-contrib
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+clusterRole:
+  create: true
+  rules:
+    # Read-only Events. No pods/log, no pods/exec, no Secrets, no write verb.
+    - apiGroups: [""]
+      resources: [events]
+      verbs: [get, list, watch]
+# No presets: a preset would add filelog/hostmetrics or widen RBAC.
+presets:
+  logsCollection:
+    enabled: false
+  hostMetrics:
+    enabled: false
+  kubernetesAttributes:
+    enabled: false
+  clusterMetrics:
+    enabled: false
+  kubeletMetrics:
+    enabled: false
+  kubernetesEvents:
+    enabled: false
+hostNetwork: false
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+resources:
+  requests:
+    cpu: 30m
+    memory: 96Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+ports:
+  # Applications send structured records here, in-cluster only.
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+  # The collector's own counters, including how many records the filters
+  # dropped. VictoriaMetrics scrapes this Service.
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+  otlp:
+    enabled: false
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+service:
+  enabled: true
+  type: ClusterIP
+useGOMEMLIMIT: true
+# Complete replacement, not a merge with the chart's examples.
+alternateConfig:
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+  receivers:
+    k8sobjects:
+      auth_type: serviceAccount
+      # A missing or forbidden resource is an error worth seeing, not silence.
+      error_mode: propagate
+      # Only the live stream: no snapshot replay on restart.
+      include_initial_state: false
+      objects:
+        # Core/v1 Events carry `reason`, `type`, `involvedObject` and `count`;
+        # the events.k8s.io shape is read as a fallback below.
+        - name: events
+          mode: watch
+    otlp:
+      # One receiver serves both signals. Logs go to VictoriaLogs, traces to
+      # VictoriaTraces; nothing about a span is written into the log store and
+      # no log record is turned into a fake span.
+      protocols:
+        http:
+          endpoint: ${env:MY_POD_IP}:4318
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_mib: 200
+      spike_limit_mib: 50
+    # A log record carries far more than its attributes: an instrumentation
+    # scope with a caller-chosen name, version, attributes and schema URL, a
+    # resource schema URL, a caller-supplied severity text, an event name, trace
+    # and span IDs, and flags. VictoriaLogs stores every one of those it
+    # receives, as `scope.name`, `scope.version`, `scope.attributes.<key>`,
+    # `event_name`, `severity_text`, `trace_id` and `span_id` -- so an
+    # allowlist over record attributes alone leaves them wide open. This stage
+    # clears them for BOTH pipelines before anything else reads the record.
+    #
+    # Nothing here is caller text this slice needs: the scope is `unknown` and
+    # the severity is set from the validated `level`/`event_severity` field in
+    # the shape stage. Trace correlation is a separate future requirement, not
+    # something to carry blind, so the IDs are cleared rather than assumed safe.
+    transform/purge_envelope:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            - set(resource.schema_url, "")
+        - context: scope
+          statements:
+            # A fixed value this repository owns, never the caller's string.
+            - set(scope.name, "otel-events")
+            - set(scope.version, "0")
+            - keep_keys(scope.attributes, [])
+            - set(scope.schema_url, "")
+        - context: log
+          statements:
+            - set(log.event_name, "")
+            - set(log.trace_id, TraceID(0x00000000000000000000000000000000))
+            - set(log.span_id, SpanID(0x0000000000000000))
+            - set(log.flags, 0)
+            # A repeated attribute key is the other half of this problem. The
+            # collector keeps every occurrence, `attributes[...]` reads the
+            # FIRST one, and the store ingests ALL of them -- so an allowlisted
+            # check and the stored value could disagree, and the store would
+            # receive both. `keep_keys` retains the first occurrence of each
+            # listed key and drops every other occurrence and key, which makes
+            # the validated value and the stored value the same one. It runs
+            # before any other stage reads an attribute.
+            # The caller's severity text is free text; the shape stage writes
+            # the severity from the allowlisted field immediately after.
+            - set(log.severity_text, "")
+    # Kubernetes Events arrive as a body kvlist: {type, object:{...}}. This
+    # reads only the fields below out of it. Nothing else survives the record,
+    # and the compose step writes a new body from those fields alone.
+    transform/events_extract:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            # The resource attribute list repeats keys the same way the record
+            # list does, and `keep_keys` filters by key name without collapsing
+            # repeats. Copy the value out, rebuild the map from that copy only,
+            # and write it back, so exactly one occurrence -- the one the
+            # allowlist inspects -- can reach the store.
+            - set(attributes["__otl_dup_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil
+            - keep_keys(attributes, ["__otl_dup_ns"])
+            - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
+            # End with a whitelist over the approved names, never a delete of a
+            # scratch name the caller can also supply. `delete_key` resolves to
+            # `pdata.Map.Remove`, which removes the FIRST matching entry only, so
+            # a caller who repeats the scratch name leaves an occurrence behind --
+            # stored as a new field and promoted into `_stream`. `keep_keys` uses
+            # `RemoveIf` and drops every non-matching entry, and after the rebuild
+            # each approved name exists exactly once.
+            - keep_keys(attributes, ["k8s.namespace.name"])
+        - context: log
+          statements:
+            # Nothing inherited from the caller's record attributes survives.
+            # The Events fields are re-derived from the API object in the body,
+            # so any attribute already on the record -- including a second
+            # occurrence of `event_severity` or `event_count` -- is discarded
+            # rather than merged with the derived value.
+            - keep_keys(attributes, [])
+            - set(attributes["event_type"], body["type"])
+            - set(attributes["event_severity"], body["object"]["type"])
+            - set(attributes["event_reason"], body["object"]["reason"])
+            # Core/v1 keeps the count; events.k8s.io moves it into series.
+            - set(attributes["event_count"], body["object"]["count"])
+            - set(attributes["event_count"], body["object"]["series"]["count"]) where attributes["event_count"] == nil
+            - set(attributes["event_count"], 1) where attributes["event_count"] == nil
+            - set(attributes["object_kind"], body["object"]["involvedObject"]["kind"])
+            - set(attributes["object_kind"], body["object"]["regarding"]["kind"]) where attributes["object_kind"] == nil
+            - set(attributes["object_name"], body["object"]["involvedObject"]["name"])
+            - set(attributes["object_name"], body["object"]["regarding"]["name"]) where attributes["object_name"] == nil
+            - set(attributes["event_namespace"], body["object"]["involvedObject"]["namespace"])
+            - set(attributes["event_namespace"], body["object"]["regarding"]["namespace"]) where attributes["event_namespace"] == nil
+            - set(attributes["event_namespace"], body["object"]["metadata"]["namespace"]) where attributes["event_namespace"] == nil
+    # Type guards run before any regex or range check, because a comparison or
+    # regex on the wrong type raises under `error_mode: ignore` and would leave
+    # the record alive. `not IsInt` / `not IsString` are total: a map, array,
+    # bool, double or free-text value fails them and the record is dropped.
+    # `event_count` is optional and defaults to the integer 1 above; anything
+    # present must already be an integer.
+    filter/events_types:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_count"] != nil and not IsInt(attributes["event_count"])'
+          - 'attributes["event_type"] == nil or not IsString(attributes["event_type"])'
+          - 'attributes["event_severity"] == nil or not IsString(attributes["event_severity"])'
+          - 'attributes["event_reason"] == nil or not IsString(attributes["event_reason"])'
+          - 'attributes["object_kind"] == nil or not IsString(attributes["object_kind"])'
+          - 'attributes["object_name"] == nil or not IsString(attributes["object_name"])'
+          - 'attributes["event_namespace"] == nil or not IsString(attributes["event_namespace"])'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsString(resource.attributes["k8s.namespace.name"])'
+    # Drop, rather than sanitize, anything that does not match the allowlist.
+    # A record whose reason is free text (a message pasted into `reason`) is
+    # discarded whole, so no substring of it can reach the store.
+    filter/events_allowlist:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_type"] == nil or not IsMatch(attributes["event_type"], "^(ADDED|MODIFIED|DELETED)$")'
+          - 'attributes["event_severity"] == nil or not IsMatch(attributes["event_severity"], "^(Normal|Warning)$")'
+          - 'attributes["event_reason"] == nil or not IsMatch(attributes["event_reason"], "^[A-Za-z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["object_kind"] == nil or not IsMatch(attributes["object_kind"], "^[A-Z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["object_name"] == nil or not IsMatch(attributes["object_name"], "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")'
+          - 'attributes["event_namespace"] == nil or not IsMatch(attributes["event_namespace"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$")'
+          - 'attributes["event_count"] < 0 or attributes["event_count"] > 100000'
+    # The persisted body is composed here from allowlisted fields only. The
+    # original message, note, annotations and metadata are already gone, and
+    # this statement would not copy them even if they were not.
+    transform/events_shape:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - set(log.body, Concat(["event", attributes["event_type"], attributes["object_kind"], attributes["event_namespace"], attributes["object_name"], attributes["event_reason"]], " "))
+            - set(log.severity_text, "WARN") where attributes["event_severity"] == "Warning"
+            - set(log.severity_number, SEVERITY_NUMBER_WARN) where attributes["event_severity"] == "Warning"
+            - set(log.severity_text, "INFO") where attributes["event_severity"] == "Normal"
+            - set(log.severity_number, SEVERITY_NUMBER_INFO) where attributes["event_severity"] == "Normal"
+            - keep_keys(attributes, ["event_type", "event_severity", "event_reason", "event_count", "object_kind", "object_name", "event_namespace"])
+    # The structured OTLP input. A sender must supply `reason` and `level`;
+    # `component` and `event_count` are optional. Its body is never read.
+    transform/otlp_extract:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            # Same rebuild as the record map. A repeated resource key is
+            # caller-controlled on this path, and it would otherwise be stored
+            # once per occurrence and leak into `_stream`.
+            - set(attributes["__otl_dup_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil
+            - set(attributes["__otl_dup_svc"], attributes["service.name"]) where attributes["service.name"] != nil
+            - keep_keys(attributes, ["__otl_dup_ns", "__otl_dup_svc"])
+            - set(attributes["k8s.namespace.name"], attributes["__otl_dup_ns"]) where attributes["__otl_dup_ns"] != nil
+            - set(attributes["service.name"], attributes["__otl_dup_svc"]) where attributes["__otl_dup_svc"] != nil
+            # Whitelist, not `delete_key`: `delete_key` is `pdata.Map.Remove`,
+            # which removes only the first matching entry. A caller who repeats
+            # the scratch name would leave an occurrence behind, stored as a new
+            # field and promoted into `_stream`. `keep_keys` removes every
+            # non-matching entry, so no caller-chosen key can survive.
+            - keep_keys(attributes, ["k8s.namespace.name", "service.name"])
+        - context: log
+          statements:
+            # Deterministic first-occurrence normalisation. The collector keeps
+            # every occurrence of a repeated key, `attributes[...]` reads the
+            # FIRST, and the store ingests ALL of them -- so without this a
+            # record could be validated on one value and stored with another.
+            # Each approved value is copied out, the attribute map is rebuilt
+            # from those copies only, so exactly one occurrence survives and it
+            # is the one the filters below inspect.
+            - set(attributes["__otl_dup_reason"], attributes["reason"]) where attributes["reason"] != nil
+            - set(attributes["__otl_dup_level"], attributes["level"]) where attributes["level"] != nil
+            - set(attributes["__otl_dup_component"], attributes["component"]) where attributes["component"] != nil
+            - set(attributes["__otl_dup_count"], attributes["event_count"]) where attributes["event_count"] != nil
+            - keep_keys(attributes, ["__otl_dup_reason", "__otl_dup_level", "__otl_dup_component", "__otl_dup_count"])
+            - set(attributes["reason"], attributes["__otl_dup_reason"]) where attributes["__otl_dup_reason"] != nil
+            - set(attributes["level"], attributes["__otl_dup_level"]) where attributes["__otl_dup_level"] != nil
+            - set(attributes["component"], attributes["__otl_dup_component"]) where attributes["__otl_dup_component"] != nil
+            - set(attributes["event_count"], attributes["__otl_dup_count"]) where attributes["__otl_dup_count"] != nil
+            - delete_key(attributes, "__otl_dup_reason")
+            - delete_key(attributes, "__otl_dup_level")
+            - delete_key(attributes, "__otl_dup_component")
+            - delete_key(attributes, "__otl_dup_count")
+            - set(attributes["event_count"], 1) where attributes["event_count"] == nil
+    # Same type-first rule as the Events pipeline: nothing is compared or
+    # regex-matched until it is proven to be the type that check expects, so
+    # `error_mode: ignore` cannot turn a type failure into a surviving record.
+    filter/otlp_types:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'attributes["event_count"] != nil and not IsInt(attributes["event_count"])'
+          - 'attributes["reason"] == nil or not IsString(attributes["reason"])'
+          - 'attributes["level"] == nil or not IsString(attributes["level"])'
+          - 'attributes["component"] != nil and not IsString(attributes["component"])'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsString(resource.attributes["k8s.namespace.name"])'
+          - 'resource.attributes["service.name"] != nil and not IsString(resource.attributes["service.name"])'
+    filter/otlp_allowlist:
+      error_mode: ignore
+      logs:
+        log_record:
+          # `== nil or` is redundant after the type filter, but an evaluation
+          # error inside a filter keeps the record, so this stays fail-closed.
+          - 'attributes["reason"] == nil or not IsMatch(attributes["reason"], "^[A-Za-z][A-Za-z0-9]{0,63}$")'
+          - 'attributes["level"] == nil or not IsMatch(attributes["level"], "^(DEBUG|INFO|WARN|ERROR)$")'
+          - 'attributes["component"] != nil and not IsMatch(attributes["component"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
+          - 'attributes["event_count"] < 0 or attributes["event_count"] > 100000'
+          - 'resource.attributes["service.name"] != nil and not IsMatch(resource.attributes["service.name"], "^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$")'
+          - 'resource.attributes["k8s.namespace.name"] != nil and not IsMatch(resource.attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])$")'
+    # The body is composed by appending only the parts that exist, so an absent
+    # optional component or namespace leaves no `<nil>` placeholder behind.
+    transform/otlp_shape:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - set(log.body, Concat(["event", attributes["level"]], " "))
+            - set(log.body, Concat([log.body, attributes["component"]], " ")) where attributes["component"] != nil
+            - set(log.body, Concat([log.body, resource.attributes["k8s.namespace.name"]], " ")) where resource.attributes["k8s.namespace.name"] != nil
+            - set(log.body, Concat([log.body, attributes["reason"]], " "))
+            - set(log.severity_text, "ERROR") where attributes["level"] == "ERROR"
+            - set(log.severity_number, SEVERITY_NUMBER_ERROR) where attributes["level"] == "ERROR"
+            - set(log.severity_text, "WARN") where attributes["level"] == "WARN"
+            - set(log.severity_number, SEVERITY_NUMBER_WARN) where attributes["level"] == "WARN"
+            - set(log.severity_text, "INFO") where attributes["level"] == "INFO"
+            - set(log.severity_number, SEVERITY_NUMBER_INFO) where attributes["level"] == "INFO"
+            - set(log.severity_text, "DEBUG") where attributes["level"] == "DEBUG"
+            - set(log.severity_number, SEVERITY_NUMBER_DEBUG) where attributes["level"] == "DEBUG"
+            - keep_keys(attributes, ["event_count", "reason", "level", "component"])
+    # A span has MANY caller-controlled surfaces, not just its attribute map:
+    # the operation name, span attributes, span events (name + attributes),
+    # event attribute values, the instrumentation scope (name, version,
+    # attributes, schema URL), the status message, the resource attributes, and
+    # nested values inside otherwise-allowed keys. Each is handled below. The
+    # rule throughout is drop-then-rebuild: a surface is cleared and the record
+    # is repopulated only from values that passed the type and semantic checks.
+    #
+    # Dropping keys is not sufficient on its own. A caller can put arbitrary
+    # text into an *allowed* key (`http.request.method` set to a bearer token),
+    # so every retained string is also type- and value-checked.
+    filter/traces_privacy:
+      error_mode: ignore
+      traces:
+        span:
+          # Operation names must be a bounded operation identifier. Route
+          # templates and statement shapes are accepted deliberately (see the
+          # pattern below), because that is what HTTP and database
+          # instrumentations emit by default; arbitrary free text is not.
+          - 'name == nil or not IsString(name)'
+          # The accepted shapes, deliberately: a leading-slash route template
+          # (`/checkout/{cartId}`) and an operation name starting with a letter
+          # (HTTP methods, RPC names, SQL statement heads).
+          #
+          # Query delimiters (`?`, `=`, `,`) are NOT in the class. A name or
+          # route carrying `?token=...` is a query string, not an operation
+          # identifier, and it was previously accepted. This is a SYNTACTIC
+          # bound only: text that fits the class -- including a legal-looking
+          # `SELECT` statement or a word sequence -- can still contain an
+          # arbitrary secret. Senders must not put secrets in span names; the
+          # collector cannot detect that semantically and does not claim to.
+          - 'not IsMatch(name, "^(/[A-Za-z0-9 ./_{}()*:<>+-]{0,118}|[A-Za-z][A-Za-z0-9 ./_{}()*:<>-]{0,119})$")'
+          # Allowed string attributes must be short and free of credential,
+          # session and secret shapes. A value that fails is rejected with the
+          # span rather than rewritten.
+          - 'attributes["http.request.method"] != nil and (not IsString(attributes["http.request.method"]) or not IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$"))'
+          # Same syntactic bound for routes: no query delimiters.
+          - 'attributes["http.route"] != nil and (not IsString(attributes["http.route"]) or not IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$"))'
+          - 'attributes["rpc.method"] != nil and (not IsString(attributes["rpc.method"]) or not IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9._:/-]{0,119}$"))'
+          - 'attributes["error.type"] != nil and (not IsString(attributes["error.type"]) or not IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$"))'
+          # The one numeric field: a real HTTP status code, not a string.
+          - 'attributes["http.response.status_code"] != nil and (not IsInt(attributes["http.response.status_code"]) or attributes["http.response.status_code"] < 100 or attributes["http.response.status_code"] > 599)'
+          # A span carrying links is rejected whole. This collector release has
+          # no OTTL context for a link, so its attributes and link trace state
+          # cannot be cleared -- and `set(links, [])` was measured NOT to empty
+          # the slice in a live pipeline, even though the same statement works
+          # against the debug exporter. The store's own LogSQL projection keeps
+          # `link:link_attr:*` and `link:link_trace_state:*`, so "clear it" is
+          # not achievable and "drop the span" is the only honest bound.
+          # Link-based correlation is not a shipped feature.
+          - 'Len(links) > 0'
+    # Clear every surface the checks above cannot protect, then repopulate from
+    # the surviving values only. Span events are removed entirely: an event name
+    # and its fields are caller free text, and no shipped query needs them.
+    transform/traces_privacy:
+      error_mode: ignore
+      trace_statements:
+        - context: resource
+          statements:
+            # Close the scratch channel before any copy runs, over ALL
+            # occurrences. `delete_key` removes only the FIRST match, so a
+            # caller that sends a scratch name twice would still leave one
+            # behind -- measured: `__trace_keep_route` twice, valid-looking
+            # values, and the survivor was written back as the real route.
+            # An allowlist of the real names removes every occurrence of every
+            # other key, including any scratch name, in one pass.
+            - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
+            # CANONICAL REBUILD, not in-place filtering.
+            #
+            # `attributes[...]` reads the FIRST occurrence of a key, while the
+            # collector exports and the store ingests ALL occurrences. An
+            # in-place check therefore validates one value and ships another:
+            # a valid `service.name` followed by a Bearer-shaped duplicate
+            # passes the check, and the duplicate then becomes trace identity
+            # and stream label. `keep_keys` and self-assignment both operate on
+            # that same duplicated map, so neither helps.
+            #
+            # So the retained values are copied out under scratch names, the map
+            # is emptied, and only the checked copies are written back. Nothing
+            # from the original map survives, which makes the checked value and
+            # the exported value the same one. This is the repository's existing
+            # log-pipeline pattern, applied to traces.
+            #
+            # The bounds are type + charset + length. A legal-looking identifier
+            # can still be a secret, so the contract is "bounded identifier",
+            # not "guaranteed secret-free".
+            - set(attributes["__trace_keep_service"], attributes["service.name"]) where attributes["service.name"] != nil and IsString(attributes["service.name"]) and IsMatch(attributes["service.name"], "^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$")
+            - set(attributes["__trace_keep_ns"], attributes["k8s.namespace.name"]) where attributes["k8s.namespace.name"] != nil and IsString(attributes["k8s.namespace.name"]) and IsMatch(attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+            - set(attributes["__trace_keep_env"], attributes["deployment.environment.name"]) where attributes["deployment.environment.name"] != nil and IsString(attributes["deployment.environment.name"]) and IsMatch(attributes["deployment.environment.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+            # Keep only the scratch names, so every original occurrence -- valid
+            # or not -- is dropped.
+            - keep_keys(attributes, ["__trace_keep_service", "__trace_keep_ns", "__trace_keep_env"])
+            - set(attributes["service.name"], attributes["__trace_keep_service"]) where attributes["__trace_keep_service"] != nil
+            - set(attributes["k8s.namespace.name"], attributes["__trace_keep_ns"]) where attributes["__trace_keep_ns"] != nil
+            - set(attributes["deployment.environment.name"], attributes["__trace_keep_env"]) where attributes["__trace_keep_env"] != nil
+            - delete_key(attributes, "__trace_keep_service")
+            - delete_key(attributes, "__trace_keep_ns")
+            - delete_key(attributes, "__trace_keep_env")
+            # Close the scratch channel itself. A caller can send
+            # `__trace_keep_service` directly: it then needs no copy to exist,
+            # survives the scratch-only keep, and is written back as the real
+            # key by the statement above. Measured at the previous head: all
+            # eight retained keys stored caller text that way.
+            #
+            # `keep_keys` over the approved REAL names removes every scratch
+            # occurrence, whatever its origin, and every other key with it. The
+            # checks below run after this, so the exported value is the one that
+            # was checked, and no scratch name can survive to export.
+            - keep_keys(attributes, ["service.name", "k8s.namespace.name", "deployment.environment.name"])
+            - delete_key(attributes, "service.name") where attributes["service.name"] != nil and (not IsString(attributes["service.name"]) or not IsMatch(attributes["service.name"], "^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$"))
+            - delete_key(attributes, "k8s.namespace.name") where attributes["k8s.namespace.name"] != nil and (not IsString(attributes["k8s.namespace.name"]) or not IsMatch(attributes["k8s.namespace.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
+            - delete_key(attributes, "deployment.environment.name") where attributes["deployment.environment.name"] != nil and (not IsString(attributes["deployment.environment.name"]) or not IsMatch(attributes["deployment.environment.name"], "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
+            - set(resource.schema_url, "")
+        - context: scope
+          statements:
+            # The sender's scope identity is not an operational field.
+            - set(scope.name, "otel-events")
+            - set(scope.version, "0")
+            - keep_keys(scope.attributes, [])
+            - set(scope.schema_url, "")
+        # Span EVENTS are their own context. `keep_keys` on the slice is a type
+        # error (it takes a map), so each event is rewritten here instead: the
+        # attributes are emptied and the name is replaced, which is the only way
+        # to remove caller free text from an event without dropping the span.
+        - context: spanevent
+          statements:
+            - keep_keys(attributes, [])
+            - set(name, "event")
+        - context: span
+          statements:
+            # Same allowlist closure for the span map. Dropping scratch names
+            # one at a time is not enough: a repeated scratch key survives.
+            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
+            # A status message is caller free text; clear it rather than store it.
+            - set(status.message, "")
+            # W3C trace state is an unused caller string. It reaches the store
+            # as `w3c.tracestate` in the Jaeger projection and as `trace_state`
+            # in the store's own LogSQL projection.
+            - set(trace_state, "")
+            # Same canonical rebuild for the span map. A duplicated `http.route`
+            # whose first occurrence is `/checkout` and second is
+            # `/checkout?x=...` would otherwise pass the filter and export both.
+            # Copy the checked values out, drop the original map, write back.
+            - set(attributes["__trace_keep_method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil and IsString(attributes["http.request.method"]) and IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$")
+            - set(attributes["__trace_keep_status"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil and IsInt(attributes["http.response.status_code"]) and attributes["http.response.status_code"] >= 100 and attributes["http.response.status_code"] <= 599
+            - set(attributes["__trace_keep_route"], attributes["http.route"]) where attributes["http.route"] != nil and IsString(attributes["http.route"]) and IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$")
+            - set(attributes["__trace_keep_rpc"], attributes["rpc.method"]) where attributes["rpc.method"] != nil and IsString(attributes["rpc.method"]) and IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9._:/-]{0,119}$")
+            - set(attributes["__trace_keep_error"], attributes["error.type"]) where attributes["error.type"] != nil and IsString(attributes["error.type"]) and IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$")
+            - keep_keys(attributes, ["__trace_keep_method", "__trace_keep_status", "__trace_keep_route", "__trace_keep_rpc", "__trace_keep_error"])
+            - set(attributes["http.request.method"], attributes["__trace_keep_method"]) where attributes["__trace_keep_method"] != nil
+            - set(attributes["http.response.status_code"], attributes["__trace_keep_status"]) where attributes["__trace_keep_status"] != nil
+            - set(attributes["http.route"], attributes["__trace_keep_route"]) where attributes["__trace_keep_route"] != nil
+            - set(attributes["rpc.method"], attributes["__trace_keep_rpc"]) where attributes["__trace_keep_rpc"] != nil
+            - set(attributes["error.type"], attributes["__trace_keep_error"]) where attributes["__trace_keep_error"] != nil
+            - delete_key(attributes, "__trace_keep_method")
+            - delete_key(attributes, "__trace_keep_status")
+            - delete_key(attributes, "__trace_keep_route")
+            - delete_key(attributes, "__trace_keep_rpc")
+            - delete_key(attributes, "__trace_keep_error")
+            # Same closure for the span map: keep the approved real names only,
+            # so a caller-supplied scratch name cannot be written back, then
+            # re-check the values that survive.
+            - keep_keys(attributes, ["http.request.method", "http.response.status_code", "http.route", "rpc.method", "error.type"])
+            - delete_key(attributes, "http.request.method") where attributes["http.request.method"] != nil and (not IsString(attributes["http.request.method"]) or not IsMatch(attributes["http.request.method"], "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)$"))
+            - delete_key(attributes, "http.response.status_code") where attributes["http.response.status_code"] != nil and (not IsInt(attributes["http.response.status_code"]) or attributes["http.response.status_code"] < 100 or attributes["http.response.status_code"] > 599)
+            - delete_key(attributes, "http.route") where attributes["http.route"] != nil and (not IsString(attributes["http.route"]) or not IsMatch(attributes["http.route"], "^[A-Za-z0-9 ./_{}()*:<>+-]{0,119}$"))
+            - delete_key(attributes, "rpc.method") where attributes["rpc.method"] != nil and (not IsString(attributes["rpc.method"]) or not IsMatch(attributes["rpc.method"], "^[A-Za-z][A-Za-z0-9._:/-]{0,119}$"))
+            - delete_key(attributes, "error.type") where attributes["error.type"] != nil and (not IsString(attributes["error.type"]) or not IsMatch(attributes["error.type"], "^[A-Za-z][A-Za-z0-9._-]{0,63}$"))
+  exporters:
+    otlphttp/victoria-traces:
+      # OTLP/HTTP to VictoriaTraces' native ingest path. Separate from the log
+      # exporter so a trace never lands in the log store and vice versa.
+      traces_endpoint: http://victoria-traces.observability.svc.cluster.local:10428/insert/opentelemetry/v1/traces
+      timeout: 5s
+      sending_queue:
+        enabled: true
+        queue_size: 256
+        num_consumers: 2
+      retry_on_failure:
+        enabled: true
+        initial_interval: 1s
+        max_interval: 5s
+        max_elapsed_time: 30s
+    otlphttp/victoria-logs:
+      # OTLP/HTTP to VictoriaLogs' native ingest path: no extra agent, gateway
+      # or protocol translation process.
+      logs_endpoint: http://victoria-logs.observability.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+      timeout: 5s
+      # Bounded buffer: a stalled store applies backpressure instead of
+      # growing the collector's memory without limit.
+      sending_queue:
+        enabled: true
+        queue_size: 128
+        num_consumers: 2
+      retry_on_failure:
+        enabled: true
+        initial_interval: 1s
+        max_interval: 5s
+        max_elapsed_time: 30s
+  service:
+    extensions: [health_check]
+    telemetry:
+      logs:
+        level: warn
+      metrics:
+        level: normal
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: ${env:MY_POD_IP}
+                  port: 8888
+    pipelines:
+      logs/events:
+        receivers: [k8sobjects]
+        processors: [memory_limiter, transform/purge_envelope, transform/events_extract, filter/events_types, filter/events_allowlist, transform/events_shape]
+        exporters: [otlphttp/victoria-logs]
+      logs/structured:
+        receivers: [otlp]
+        processors: [memory_limiter, transform/purge_envelope, transform/otlp_extract, filter/otlp_types, filter/otlp_allowlist, transform/otlp_shape]
+        exporters: [otlphttp/victoria-logs]
+      # Request traces. The span contract is narrow on purpose: only the span's
+      # own timing, identity and status are trusted, plus an allowlisted set of
+      # attributes. Nothing that looks like a credential, header, session or
+      # prompt survives.
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, filter/traces_privacy, transform/traces_privacy]
+        exporters: [otlphttp/victoria-traces]
+#% endif %#

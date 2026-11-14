@@ -21,6 +21,7 @@ provider data plane.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -66,8 +67,12 @@ class Journal:
     """Append-only private record of what this run observed and did."""
 
     def __init__(self, directory: Path) -> None:
-        directory.mkdir(parents=True, exist_ok=True)
+        backup_mod.private_dir(directory)
         self.path = directory / "journal.jsonl"
+        # Created 0600 before the first entry, not chmod-ed after it.
+        if not self.path.exists():
+            with backup_mod.open_private(self.path):
+                pass
 
     def write(self, step: str, **fields: object) -> None:
         entry = {"step": step, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -86,10 +91,41 @@ def holders(cluster: Cluster, namespace: str, claim: str) -> list[str]:
 
 
 def write_manifest(directory: Path, name: str, document: dict) -> str:
-    directory.mkdir(parents=True, exist_ok=True)
+    """Write one generated manifest into private custody, 0600 from creation."""
+    backup_mod.private_dir(directory)
     path = directory / f"{name}.json"
-    path.write_text(json.dumps(document), encoding="utf-8")
+    with backup_mod.open_private(path, "w") as handle:
+        handle.write(json.dumps(document))
+    path.chmod(backup_mod.PRIVATE_FILE)
     return str(path)
+
+
+def tree_identity(root: Path) -> tuple[str, dict[str, str]]:
+    """Hash of every source file this run executes, pinned before the run.
+
+    A rehearsal's evidence only describes the code that actually ran. The digest
+    is written into the journal at the start, so a later source change cannot be
+    mistaken for what produced the result.
+    """
+    digests = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        digests[str(path.relative_to(root))] = backup_mod.sha256(path)[1]
+    joined = "\n".join(f"{name} {digest}" for name, digest in digests.items())
+    return hashlib.sha256(joined.encode()).hexdigest(), digests
+
+
+def pin_identities(journal: Journal, custody: Path) -> str:
+    """Record the exact source and the generated input identity per dataset."""
+    tree, digests = tree_identity(Path(__file__).resolve().parent)
+    journal.write("source-identity", files=len(digests), tree_sha256=tree)
+    (custody / "source-identity.json").write_text(
+        json.dumps({"tree_sha256": tree, "files": digests}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    (custody / "source-identity.json").chmod(backup_mod.PRIVATE_FILE)
+    return tree
 
 
 def start_proxy(cluster: Cluster, journal: Journal) -> tuple[object, Api]:
@@ -331,7 +367,7 @@ def stage_backup(
     readers: dict,
 ) -> list[backup_mod.Archive]:
     """Stream both quiesced datasets to private custody and verify a restore."""
-    custody.mkdir(parents=True, exist_ok=True)
+    backup_mod.private_dir(custody)
     archives = []
     print(backup_mod.head(), flush=True)
     for key in ("gateway", "t3"):
@@ -339,7 +375,7 @@ def stage_backup(
         tar_path = custody / f"{key}.tar"
         sealed = custody / f"{key}.tar.sops"
         restored = custody / f"{key}.restored.tar"
-        with tar_path.open("wb") as sink:
+        with backup_mod.open_private(tar_path) as sink:
             finished = subprocess.run(  # noqa: S603 - fixed argv, no shell
                 [
                     "kubectl",
@@ -364,6 +400,7 @@ def stage_backup(
                 timeout=600,
             )
         require(finished.returncode == 0, f"tar-stream-failed-{key}")
+        require(tar_path.stat().st_size > 0, f"tar-empty-{key}")
         archive = backup_mod.verified(
             key, tar_path, sealed, restored, recipient, key_file
         )
@@ -372,9 +409,8 @@ def stage_backup(
                       plain_sha256=archive.plain_sha256[:16],
                       sealed_bytes=archive.sealed_bytes,
                       sealed_sha256=archive.sealed_sha256[:16],
-                      members=archive.members, consistent=archive.consistent)
-        tar_path.unlink()
-        restored.unlink()
+                      members=archive.members, consistent=archive.consistent,
+                      sealed_mode=oct(sealed.stat().st_mode & 0o777))
         archives.append(archive)
     return archives
 
@@ -731,11 +767,12 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     custody = Path(arguments.custody)
-    custody.mkdir(parents=True, exist_ok=True)
+    backup_mod.private_dir(custody)
     journal = Journal(Path(arguments.journal) if arguments.journal else custody)
     work = custody / "manifests"
     cluster = Cluster(arguments.kubeconfig, arguments.context)
 
+    tree = pin_identities(journal, custody)
     proxy = None
     try:
         admission(cluster, journal)
@@ -755,9 +792,12 @@ def main(argv: list[str] | None = None) -> int:
         stage_retain(cluster, journal, api, facts)
         stage_release(cluster, journal, api, readers)
         target = stage_reserve(cluster, journal, facts, work)
+        generated, _ = tree_identity(work)
+        journal.write("generated-identity", manifests=len(list(work.glob("*.json"))),
+                      tree_sha256=generated, dataset_sha256=expected[:16])
         stage_rebind(cluster, journal, api, facts, target, expected, work)
         stage_reverse(cluster, journal, api, facts, target, expected, work)
-        journal.write("complete", result="rehearsal-passed")
+        journal.write("complete", result="rehearsal-passed", source_tree=tree)
         return 0
     except (Step, ClusterError, ApiError, backup_mod.BackupError,
             identity_mod.IdentityError) as error:

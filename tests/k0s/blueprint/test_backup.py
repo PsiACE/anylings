@@ -8,7 +8,7 @@ involved, and no payload leaves it.
 
 from __future__ import annotations
 
-import io
+import os
 import shutil
 import subprocess
 import sys
@@ -65,6 +65,53 @@ class Custody(unittest.TestCase):
         sealed = self.directory / "sealed.sops"
         self.assertEqual(backup.encrypt(self.dataset(), sealed, self.recipient), 0)
         self.assertEqual(sealed.stat().st_mode & 0o777, 0o600)
+
+    def test_ciphertext_path_is_private_even_under_a_permissive_umask(self) -> None:
+        previous = os.umask(0)
+        self.addCleanup(os.umask, previous)
+        sealed = self.directory / "sealed.sops"
+        self.assertEqual(backup.encrypt(self.dataset(), sealed, self.recipient), 0)
+        self.assertEqual(sealed.stat().st_mode & 0o777, 0o600)
+
+    def test_custody_directories_are_private_under_a_permissive_umask(self) -> None:
+        previous = os.umask(0)
+        self.addCleanup(os.umask, previous)
+        nested = self.directory / "a" / "b"
+        backup.private_dir(nested)
+        self.assertEqual(nested.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.directory / "a").stat().st_mode & 0o777, 0o700)
+
+    def test_streamed_plaintext_tar_is_created_private(self) -> None:
+        """The stream sink is a descriptor with an explicit 0600, not Path.open."""
+        previous = os.umask(0)
+        self.addCleanup(os.umask, previous)
+        tar_path = self.directory / "stream.tar"
+        with backup.open_private(tar_path) as sink:
+            sink.write(b"placeholder")
+        self.assertEqual(tar_path.stat().st_mode & 0o777, 0o600)
+
+    def test_failed_encrypt_leaves_no_ciphertext(self) -> None:
+        sealed = self.directory / "sealed.sops"
+        status = backup.encrypt(self.dataset(), sealed, "age1notarealrecipient")
+        self.assertNotEqual(status, 0)
+        self.assertFalse(sealed.exists())
+
+    def test_failed_decrypt_leaves_no_plaintext(self) -> None:
+        sealed = self.directory / "sealed.sops"
+        self.assertEqual(backup.encrypt(self.dataset(), sealed, self.recipient), 0)
+        restored = self.directory / "restored.tar"
+        status = backup.decrypt(sealed, restored, self.directory / "absent.key")
+        self.assertNotEqual(status, 0)
+        self.assertFalse(restored.exists())
+
+    def test_verified_removes_its_plaintext_intermediates(self) -> None:
+        tar_path = self.dataset()
+        restored = self.directory / "restored.tar"
+        backup.verified("gateway", tar_path, self.directory / "s.sops", restored,
+                        self.recipient, self.key)
+        self.assertFalse(tar_path.exists())
+        self.assertFalse(restored.exists())
+        self.assertTrue((self.directory / "s.sops").exists())
 
     def test_ciphertext_does_not_contain_the_payload(self) -> None:
         tar_path = self.dataset()

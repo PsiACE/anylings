@@ -78,9 +78,30 @@ $ python3 tests/k0s/blueprint/rehearse.py \
     --key /secure/custody/age.key
 ```
 
-The exit code is `0` only when every assertion held. A failure prints one code
+The exit code is `0` only when every assertion held. Capture it — from the
+process itself, not from a log tail and not from a backgrounded shell: a run
+whose `$?` nobody recorded has not reported a result. A failure prints one code
 such as `old-writer-still-holding-magpie-config`; the journal keeps the ordered
 record. Codes name a rule, never an object field, a payload or a key.
+
+Run one attempt per custody directory. A journal that contains an earlier
+failure and a later success in the same directory is two attempts, and reading
+it as one clean run overstates the evidence.
+
+## Custody is private from creation
+
+The archives, the streamed plaintext tar, the restore copy and the journal are
+all created `0600` through an explicit descriptor, and every custody directory
+`0700` one level at a time, so the caller's umask cannot widen them. The
+encrypt and decrypt children additionally run under a restricted umask, and a
+failed encrypt or decrypt removes its own partial output. The plaintext tar and
+the restored copy are deleted after their hashes are compared: the ciphertext is
+the archive, and plaintext never stays on disk.
+
+The run journals a `source-identity` entry (a hash over every file in
+`tests/k0s/blueprint`, plus a per-file map in private custody) before it touches
+the cluster, and a `generated-identity` entry after the manifests are generated.
+That is what ties the result to the exact code and inputs that produced it.
 
 ## The order, and why
 

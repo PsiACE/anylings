@@ -55,3 +55,30 @@ Use `k0s backup` for cluster state. On a fresh host, use
 `k0s restore --config-out=/etc/k0s/k0s.yaml <archive>` and start the controller
 with the restored config. Keep backups private and off-machine. Back up
 persistent volume data separately.
+
+## Argo CD
+
+Once this commit is on `main`, seed Argo CD from that checkout:
+
+```sh
+sudo k0s kubectl kustomize cluster/argocd | sudo k0s kubectl apply --server-side -f -
+sudo k0s kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=60s
+sudo k0s kubectl apply -f bootstrap/root.yaml
+sudo k0s kubectl -n argocd get applications
+```
+
+Argo CD manages its own installation and the cluster services from public Git.
+No Git credentials or public endpoint are needed.
+
+### Glance
+
+Glance is a small start page for Argo CD and the anylings repository. Run these
+in separate terminals on the machine with your browser and cluster access:
+
+```sh
+sudo k0s kubectl -n glance port-forward svc/glance 8088:8080
+sudo k0s kubectl -n argocd port-forward svc/argocd-server 8081:443
+```
+
+Open <http://localhost:8088>. The Argo CD bookmark uses
+<https://localhost:8081> and requires the second port-forward.

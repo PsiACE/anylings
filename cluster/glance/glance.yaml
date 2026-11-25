@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: glance
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: glance
+  template:
+    metadata:
+      labels:
+        app: glance
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: glance
+          image: docker.io/glanceapp/glance:v0.8.8
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: glance-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glance
+spec:
+  selector:
+    app: glance
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

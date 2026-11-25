@@ -28,3 +28,17 @@ After bootstrapping the tools, run:
 
 The playbook enables firewalld and IPv4 forwarding for pod networking. It
 leaves SELinux unchanged. It does not install k0s or touch storage.
+
+## k0s
+
+On the prepared Fedora host, with sudo access:
+
+```sh
+sudo -v
+~/.local/bin/mise exec -- tofu -chdir=tofu/k0s init
+~/.local/bin/mise exec -- tofu -chdir=tofu/k0s apply
+sudo k0s kubectl get nodes
+```
+
+OpenTofu runs k0sctl locally when the node config changes. No SSH is needed.
+The state tracks the config, not host drift. `tofu destroy` does not remove k0s.

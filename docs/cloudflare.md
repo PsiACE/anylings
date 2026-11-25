@@ -10,8 +10,10 @@ over HTTP. Do not publish their ports or the Kubernetes API directly.
 Use a Cloudflare-managed DNS zone with Zero Trust and a working login method.
 Create a scoped API token with **Cloudflare Tunnel: Edit** and **Access: Apps
 and Policies: Edit** for the account and **DNS: Edit** for the zone. Save it in
-1Password, then sign in to `op` locally. Keep the state outside the checkout
-and back it up privately off-machine.
+1Password. The installer provides a pinned `op` through mise. Sign in to
+[1Password CLI](https://developer.1password.com/docs/cli/sign-in-manually/)
+locally with `~/.local/bin/mise exec -- op`. Keep the state outside the
+checkout and back it up privately off-machine.
 
 Create `infra/cloudflare/terraform.tfvars` locally:
 
@@ -30,8 +32,8 @@ mkdir -m 700 -p "$state_dir"
 export CLOUDFLARE_API_TOKEN='op://Private/anylings Cloudflare API/credential'
 "$mise" exec -- tofu -chdir=infra/cloudflare init \
   -backend-config="path=$state_dir/cloudflare.tfstate"
-op run -- "$mise" exec -- tofu -chdir=infra/cloudflare plan
-op run -- "$mise" exec -- tofu -chdir=infra/cloudflare apply
+"$mise" exec -- op run -- tofu -chdir=infra/cloudflare plan
+"$mise" exec -- op run -- tofu -chdir=infra/cloudflare apply
 unset CLOUDFLARE_API_TOKEN
 ```
 
@@ -50,7 +52,7 @@ the `cloudflared` namespace, run this in Bash:
   sudo -v
   token_file=$(mktemp)
   trap 'rm -f -- "$token_file"' EXIT
-  op read --no-newline 'op://Private/anylings Tunnel/credential' > "$token_file"
+  "$HOME/.local/bin/mise" exec -- op read --no-newline 'op://Private/anylings Tunnel/credential' > "$token_file"
   test -s "$token_file"
   sudo k0s kubectl -n cloudflared create secret generic cloudflared-token \
     --from-file=token="$token_file" --dry-run=client -o yaml |

@@ -20,7 +20,8 @@ manifests are on GitHub `main`. Run as your login user with sudo access:
 
 The installer sets up locked tools, prepares Fedora, provisions one k0s node,
 and waits for Argo CD to take over. You can rerun it without reseeding Argo CD.
-No `dnf`, Git credentials, or cloud credentials are needed.
+No `dnf`, Git credentials, or cloud credentials are needed. The pinned
+1Password CLI is installed but only used for optional Cloudflare access.
 
 ## k0s
 

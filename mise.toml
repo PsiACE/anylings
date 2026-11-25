@@ -3,3 +3,4 @@
 "aqua:opentofu/opentofu" = "1.11.5"
 "aqua:k0sproject/k0sctl" = "0.33.1"
 "aqua:kubernetes/kubernetes/kubectl" = "1.35.4"
+"aqua:1password/cli" = "v2.39.0"

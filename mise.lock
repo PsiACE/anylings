@@ -2,6 +2,15 @@
 
 lockfile_version = 4
 
+[[tools."aqua:1password/cli"]]
+version = "v2.39.0"
+backend = "aqua:1password/cli"
+specifiers = ["v2.39.0"]
+
+[tools."aqua:1password/cli"."platforms.linux-x64"]
+checksum = "sha256:6fba7f376b6c6dec49f41b06408930a43ad064cce103c6a2ce5b3d0413a86434"
+url = "https://cache.agilebits.com/dist/1P/op2/pkg/v2.39.0/op_linux_amd64_v2.39.0.zip"
+
 [[tools."aqua:astral-sh/uv"]]
 version = "0.11.14"
 backend = "aqua:astral-sh/uv"

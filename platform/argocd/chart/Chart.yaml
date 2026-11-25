@@ -1,0 +1,7 @@
+apiVersion: v2
+name: anylings-argocd
+version: 0.1.0
+dependencies:
+  - name: argo-cd
+    version: 10.20.0
+    repository: oci://ghcr.io/argoproj/argo-helm

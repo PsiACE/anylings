@@ -21,7 +21,21 @@ if [[ -n "$crd" ]]; then
   seed=$(kubectl -n argocd get application argocd --ignore-not-found -o name)
 fi
 if [[ -z "$seed" ]]; then
-  kubectl kustomize platform/argocd/install | kubectl apply --server-side -f -
+  (
+    umask 077
+    kubeconfig=$(mktemp)
+    trap 'rm -f -- "$kubeconfig"' EXIT
+    # shellcheck disable=SC2024
+    sudo k0s kubeconfig admin > "$kubeconfig"
+    release=$("$mise" exec -- helm list --kubeconfig "$kubeconfig" \
+      -n argocd --deployed --filter '^argocd$' --short)
+    if [[ -z "$release" ]]; then
+      "$mise" exec -- helm dependency build platform/argocd/chart
+      "$mise" exec -- helm install argocd platform/argocd/chart \
+        --kubeconfig "$kubeconfig" --namespace argocd --create-namespace \
+        --rollback-on-failure --timeout 5m
+    fi
+  )
   kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=60s
   kubectl -n argocd rollout status deployment/argocd-redis --timeout=180s
   kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=180s

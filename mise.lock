@@ -22,6 +22,15 @@ url = "https://github.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-unkno
 url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/418588868"
 provenance = "github-attestations"
 
+[[tools."aqua:helm/helm"]]
+version = "4.3.2"
+backend = "aqua:helm/helm"
+specifiers = ["4.3.2"]
+
+[tools."aqua:helm/helm"."platforms.linux-x64"]
+checksum = "sha256:d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983"
+url = "https://get.helm.sh/helm-v4.3.2-linux-amd64.tar.gz"
+
 [[tools."aqua:k0sproject/k0sctl"]]
 version = "0.33.1"
 backend = "aqua:k0sproject/k0sctl"

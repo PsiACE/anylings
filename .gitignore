@@ -7,3 +7,4 @@ __pycache__/
 *.tfvars.json
 .env
 kubeconfig
+/platform/argocd/chart/charts/

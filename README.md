@@ -48,6 +48,10 @@ ApplicationSet. Add `apps/<name>.yaml` to deploy an app in namespace `<name>`.
 Automatic sync and self-heal are on; automatic pruning is off. No Git
 credentials or public endpoint are needed.
 
+The first install uses Helm. Argo CD then renders the same chart and values
+from Git. After handoff, upgrade from Git, not with `helm upgrade` or
+`helm uninstall`.
+
 ### Glance
 
 Glance is a small start page for Argo CD and the anylings repository. Run these

@@ -5,10 +5,15 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  source:
-    repoURL: https://github.com/PsiACE/anylings.git
-    targetRevision: main
-    path: platform/argocd
+  sources:
+    - repoURL: https://github.com/PsiACE/anylings.git
+      targetRevision: main
+      path: platform/argocd/chart
+      helm:
+        releaseName: argocd
+    - repoURL: https://github.com/PsiACE/anylings.git
+      targetRevision: main
+      path: platform/argocd
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd

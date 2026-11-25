@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and replace these example values.
+account_id  = "00000000000000000000000000000000"
+zone_id     = "11111111111111111111111111111111"
+team_name   = "example-team"
+hostname    = "home.example.com"
+admin_email = "you@example.com"

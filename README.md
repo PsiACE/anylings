@@ -22,6 +22,8 @@ The installer sets up locked tools, prepares Fedora, provisions one k0s node,
 and waits for Argo CD to take over. You can rerun it without reseeding Argo CD.
 No `dnf`, Git credentials, or cloud credentials are needed. The pinned
 1Password CLI is installed but only used for optional Cloudflare access.
+For Cloudflare, use `.env.example` for the 1Password reference and
+`infra/cloudflare/terraform.tfvars.example` for deployment settings.
 
 ## k0s
 

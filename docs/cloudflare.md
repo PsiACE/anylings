@@ -15,36 +15,37 @@ and Policies: Edit** for the account and **DNS: Edit** for the zone. Save it in
 locally with `~/.local/bin/mise exec -- op`. Keep the state outside the
 checkout and back it up privately off-machine.
 
-Create `infra/cloudflare/terraform.tfvars` locally:
+From the repo root, copy the two templates:
 
-```hcl
-account_id  = "your-account-id"
-zone_id     = "your-zone-id"
-team_name   = "your-zero-trust-team"
-hostname    = "home.example.com"
-admin_email = "you@example.com"
+```sh
+cp -i .env.example .env
+cp -i infra/cloudflare/terraform.tfvars.example infra/cloudflare/terraform.tfvars
 ```
+
+Set the API token's `op://` reference in `.env` and the deployment settings in
+`infra/cloudflare/terraform.tfvars`. OpenTofu loads `terraform.tfvars`
+automatically. Only `op run` loads `.env`.
 
 ```sh
 mise="$HOME/.local/bin/mise"
-state_dir="$HOME/.local/state/anylings"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/anylings"
 mkdir -m 700 -p "$state_dir"
-export CLOUDFLARE_API_TOKEN='op://Private/anylings Cloudflare API/credential'
 "$mise" exec -- tofu -chdir=infra/cloudflare init \
   -backend-config="path=$state_dir/cloudflare.tfstate"
-"$mise" exec -- op run -- tofu -chdir=infra/cloudflare plan
-"$mise" exec -- op run -- tofu -chdir=infra/cloudflare apply
-unset CLOUDFLARE_API_TOKEN
+"$mise" exec -- op run --env-file=.env -- tofu -chdir=infra/cloudflare plan
+"$mise" exec -- op run --env-file=.env -- tofu -chdir=infra/cloudflare apply
 ```
 
-Replace the `op://` references with your item names. If you already have a
-state file, restore it before applying. Do not commit state, plans, or inputs.
+Restore any existing state before applying. Do not commit local inputs,
+state, or saved plans.
 
 ## Connect the cluster
 
 Copy just the connector token for the `anylings` tunnel from the Cloudflare
 dashboard into a separate 1Password item. On the k0s host, after Argo CD creates
-the `cloudflared` namespace, run this in Bash:
+the `cloudflared` namespace, replace the example reference and run this in
+Bash. Do not enable the connector token in `.env`: `op run` would try to
+resolve it during `plan` and `apply`, before the tunnel exists.
 
 ```bash
 (
@@ -52,7 +53,8 @@ the `cloudflared` namespace, run this in Bash:
   sudo -v
   token_file=$(mktemp)
   trap 'rm -f -- "$token_file"' EXIT
-  "$HOME/.local/bin/mise" exec -- op read --no-newline 'op://Private/anylings Tunnel/credential' > "$token_file"
+  "$HOME/.local/bin/mise" exec -- op read --no-newline \
+    'op://your-vault/cloudflare-tunnel/credential' > "$token_file"
   test -s "$token_file"
   sudo k0s kubectl -n cloudflared create secret generic cloudflared-token \
     --from-file=token="$token_file" --dry-run=client -o yaml |

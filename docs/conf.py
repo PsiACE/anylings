@@ -35,6 +35,8 @@ html_theme_options = {
     "navigation_with_keys": True,
     "show_toc_level": 2,
     "use_edit_page_button": True,
+    # Few flat pages: keep the secondary sidebar collapsed; the top navbar carries navigation.
+    "collapse_navigation": True,
 }
 html_context = {
     "github_user": "PsiACE",

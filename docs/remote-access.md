@@ -1,63 +1,51 @@
 # Remote access
 
-One hostname serves Glance at `/` and Argo CD at `/argocd`. Cloudflare Access
-allows only your email on both paths. Argo CD still requires its own login.
-Cloudflare terminates HTTPS; `cloudflared` reaches the two ClusterIP services
-over HTTP. Do not publish their ports or the Kubernetes API directly.
+Optional, if you want to reach the homelab from somewhere other than the
+workstation. One hostname serves Glance at `/` and Argo CD at `/argocd`, both
+behind Cloudflare Access; Argo CD still asks for its own login, and HTTPS is
+terminated at the edge — the tunnel reaches the ClusterIP services over plain
+HTTP. Do not expose service ports or the Kubernetes API.
 
-## Provision the edge
+## Provision the Cloudflare side
 
-Use a Cloudflare-managed DNS zone with Zero Trust and a working login method.
-Create a scoped API token with **Cloudflare Tunnel: Edit** and **Access: Apps
-and Policies: Edit** for the account and **DNS: Edit** for the zone. Save it in
-1Password. With desktop integration, sign in:
+Create a scoped API token — **Cloudflare Tunnel: Edit** and **Access: Apps and
+Policies: Edit** on the account, plus **DNS: Edit** on the zone — and store it
+in 1Password. Keep the connector token (added later) in a separate item.
 
 ```sh
 anylings sign-in-1password
-```
-
-If your CLI account was [added manually](https://developer.1password.com/docs/cli/sign-in-manually/),
-load the session in Bash:
-
-```bash
-eval "$(anylings sign-in-1password)"
-```
-
-After [setting up the host and cluster](install.md), create the local configuration files:
-
-```sh
 anylings configure-cloudflare
 ```
 
-Set the API token's `op://` reference in `.env` and the deployment settings in
-`infra/cloudflare/terraform.tfvars`. The command leaves existing files alone.
-Restore any existing state before applying. Keep state off-machine and do not
-commit local inputs, state, or saved plans.
+For a manually added 1Password account, run
+`eval "$(anylings sign-in-1password)"` in Bash first. `configure-cloudflare`
+only copies templates into place — it never overwrites an existing `.env` or
+`terraform.tfvars`. Then set the token's `op://` reference in `.env` and fill
+`infra/cloudflare/terraform.tfvars` with the account ID, zone ID, team name,
+hostname, and allowed admin email.
+
+If you're reusing an existing state file, restore it before applying. See the
+[configuration reference](reference.md) for where state lives.
 
 ```sh
 anylings plan-cloudflare
 anylings apply-cloudflare
 ```
 
-`apply` prompts for approval. Both commands initialize the same local backend
+`apply` asks before changing anything. Both commands use the same local backend
 and resolve the API token only for OpenTofu.
 
 ## Connect the cluster
 
-Save the connector token from the Cloudflare dashboard in a separate
-1Password item. On the k0s host, after Argo CD creates the `cloudflared`
-namespace, run:
+Once Argo CD has created the `cloudflared` namespace, save the connector token
+in 1Password and point the cluster at it:
 
 ```sh
-anylings connect-cloudflare 'op://your-vault/cloudflare-tunnel/credential'
+anylings connect-cloudflare 'op://vault/item/credential'
 ```
 
-Set `replicas: 1` in `apps/cloudflared.yaml` and let Argo CD sync it. Keep the
-connector token out of `.env` and OpenTofu. After rotating the token in
-Cloudflare and updating its 1Password item, run `anylings rotate-cloudflare` with
-the same reference to update the Secret and restart the connector. Use
-`anylings status-cloudflare` to check the local Deployment, not the public route.
-
-In a private browser window, verify both `/` and `/argocd` require Access.
-Sign in and follow the Glance bookmark to the Argo CD login page. Local
-port-forwarding is still available if Access is down.
+Set `replicas: 1` in `apps/cloudflared.yaml` and let Argo CD sync. To rotate
+the token later, update the 1Password item and run
+`anylings rotate-cloudflare` with the same reference.
+`anylings status-cloudflare` checks the local Deployment only — it does not
+prove the public route works. Verify `/` and `/argocd` through Access.

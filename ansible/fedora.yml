@@ -1,0 +1,31 @@
+---
+- name: Prepare Fedora
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  tasks:
+    - name: Keep firewalld running
+      ansible.builtin.systemd_service:
+        name: firewalld
+        enabled: true
+        state: started
+
+    - name: Persist IPv4 forwarding for pod networking
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/90-anylings.conf
+        content: "net.ipv4.ip_forward = 1\n"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Read live IPv4 forwarding
+      ansible.builtin.command: sysctl -n net.ipv4.ip_forward
+      register: ipv4_forwarding
+      changed_when: false
+
+    - name: Enable IPv4 forwarding now
+      ansible.builtin.command: sysctl -w net.ipv4.ip_forward=1
+      when: ipv4_forwarding.stdout != '1'

@@ -7,7 +7,7 @@ A personal cloud on Fedora Workstation.
 On Fedora 45 x86_64, run this as your login user:
 
 ```sh
-./scripts/bootstrap-tools.sh
+./infra/bootstrap-tools.sh
 ~/.local/bin/mise exec -- tofu version
 ~/.local/bin/mise exec -- k0sctl version
 ~/.local/bin/mise exec -- kubectl version --client
@@ -23,7 +23,7 @@ No system packages are installed. This step does not start a cluster.
 After bootstrapping the tools, run:
 
 ```sh
-~/.local/bin/mise exec -- uv run --locked ansible-playbook -i localhost, --ask-become-pass ansible/fedora.yml
+~/.local/bin/mise exec -- uv run --locked ansible-playbook -i localhost, --ask-become-pass infra/fedora/fedora.yml
 ```
 
 The playbook enables firewalld and IPv4 forwarding for pod networking. It
@@ -35,8 +35,8 @@ On the prepared Fedora host, with sudo access:
 
 ```sh
 sudo -v
-~/.local/bin/mise exec -- tofu -chdir=tofu/k0s init
-~/.local/bin/mise exec -- tofu -chdir=tofu/k0s apply
+~/.local/bin/mise exec -- tofu -chdir=infra/k0s init
+~/.local/bin/mise exec -- tofu -chdir=infra/k0s apply
 sudo k0s kubectl get nodes
 ```
 

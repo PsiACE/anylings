@@ -37,8 +37,10 @@ anylings ui-glance       # Open the local start page
 anylings test            # Run smoke tests
 ```
 
-See [Installation](docs/install.md), [Cluster operations](docs/operations.md),
-and [Remote access](docs/remote-access.md).
+Read the [published documentation](https://anylings.com/) or browse
+[Installation](docs/install.md), [Cluster operations](docs/operations.md), and
+[Remote access](docs/remote-access.md) in this checkout. To preview the docs
+locally, run `uv run --group docs sphinx-autobuild docs docs/_build/html`.
 
 ## Components
 

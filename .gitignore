@@ -8,3 +8,5 @@ __pycache__/
 .env
 kubeconfig
 /platform/argocd/chart/charts/
+/site/
+docs/_build/

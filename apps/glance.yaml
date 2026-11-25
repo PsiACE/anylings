@@ -1,0 +1,49 @@
+controllers:
+  main:
+    pod:
+      automountServiceAccountToken: false
+    containers:
+      main:
+        image:
+          repository: docker.io/glanceapp/glance
+          tag: v0.8.8
+        probes:
+          readiness:
+            enabled: true
+            type: HTTP
+            path: /api/healthz
+            port: 8080
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+service:
+  main:
+    ports:
+      http:
+        port: 8080
+persistence:
+  config:
+    type: configMap
+    identifier: config
+    globalMounts:
+      - path: /app/config
+        readOnly: true
+configMaps:
+  config:
+    data:
+      glance.yml: |
+        pages:
+          - name: anylings
+            columns:
+              - size: full
+                widgets:
+                  - type: bookmarks
+                    groups:
+                      - links:
+                          - title: Argo CD
+                            url: https://localhost:8081
+                          - title: anylings on GitHub
+                            url: https://github.com/PsiACE/anylings

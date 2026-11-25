@@ -2,6 +2,13 @@
 
 A personal cloud on Fedora Workstation.
 
+## Layout
+
+- `infra/`: prepare Fedora, then provision k0s with OpenTofu.
+- `platform/`: seed Argo CD once; it then manages itself and the ApplicationSet.
+- `apps/`: one Helm values file per app using the shared `app-template` chart.
+- `tests/`: smoke tests for a running test cluster.
+
 ## Tools
 
 On Fedora 45 x86_64, run this as your login user:
@@ -58,17 +65,20 @@ persistent volume data separately.
 
 ## Argo CD
 
-Once this commit is on `main`, seed Argo CD from that checkout:
+Once the manifests are on `main`, seed Argo CD from that checkout:
 
 ```sh
-sudo k0s kubectl kustomize cluster/argocd | sudo k0s kubectl apply --server-side -f -
+sudo k0s kubectl kustomize platform/argocd/install | sudo k0s kubectl apply --server-side -f -
 sudo k0s kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=60s
-sudo k0s kubectl apply -f bootstrap/root.yaml
+sudo k0s kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=180s
+sudo k0s kubectl apply -f platform/argocd/self.yaml
 sudo k0s kubectl -n argocd get applications
 ```
 
-Argo CD manages its own installation and the cluster services from public Git.
-No Git credentials or public endpoint are needed.
+Argo CD syncs `platform/argocd/`, including its own Application and the
+ApplicationSet. Add `apps/<name>.yaml` to deploy an app in namespace `<name>`.
+Automatic sync and self-heal are on; automatic pruning is off. No Git
+credentials or public endpoint are needed.
 
 ### Glance
 
@@ -82,3 +92,11 @@ sudo k0s kubectl -n argocd port-forward svc/argocd-server 8081:443
 
 Open <http://localhost:8088>. The Argo CD bookmark uses
 <https://localhost:8081> and requires the second port-forward.
+
+## Test
+
+On the test cluster after seeding Argo CD:
+
+```sh
+./tests/gitops-smoke.sh sudo k0s kubectl
+```

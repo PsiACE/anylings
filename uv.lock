@@ -19,11 +19,24 @@ wheels = [
 ]
 
 [[package]]
+name = "ansimarkup"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/17/57/2ca7c2ab234a01ac778b22fed926e7a63194699b4c1695517653723ae85f/ansimarkup-1.5.0.tar.gz", hash = "sha256:96c65d75bbed07d3dcbda8dbede8c2252c984f90d0ca07434b88a6bbf345fad3", size = 13959, upload-time = "2021-01-27T15:37:21.526Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/22/09/3ad81e40d752ef51a9a8c320c9385de0d98a4dad68c0e4f793befc610f56/ansimarkup-1.5.0-py2.py3-none-any.whl", hash = "sha256:3146ca74af5f69e48a9c3d41b31085c0d6378f803edeb364856d37c11a684acf", size = 11124, upload-time = "2021-01-27T15:37:20.308Z" },
+]
+
+[[package]]
 name = "anylings"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "ansible-core" },
+    { name = "duty" },
 ]
 
 [package.dev-dependencies]
@@ -32,7 +45,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ansible-core", specifier = "==2.20.7" }]
+requires-dist = [
+    { name = "ansible-core", specifier = "==2.20.7" },
+    { name = "duty", specifier = "==1.10.1" },
+]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.2.0" }]
@@ -122,6 +138,32 @@ wheels = [
 ]
 
 [[package]]
+name = "duty"
+version = "1.10.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "failprint" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/50/67/fa79eea27ca6344a67f012632613e83be6ba5c6b6731e46b9e280bc65da2/duty-1.10.1.tar.gz", hash = "sha256:5d40bc4baf1d9375ba4f7456eceb510f35152aae2992ef54f7718d71dc6f7f4e", size = 146803, upload-time = "2026-10-06T08:51:47.687Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/35/30/0edc73a333dc738842e99ed4d8604a49603169853cc01211e242848e3b27/duty-1.10.1-py3-none-any.whl", hash = "sha256:1d0c30fc9d9489f3b519aacd5062104ac9fe9f186574e7099941d5b4452e778f", size = 170827, upload-time = "2026-10-06T08:51:46.093Z" },
+]
+
+[[package]]
+name = "failprint"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ansimarkup" },
+    { name = "jinja2" },
+    { name = "ptyprocess", marker = "sys_platform != 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/80/8d/f0687a2f62726b52db0785d9b7b4854344d35d5a5ecab01774701a320879/failprint-1.1.1.tar.gz", hash = "sha256:05e8d7e0484379e34bf35665789199537b32e79ef5a474de5463ed1ee451ddba", size = 52712, upload-time = "2026-10-06T08:52:01.734Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/12/e13177affa0140b9651069a011e10ae9cd45c3f2f3a29a339239bf824531/failprint-1.1.1-py3-none-any.whl", hash = "sha256:7fd282942e4b43d05d3d68b35c57e7f415a7989490d9b8396b0bd0cea25b1bcb", size = 31780, upload-time = "2026-10-06T08:52:00.607Z" },
+]
+
+[[package]]
 name = "iniconfig"
 version = "2.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -186,6 +228,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/bf/db/7fc19e6f2dc92a966727031389fc2e08b558f0f25eb7403c1119ad4713cd/pluggy-1.7.0.tar.gz", hash = "sha256:d1eaa46ebb595891b860ab086b4d09c8588af65ebd4361b8e8f4bb8920b90ba8", size = 123304, upload-time = "2026-10-15T09:50:58.343Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/9e/2b38731e0fc536806f16490e1a12d7f0dc2a1235aa8cc07bcc75416a7daa/pluggy-1.7.0-py3-none-any.whl", hash = "sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec", size = 27082, upload-time = "2026-10-15T09:50:56.808Z" },
+]
+
+[[package]]
+name = "ptyprocess"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/20/e5/16ff212c1e452235a90aeb09066144d0c5a6a8c0834397e03f5224495c4e/ptyprocess-0.7.0.tar.gz", hash = "sha256:5c5d0a3b48ceee0b48485e0c26037c0acd7d29765ca3fbb5cb3831d347423220", size = 70762, upload-time = "2020-12-28T15:15:30.155Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/22/a6/858897256d0deac81a172289110f31629fc4cee19b6f01283303e18c8db3/ptyprocess-0.7.0-py2.py3-none-any.whl", hash = "sha256:4b41f3967fce3af57cc7e94b888626c18bf37a083e3651ca8feeb66d492fef35", size = 13993, upload-time = "2020-12-28T15:15:28.35Z" },
 ]
 
 [[package]]

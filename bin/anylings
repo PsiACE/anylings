@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export ANYLINGS_CALLER_DIR="$PWD"
+launcher=$(realpath -- "$0")
+cd -- "$(dirname -- "$launcher")/.."
+
+if (( $# == 0 )); then
+  set -- --list
+fi
+exec "$HOME/.local/bin/mise" exec -- uv run --locked --managed-python --no-dev python -m duty "$@"

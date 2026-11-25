@@ -2,7 +2,10 @@
 name = "anylings"
 version = "0.1.0"
 requires-python = ">=3.13,<3.14"
-dependencies = ["ansible-core==2.20.7"]
+dependencies = [
+    "ansible-core==2.20.7",
+    "duty==1.10.1",
+]
 
 [dependency-groups]
 dev = [

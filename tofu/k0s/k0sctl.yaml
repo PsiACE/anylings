@@ -10,3 +10,7 @@ spec:
       noTaints: true
   k0s:
     version: v1.35.10+k0s.1
+    config:
+      spec:
+        storage:
+          type: kine

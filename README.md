@@ -42,3 +42,16 @@ sudo k0s kubectl get nodes
 
 OpenTofu runs k0sctl locally when the node config changes. No SSH is needed.
 The state tracks the config, not host drift. `tofu destroy` does not remove k0s.
+
+The controller stores cluster state in Kine/SQLite. This setup supports remote
+workers, but not additional controllers. Use it for a fresh cluster; it does
+not migrate an existing etcd datastore.
+
+For remote workers, set `spec.api.address` in the embedded k0s config if the
+auto-detected IP is not reachable over the private network. Allow Kubernetes
+and CNI traffic on that network, including pod access to Konnectivity.
+
+Use `k0s backup` for cluster state. On a fresh host, use
+`k0s restore --config-out=/etc/k0s/k0s.yaml <archive>` and start the controller
+with the restored config. Keep backups private and off-machine. Back up
+persistent volume data separately.

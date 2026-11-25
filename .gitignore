@@ -1,0 +1,9 @@
+.tools/
+.venv/
+.terraform/
+*.tfstate*
+*.tfplan
+*.tfvars
+*.tfvars.json
+.env
+kubeconfig

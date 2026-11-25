@@ -44,6 +44,6 @@ configMaps:
                     groups:
                       - links:
                           - title: Argo CD
-                            url: https://localhost:8081
+                            url: /argocd
                           - title: anylings on GitHub
                             url: https://github.com/PsiACE/anylings

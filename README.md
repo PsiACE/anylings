@@ -4,51 +4,28 @@ A personal cloud on Fedora Workstation.
 
 ## Layout
 
-- `infra/`: prepare Fedora, then provision k0s with OpenTofu.
+- `infra/`: prepare Fedora; provision k0s and optional Cloudflare access.
 - `platform/`: seed Argo CD once; it then manages itself and the ApplicationSet.
 - `apps/`: one Helm values file per app using the shared `app-template` chart.
 - `tests/`: smoke tests for a running test cluster.
 
-## Tools
+## Install
 
-On Fedora 45 x86_64, run this as your login user:
-
-```sh
-./infra/bootstrap-tools.sh
-~/.local/bin/mise exec -- tofu version
-~/.local/bin/mise exec -- k0sctl version
-~/.local/bin/mise exec -- kubectl version --client
-~/.local/bin/mise exec -- uv run --locked ansible-playbook --version
-```
-
-The official installer puts mise in `~/.local/bin`. No shell setup is needed.
-
-No system packages are installed. This step does not start a cluster.
-
-## Fedora
-
-After bootstrapping the tools, run:
+On a fresh Fedora 45 Workstation (x86_64), clone this repository after the
+manifests are on GitHub `main`. Run as your login user with sudo access:
 
 ```sh
-~/.local/bin/mise exec -- uv run --locked ansible-playbook -i localhost, --ask-become-pass infra/fedora/fedora.yml
+./install.sh
 ```
 
-The playbook enables firewalld and IPv4 forwarding for pod networking. It
-leaves SELinux unchanged. It does not install k0s or touch storage.
+The installer sets up locked tools, prepares Fedora, provisions one k0s node,
+and waits for Argo CD to take over. You can rerun it without reseeding Argo CD.
+No `dnf`, Git credentials, or cloud credentials are needed.
 
 ## k0s
 
-On the prepared Fedora host, with sudo access:
-
-```sh
-sudo -v
-~/.local/bin/mise exec -- tofu -chdir=infra/k0s init
-~/.local/bin/mise exec -- tofu -chdir=infra/k0s apply
-sudo k0s kubectl get nodes
-```
-
-OpenTofu runs k0sctl locally when the node config changes. No SSH is needed.
-The state tracks the config, not host drift. `tofu destroy` does not remove k0s.
+OpenTofu runs k0sctl locally. Its state tracks the config, not host drift.
+`tofu destroy` does not remove k0s.
 
 The controller stores cluster state in Kine/SQLite. This setup supports remote
 workers, but not additional controllers. Use it for a fresh cluster; it does
@@ -65,16 +42,6 @@ persistent volume data separately.
 
 ## Argo CD
 
-Once the manifests are on `main`, seed Argo CD from that checkout:
-
-```sh
-sudo k0s kubectl kustomize platform/argocd/install | sudo k0s kubectl apply --server-side -f -
-sudo k0s kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=60s
-sudo k0s kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=180s
-sudo k0s kubectl apply -f platform/argocd/self.yaml
-sudo k0s kubectl -n argocd get applications
-```
-
 Argo CD syncs `platform/argocd/`, including its own Application and the
 ApplicationSet. Add `apps/<name>.yaml` to deploy an app in namespace `<name>`.
 Automatic sync and self-heal are on; automatic pruning is off. No Git
@@ -87,16 +54,18 @@ in separate terminals on the machine with your browser and cluster access:
 
 ```sh
 sudo k0s kubectl -n glance port-forward svc/glance 8088:8080
-sudo k0s kubectl -n argocd port-forward svc/argocd-server 8081:443
+sudo k0s kubectl -n argocd port-forward svc/argocd-server 8081:80
 ```
 
-Open <http://localhost:8088>. The Argo CD bookmark uses
-<https://localhost:8081> and requires the second port-forward.
+Open Glance at <http://localhost:8088> and Argo CD at
+<http://localhost:8081/argocd/>. The relative bookmark works when both share
+one hostname. See [Cloudflare access](docs/cloudflare.md) for optional remote
+access with 1Password.
 
 ## Test
 
-On the test cluster after seeding Argo CD:
+On the test cluster, authenticate with `sudo -v` if needed, then run:
 
 ```sh
-./tests/gitops-smoke.sh sudo k0s kubectl
+~/.local/bin/mise exec -- uv run --locked pytest
 ```

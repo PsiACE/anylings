@@ -1,0 +1,18 @@
+controllers:
+  main:
+    replicas: 0 # Set to 1 after injecting the tunnel token.
+    pod:
+      automountServiceAccountToken: false
+    containers:
+      main:
+        image:
+          repository: docker.io/cloudflare/cloudflared
+          tag: 2026.11.2
+        args: [tunnel, --no-autoupdate, --disable-path-normalization=false, run, --token-file, /etc/cloudflared/token]
+persistence:
+  token:
+    type: secret
+    name: cloudflared-token
+    globalMounts:
+      - path: /etc/cloudflared
+        readOnly: true

@@ -3,3 +3,8 @@ name = "anylings"
 version = "0.1.0"
 requires-python = ">=3.13,<3.14"
 dependencies = ["ansible-core==2.20.7"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

@@ -8,4 +8,4 @@ curl -fsSL https://mise.run | \
 
 "$mise" trust mise.toml
 "$mise" install --locked
-"$mise" exec -- uv sync --locked --managed-python
+"$mise" exec -- uv sync --locked --managed-python --no-dev

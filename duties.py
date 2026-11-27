@@ -7,9 +7,7 @@ from scripts.argocd import apply_argocd, status_argocd, ui_argocd
 from scripts.cloudflare import (
     apply_cloudflare,
     configure_cloudflare,
-    connect_cloudflare,
     plan_cloudflare,
-    rotate_cloudflare,
     status_cloudflare,
 )
 from scripts.common import ROOT, authorize

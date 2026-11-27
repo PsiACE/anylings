@@ -1,10 +1,9 @@
 import os
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 from duty import duty
 
-from .common import ROOT, authorize, kubectl, tofu
+from .common import ROOT, kubectl, tofu
 
 CLOUDFLARE = ROOT / "infra" / "cloudflare"
 CONNECTOR = ("-n", "cloudflared")
@@ -45,36 +44,8 @@ def apply_cloudflare(ctx):
 
 @duty
 def status_cloudflare(ctx):
-    """Show the local Cloudflare connector."""
-    kubectl(ctx, *CONNECTOR, "get", "deployment/cloudflared", capture=False)
-
-
-@duty
-def connect_cloudflare(ctx, reference):
-    """Save the Cloudflare connector token as a Kubernetes Secret."""
-    authorize(ctx)
-    token_value = ctx.run(
-        ["op", "read", "--no-newline", reference],
-        capture="stdout", silent=True, allow_overrides=False,
+    """Show the Cloudflare connector and tunnel token sync status."""
+    kubectl(
+        ctx, *CONNECTOR, "get", "deployment/cloudflared", "externalsecret/cloudflared-token",
+        "--ignore-not-found", capture=False,
     )
-    if not token_value:
-        raise SystemExit("The 1Password connector token is empty.")
-    with NamedTemporaryFile(mode="w", encoding="utf-8") as token:
-        token.write(token_value)
-        token.flush()
-        manifest = kubectl(
-            ctx, *CONNECTOR, "create", "secret", "generic", "cloudflared-token",
-            f"--from-file=token={token.name}", "--dry-run=client", "-o", "yaml",
-            capture="stdout", silent=True, allow_overrides=False,
-        )
-        kubectl(
-            ctx, *CONNECTOR, "apply", "--server-side", "-f", "-",
-            stdin=manifest, capture="stdout", allow_overrides=False,
-        )
-
-
-@duty
-def rotate_cloudflare(ctx, reference):
-    """Update the connector token and restart the connector."""
-    connect_cloudflare(ctx, reference)
-    kubectl(ctx, *CONNECTOR, "rollout", "restart", "deployment/cloudflared")

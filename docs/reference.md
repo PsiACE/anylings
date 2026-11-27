@@ -20,7 +20,7 @@ the host and the cluster — and deliberately does not touch Cloudflare.
 | Path | Purpose |
 | --- | --- |
 | `infra/` | Host, k0s, and optional Cloudflare configuration |
-| `platform/` | Argo CD chart and GitOps bootstrap |
+| `platform/` | Argo CD, local storage, and GitOps platform components |
 | `apps/` | One Helm values file per workload |
 | `bin/`, `duties.py`, `scripts/` | CLI entry point, workflow definitions, and component tasks |
 | `tests/` | Live-cluster smoke tests |

@@ -24,6 +24,13 @@ If you edit Argo CD itself — its chart, values, or the ApplicationSet — do i
 through Git as well. Argo CD re-applies `platform/argocd/` from `main`; don't
 tamper with it via `helm upgrade` or `helm uninstall`.
 
+## Persistent storage
+
+The default `StorageClass` is `nvme-fast`, backed by Rancher
+`local-path-provisioner` at `/var/lib/anylings/local-path`
+(`WaitForFirstConsumer`, `Delete` reclaim policy). Workloads that request a PVC
+without specifying a class bind to `nvme-fast` automatically.
+
 ## Open local UIs
 
 Both services are reachable locally through a port forward. Run each in its own

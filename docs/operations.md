@@ -15,9 +15,9 @@ anylings apply-host
 ## Sync dotfiles
 
 Minimal user dotfiles for Bash (`.bashrc`, `.bash_profile`), Git (`.gitconfig`,
-with per-machine identity in `~/.gitconfig.local`), and global `mise` (Node 24
-with `.nvmrc`/`.node-version` support) live in `dotfiles/` and are applied with
-chezmoi:
+with per-machine identity in `~/.gitconfig.local`), and global `mise`
+(`.nvmrc`/`.node-version` support on demand, without a global Node install) live
+in `dotfiles/` and are applied with chezmoi:
 
 ```sh
 anylings diff-dotfiles

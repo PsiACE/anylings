@@ -13,6 +13,7 @@ from scripts.cloudflare import (
     status_cloudflare,
 )
 from scripts.common import ROOT, authorize
+from scripts.dotfiles import apply_dotfiles, diff_dotfiles
 from scripts.glance import ui_glance
 from scripts.host import apply_host
 from scripts.k0s import apply_k0s, backup_k0s, restore_k0s, status_k0s

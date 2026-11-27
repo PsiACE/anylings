@@ -1,0 +1,28 @@
+if [[ -f /etc/bashrc ]]; then
+    . /etc/bashrc
+fi
+
+if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
+    PATH="$HOME/bin:$PATH"
+fi
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    PATH="$HOME/.local/bin:$PATH"
+fi
+export PATH
+
+for bashrc in "$HOME"/.bashrc.d/*; do
+    if [[ -f "$bashrc" ]]; then
+        . "$bashrc"
+    fi
+done
+unset bashrc
+
+if command -v mise >/dev/null 2>&1; then
+    eval "$(mise activate bash)"
+elif [[ -x "$HOME/.local/bin/mise" ]]; then
+    eval "$("$HOME/.local/bin/mise" activate bash)"
+fi
+
+if [[ -f "$HOME/.cargo/env" ]]; then
+    . "$HOME/.cargo/env"
+fi

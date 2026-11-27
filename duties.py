@@ -16,6 +16,7 @@ from scripts.common import ROOT, authorize
 from scripts.glance import ui_glance
 from scripts.host import apply_host
 from scripts.k0s import apply_k0s, backup_k0s, restore_k0s, status_k0s
+from scripts.secrets import connect_1password, status_secrets
 
 
 @duty(pre=[apply_host, apply_k0s, apply_argocd])

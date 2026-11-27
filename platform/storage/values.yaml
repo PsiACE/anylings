@@ -1,0 +1,19 @@
+storageClass:
+  name: nvme-fast
+  defaultClass: true
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+  provisionerName: rancher.io/local-path
+
+nodePathMap:
+  - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+    paths:
+      - /var/lib/anylings/local-path
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi

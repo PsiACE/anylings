@@ -12,6 +12,20 @@ example after a package or kernel change — run:
 anylings apply-host
 ```
 
+## Sync dotfiles
+
+Minimal user dotfiles for Bash (`.bashrc`, `.bash_profile`), Git (`.gitconfig`,
+with per-machine identity in `~/.gitconfig.local`), and global `mise`
+(`.nvmrc`/`.node-version` support on demand, without a global Node install) live
+in `dotfiles/` and are applied with chezmoi:
+
+```sh
+anylings diff-dotfiles
+anylings apply-dotfiles
+```
+
+`anylings install` does not apply dotfiles automatically.
+
 ## Deploy an app
 
 Adding a workload is a Git operation, not a CLI one. Drop an

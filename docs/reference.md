@@ -10,6 +10,7 @@ the host and the cluster — and deliberately does not touch Cloudflare.
 | Task | Commands |
 | --- | --- |
 | Host and cluster | `apply-host`, `apply-k0s`, `apply-argocd`, `install` |
+| Dotfiles | `diff-dotfiles`, `apply-dotfiles` |
 | Status and UI | `status-k0s`, `status-argocd`, `ui-glance`, `ui-argocd` |
 | Backup | `backup-k0s <directory>`, `restore-k0s <archive>` |
 | Remote access | `configure-cloudflare`, `plan-cloudflare`, `apply-cloudflare`, `connect-cloudflare <reference>`, `rotate-cloudflare <reference>`, `status-cloudflare` |
@@ -20,6 +21,7 @@ the host and the cluster — and deliberately does not touch Cloudflare.
 | Path | Purpose |
 | --- | --- |
 | `infra/` | Host, k0s, and optional Cloudflare configuration |
+| `dotfiles/` | Minimal Bash, Git, and mise dotfiles managed by chezmoi |
 | `platform/` | Argo CD chart and GitOps bootstrap |
 | `apps/` | One Helm values file per workload |
 | `bin/`, `duties.py`, `scripts/` | CLI entry point, workflow definitions, and component tasks |

@@ -35,6 +35,7 @@ workstation, and Cloudflare state stays local and off-machine.
 | [Glance](https://github.com/glanceapp/glance) | Start page for the homelab |
 | [Cloudflare](https://developers.cloudflare.com/cloudflare-one/) | Optionally publishes Glance and Argo CD behind Access |
 | [1Password CLI](https://www.1password.dev/cli/) | Reads deployment credentials on demand |
+| [chezmoi](https://www.chezmoi.io/) | Applies minimal user dotfiles |
 | [mise](https://mise.jdx.dev/) | Installs the locked toolchain |
 | [uv](https://docs.astral.sh/uv/) | Manages Python and locked dependencies |
 | [Duty](https://pawamoy.github.io/duty/) | Runs the `anylings` CLI |

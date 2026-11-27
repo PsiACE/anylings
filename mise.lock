@@ -61,3 +61,14 @@ checksum = "sha256:e73868ab8abaca15d3c974dcf6a5e878860d6f2212867433aa3d8f2b43a49
 checksum_source = "mise-versions"
 url = "https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.tar.gz"
 url_api = "https://api.github.com/repos/opentofu/opentofu/releases/assets/354856986"
+
+[[tools."aqua:twpayne/chezmoi"]]
+version = "2.73.0"
+backend = "aqua:twpayne/chezmoi"
+specifiers = ["2.73.0"]
+
+[tools."aqua:twpayne/chezmoi"."platforms.linux-x64"]
+checksum = "sha256:b597729b687af4488a848240134cb633de8ca0f04e0d26d48f400ee2ac338ffa"
+url = "https://github.com/twpayne/chezmoi/releases/download/v2.73.0/chezmoi_2.73.0_linux-glibc_amd64.tar.gz"
+url_api = "https://api.github.com/repos/twpayne/chezmoi/releases/assets/596270983"
+provenance = "cosign"

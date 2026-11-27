@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: local-path-provisioner
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: default
+  sources:
+    - repoURL: https://github.com/rancher/local-path-provisioner.git
+      targetRevision: v0.0.37
+      path: deploy/chart/local-path-provisioner
+      helm:
+        valueFiles:
+          - $values/platform/storage/values.yaml
+    - repoURL: https://github.com/PsiACE/anylings.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

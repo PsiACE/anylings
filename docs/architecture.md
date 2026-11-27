@@ -32,6 +32,7 @@ workstation, and Cloudflare state stays local and off-machine.
 | [k0s](https://k0sproject.io/) | Kubernetes with Kine/SQLite |
 | [Helm](https://helm.sh/) | Seeds Argo CD; the shared app chart deploys workloads |
 | [Argo CD](https://argo-cd.readthedocs.io/) | Reconciles itself and the apps from Git |
+| [External Secrets Operator](https://external-secrets.io/) | Syncs 1Password secrets into Kubernetes via `ClusterSecretStore` |
 | [Glance](https://github.com/glanceapp/glance) | Start page for the homelab |
 | [Cloudflare](https://developers.cloudflare.com/cloudflare-one/) | Optionally publishes Glance and Argo CD behind Access |
 | [1Password CLI](https://www.1password.dev/cli/) | Reads deployment credentials on demand |

@@ -24,6 +24,17 @@ If you edit Argo CD itself — its chart, values, or the ApplicationSet — do i
 through Git as well. Argo CD re-applies `platform/argocd/` from `main`; don't
 tamper with it via `helm upgrade` or `helm uninstall`.
 
+## Connect 1Password secrets
+
+External Secrets Operator reconciles a `ClusterSecretStore` named `onepassword`
+pointing at the `anylings` 1Password vault. `anylings install` converges without
+credentials; connect a 1Password Service Account token when ready:
+
+```sh
+anylings connect-1password 'op://vault/item/credential'
+anylings status-secrets
+```
+
 ## Open local UIs
 
 Both services are reachable locally through a port forward. Run each in its own

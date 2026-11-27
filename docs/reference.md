@@ -12,7 +12,7 @@ the host and the cluster — and deliberately does not touch Cloudflare.
 | Host and cluster | `apply-host`, `apply-k0s`, `apply-argocd`, `install` |
 | Status and UI | `status-k0s`, `status-argocd`, `ui-glance`, `ui-argocd` |
 | Backup | `backup-k0s <directory>`, `restore-k0s <archive>` |
-| Remote access | `configure-cloudflare`, `plan-cloudflare`, `apply-cloudflare`, `connect-cloudflare <reference>`, `rotate-cloudflare <reference>`, `status-cloudflare` |
+| Remote access | `configure-cloudflare`, `plan-cloudflare`, `apply-cloudflare`, `status-cloudflare` |
 | Credentials and tests | `sign-in-1password`, `test` |
 
 ## Repository layout

@@ -37,15 +37,15 @@ and resolve the API token only for OpenTofu.
 
 ## Connect the cluster
 
-Once Argo CD has created the `cloudflared` namespace, save the connector token
-in 1Password and point the cluster at it:
+Store the connector token in the 1Password `anylings` vault as
+`cloudflare-tunnel/credential`, and make sure External Secrets Operator is
+connected to 1Password (`anylings connect-1password`). Set `replicas: 1` in
+`apps/cloudflared.yaml` and let Argo CD and ESO sync `cloudflared-token`.
 
-```sh
-anylings connect-cloudflare 'op://vault/item/credential'
-```
+To rotate the token later, update `cloudflare-tunnel/credential` in 1Password;
+ESO refreshes `cloudflared-token` within an hour, and restarting
+`deployment/cloudflared` loads the new token.
 
-Set `replicas: 1` in `apps/cloudflared.yaml` and let Argo CD sync. To rotate
-the token later, update the 1Password item and run
-`anylings rotate-cloudflare` with the same reference.
-`anylings status-cloudflare` checks the local Deployment only — it does not
-prove the public route works. Verify `/` and `/argocd` through Access.
+`anylings status-cloudflare` checks the local Deployment and ExternalSecret
+only — it does not prove the public route works. Verify `/` and `/argocd`
+through Access.

@@ -1,6 +1,6 @@
 controllers:
   main:
-    replicas: 0 # Set to 1 after injecting the tunnel token.
+    replicas: 0 # Set to 1 after configuring Cloudflare and connecting 1Password.
     pod:
       automountServiceAccountToken: false
     containers:
@@ -8,7 +8,45 @@ controllers:
         image:
           repository: docker.io/cloudflare/cloudflared
           tag: 2026.11.2
-        args: [tunnel, --no-autoupdate, --disable-path-normalization=false, run, --token-file, /etc/cloudflared/token]
+        args:
+          - tunnel
+          - --no-autoupdate
+          - --disable-path-normalization=false
+          - --metrics
+          - 0.0.0.0:2000
+          - run
+          - --token-file
+          - /etc/cloudflared/token
+        probes:
+          readiness:
+            enabled: true
+            type: HTTP
+            path: /ready
+            port: 2000
+          liveness:
+            enabled: true
+            type: HTTP
+            path: /ready
+            port: 2000
+            spec:
+              initialDelaySeconds: 30
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 128Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
 persistence:
   token:
     type: secret
@@ -16,3 +54,23 @@ persistence:
     globalMounts:
       - path: /etc/cloudflared
         readOnly: true
+rawResources:
+  token:
+    forceRename: cloudflared-token
+    manifest:
+      apiVersion: external-secrets.io/v1
+      kind: ExternalSecret
+      metadata:
+        namespace: "{{ .Release.Namespace }}"
+      spec:
+        refreshInterval: 1h
+        secretStoreRef:
+          kind: ClusterSecretStore
+          name: onepassword
+        target:
+          name: cloudflared-token
+          creationPolicy: Owner
+        data:
+          - secretKey: token
+            remoteRef:
+              key: cloudflare-tunnel/credential
